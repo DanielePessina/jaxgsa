@@ -8,8 +8,17 @@ export interface FileUploadProps {
   label: string;
   hint?: string;
   disabled?: boolean;
-  onLoaded: (parsed: ParsedCsv) => void;
+  /**
+   * Called with the parsed file. Throw to reject it: the error message goes to
+   * `onError` and the success state is never shown.
+   */
+  onLoaded: (parsed: ParsedCsv, file: File) => void;
   onError: (message: string) => void;
+  /**
+   * What the parent actually holds for this slot. When set (even to null) it
+   * replaces the internal file label, so the check mark follows the real state.
+   */
+  status?: string | null;
   exampleLabel?: string;
   onExample?: () => void;
   exampleDisabled?: boolean;
@@ -26,12 +35,14 @@ export function FileUpload({
   disabled,
   onLoaded,
   onError,
+  status,
   exampleLabel,
   onExample,
   exampleDisabled,
 }: FileUploadProps) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const [fileLabel, setFileLabel] = useState<string | null>(null);
+  const [ownLabel, setOwnLabel] = useState<string | null>(null);
+  const fileLabel = status === undefined ? ownLabel : status;
   const [dragging, setDragging] = useState(false);
 
   const handleFile = async (file: File | undefined) => {
@@ -39,10 +50,12 @@ export function FileUpload({
 
     try {
       const parsed = await parseUpload(file);
-      setFileLabel(`${file.name} · ${parsed.rows.length} rows × ${parsed.headers.length} cols`);
-      onLoaded(parsed);
+
+      // Validation runs inside onLoaded. The success label shows only after it passes.
+      onLoaded(parsed, file);
+      setOwnLabel(`${file.name} · ${parsed.rows.length} rows × ${parsed.headers.length} cols`);
     } catch (err) {
-      setFileLabel(null);
+      setOwnLabel(null);
       onError(err instanceof Error ? err.message : String(err));
     }
   };
@@ -55,6 +68,7 @@ export function FileUpload({
           type="file"
           accept=".csv,.parquet,.pq,text/csv,application/vnd.apache.parquet"
           className="hidden"
+          aria-label={label}
           disabled={disabled}
           onChange={(e) => {
             void handleFile(e.target.files?.[0]);

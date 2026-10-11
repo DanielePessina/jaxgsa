@@ -32,7 +32,7 @@ import jax.numpy as jnp
 import jaxgsa
 from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=5000, seed=42))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n_samples=5000, seed=42))
 Y = evaluate(X)
 
 result = jaxgsa.borgonovo.analyze(PROBLEM, X, Y)
@@ -46,7 +46,7 @@ print("delta_conf:", result.delta_conf)
 jaxgsa.borgonovo.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=5000 runs, T=1 x K=1 output slice
     invalid: none found in 5000 rows (policy 'raise')
   timing:
@@ -82,8 +82,7 @@ index adds, in one concrete number.
 The verbose block above the arrays comes free, because `verbose=True` is the
 1.0 default on every `analyze`. Pass `verbose=False` to silence it. Note
 `delta_conf: None`: the default is `n_bootstrap=0`, so no intervals were
-computed. That default matters more than it looks, as the next section
-explains.
+computed. The next section shows how to add them.
 
 ## Given data, no new model runs
 
@@ -122,7 +121,7 @@ a constant column, whose exact answer is `delta = S1 = 0`. Categorical
 *inputs* stay supported; the limit applies to the output only.
 :::
 
-## The bias_correct tri-state
+## The bias_correct flag
 
 The plug-in delta estimate is biased upward, and the reason is worth stating
 because it explains why the correction only goes one way. A delta estimate is
@@ -132,20 +131,22 @@ identical densities estimated from finite samples separate; two different
 ones do not converge. So the noise floor is a positive number added to every
 index.
 
-`bias_correct` has three states, and what the default does depends on
-`n_bootstrap`.
+`bias_correct` is a plain bool. It is `False` by default. The two values do
+what they say:
 
-`None` (the default) applies the Plischke correction `2*d_hat - mean(d_boot)`
-whenever there are replicates to apply it with, which means whenever
-`n_bootstrap > 0`, and does nothing when `n_bootstrap == 0`. The first
-default call per process that resolves `None` to the correction warns:
+- `False` reports the plug-in estimate, always. Adding `n_bootstrap` adds
+  intervals and does not change `delta`.
+- `True` reports the Plischke correction `2*d_hat - mean(d_boot)`. It needs
+  replicates, so it raises `ValueError` when `n_bootstrap` is 0.
+
+Start with the default and add a bootstrap:
 
 ```python
 result = jaxgsa.borgonovo.analyze(
     PROBLEM, X, Y,
     n_bootstrap=200, conf_level=0.95, key=jax.random.key(0),
 )
-print("delta (bias-corrected):", result.delta)
+print("delta (plug-in):", result.delta)
 print("95% CI lower:", result.delta_conf[0])
 print("95% CI upper:", result.delta_conf[1])
 print("S1:", result.S1)
@@ -153,80 +154,57 @@ print("S1 CI:", result.S1_conf)
 ```
 
 ```
-JaxgsaWarning: jaxgsa.borgonovo: bias_correct was left at its default (None)
-and n_bootstrap > 0, so the Plischke bias correction IS applied: the delta
-reported is 2*d_hat - mean(d_boot), not the plug-in estimate. Pass
-bias_correct=True to keep this and silence this warning, or
-bias_correct=False for the uncorrected delta. This warning is shown once per
-process.
-
 jaxgsa.borgonovo.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=5000 runs, T=1 x K=1 output slice
     invalid: none found in 5000 rows (policy 'raise')
   timing:
-    estimator (includes compile on the first call): 1.412 s
+    estimator (includes compile on the first call): 1.227 s
     slice_chunk_size: 1 (resolved from the memory budget)
     grid_size: 100
     bandwidth: silverman
   results: top 3 of 3 parameters by delta
-    1. x2  delta=0.3487  [0.3403, 0.3583]
-    2. x1  delta=0.2041  [0.1952, 0.2132]
-    3. x3  delta=0.151  [0.1432, 0.1606]
-delta (bias-corrected): [0.20413923 0.3486844  0.15101331]
-95% CI lower: [0.19519821 0.34033078 0.14315626]
-95% CI upper: [0.21322598 0.35825428 0.16055942]
-S1: [0.30810872 0.43677974 0.00358097]
+    1. x2  delta=0.3516  [0.3449, 0.3629]
+    2. x1  delta=0.2106  [0.2079, 0.226]
+    3. x3  delta=0.1567  [0.1529, 0.1703]
+delta (plug-in): [0.21057463 0.3515927  0.15670761]
+95% CI lower: [0.20792328 0.3449311  0.15285581]
+95% CI upper: [0.22595103 0.3628546  0.17025897]
+S1: [0.3081087  0.43677974 0.00358097]
 S1 CI: [[0.29423395 0.41606882 0.00295663]
  [0.32919294 0.45707515 0.01367938]]
 ```
 
-The warning exists because adding `n_bootstrap=200` to a default call did two
-things, not one. It added intervals, and it silently changed the reported
-`delta` from the plug-in estimate to the corrected one. The first run printed
-0.2106 for x1; this one prints 0.2041 on the same data. Compare that with a
-run that keeps the bootstrap and refuses the correction:
+`delta` matches the first run exactly: 0.2106 for x1. The estimator is
+deterministic given the data, and the bootstrap only adds the interval. Now
+ask for the correction on the same replicates:
 
 ```python
-r_plug = jaxgsa.borgonovo.analyze(
-    PROBLEM, X, Y, n_bootstrap=200, bias_correct=False,
+r_corr = jaxgsa.borgonovo.analyze(
+    PROBLEM, X, Y, n_bootstrap=200, bias_correct=True,
     key=jax.random.key(0), verbose=False,
 )
-r_none = jaxgsa.borgonovo.analyze(PROBLEM, X, Y, n_bootstrap=0, verbose=False)
-print("plug-in delta (bias_correct=False):", r_plug.delta)
-print("plug-in delta (n_bootstrap=0):     ", r_none.delta)
+print("delta (bias_correct=True):", r_corr.delta)
+print("shift:", r_corr.delta - result.delta)
 ```
 
 ```
-plug-in delta (bias_correct=False): [0.21057463 0.3515927  0.15670761]
-plug-in delta (n_bootstrap=0):      [0.21057463 0.3515927  0.15670761]
+delta (bias_correct=True): [0.20413923 0.3486844  0.15101331]
+shift: [-0.00643539 -0.00290829 -0.0056943 ]
 ```
 
-Both plug-in runs reproduce the first run's numbers exactly, which is the
-point: the estimator is deterministic given the data, and the only thing that
-moved `delta` was the correction. It moved every index down, by 0.0064,
-0.0029 and 0.0057. Downward on every input, as the upward-bias argument
-predicts.
+The correction moved every index down, by 0.0064, 0.0029 and 0.0057.
+Downward on every input, as the upward-bias argument predicts.
 
-So, the three states:
-
-`True` asks for the correction explicitly. Use it when the value matters and
-not only the ranking, and pair it with `n_bootstrap >= 100`. It warns if
-`n_bootstrap` is 0, because the correction cannot be delivered without
-replicates.
-
-`False` reports the plug-in estimate, biased upward, and keeps the intervals.
-Use it when you want the raw estimator, or when you are comparing against
-another implementation that does not correct.
-
-`None` does the right thing for the `n_bootstrap` you chose and warns once
-per process. It exists because a plain `bias_correct=True` default next to
-`n_bootstrap=0` would be a contradiction that warned on every default call.
+Use `bias_correct=True` when the value matters and not only the ranking.
+Pair it with `n_bootstrap >= 100`. Keep `False` when you want the raw
+estimator, or when you compare against another implementation that does not
+correct.
 
 `S1` is never bias-corrected, matching SALib. That is why `S1` is identical
-across all three runs above.
+in the runs above.
 
 One consequence to expect: the corrected estimate, and its interval bounds,
 can dip marginally below 0 for a weak input at small N. Subtracting an
@@ -245,7 +223,7 @@ from jaxgsa.benchmarks import gaussian_linear
 
 print("analytical:", gaussian_linear.ANALYTICAL_DELTA)
 for n in (500, 2000, 8000, 32000):
-    Xn = jnp.asarray(jaxgsa.sampling.monte_carlo(gaussian_linear.PROBLEM, n=n, seed=42))
+    Xn = jnp.asarray(jaxgsa.sampling.monte_carlo(gaussian_linear.PROBLEM, n_samples=n, seed=42))
     Yn = gaussian_linear.evaluate(Xn)
     r = jaxgsa.borgonovo.analyze(
         gaussian_linear.PROBLEM, Xn, Yn,
@@ -292,7 +270,7 @@ setting entirely and uses one class per level.
 `Y` shaped `(N, K)` gives indices shaped `(K, D)`.
 
 ```python
-X3 = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=3000, seed=42))
+X3 = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n_samples=3000, seed=42))
 Y1 = evaluate(X3)
 Y2 = jnp.sum(X3**2, axis=1)
 

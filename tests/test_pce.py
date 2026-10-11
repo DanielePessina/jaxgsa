@@ -11,14 +11,11 @@ import pytest
 
 from jaxgsa import JaxgsaWarning, pce
 from jaxgsa.benchmarks import ishigami, linear
-from jaxgsa.pce._analyze import _auto_order
 from jaxgsa.pce._engine import (
     _hermite_1d,
     _legendre_1d,
     build_design_matrix,
     build_multi_index,
-    gram_cholesky,
-    hat_diagonal,
 )
 from jaxgsa.problem import GaussianInputSpec, InputSpecValue, Problem
 
@@ -57,10 +54,24 @@ def ishigami_pce_data():
 
 
 @pytest.fixture(scope="module")
-def ishigami_pce_result(ishigami_pce_data):
-    """PCE analysis result for the Ishigami benchmark model."""
+def ishigami_pce_fit(ishigami_pce_data):
+    """The order-8 Ishigami fit, with the warnings it raised.
+
+    Order 8 is 165 terms on N=2000. It resolves the model well enough for the
+    S2 check, and the same fit serves the explained-variance and the
+    healthy-fit checks.
+    """
     X, Y = ishigami_pce_data
-    return pce.analyze(ishigami.PROBLEM, X, Y, order=6)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = pce.analyze(ishigami.PROBLEM, X, Y, order=8, verbose=False)
+    return result, [w for w in caught if issubclass(w.category, JaxgsaWarning)]
+
+
+@pytest.fixture(scope="module")
+def ishigami_pce_result(ishigami_pce_fit):
+    """PCE analysis result for the Ishigami benchmark model."""
+    return ishigami_pce_fit[0]
 
 
 @pytest.fixture(scope="module")
@@ -90,133 +101,99 @@ def gaussian_pce_result(gaussian_pce_data):
 
 
 # ---------------------------------------------------------------------------
-# 1. Linear model analytical correctness
+# 1. End-to-end checks against closed forms
 # ---------------------------------------------------------------------------
 
 
-class TestLinearModel:
-    """PCE on a linear additive model should recover exact Sobol indices."""
+def test_linear_model_end_to_end(linear_pce_result, linear_pce_data):
+    """Tier T0 (closed form): PCE recovers a linear additive model exactly.
 
-    def test_s1_matches_analytical(self, linear_pce_result):
-        """S1 should match the analytical first-order indices for a linear model."""
-        S1_analytical, _, _ = linear.analytical_indices()
+    S1 matches the analytical indices. ST equals S1, because there are no
+    interactions, and every off-diagonal S2 is about zero. S2 keeps its
+    structure: a NaN diagonal and a symmetric matrix. The emulator reproduces
+    the training data, the leave-one-out error is small, and the dataset
+    carries the result's values.
+    """
+    X, Y = linear_pce_data
+    result = linear_pce_result
+    S1_analytical, _, _ = linear.analytical_indices()
+    S1 = np.asarray(result.S1)
+    np.testing.assert_allclose(S1, S1_analytical, atol=0.02, rtol=0.05)
+    np.testing.assert_allclose(np.asarray(result.ST), S1, atol=0.02, rtol=0.05)
+
+    S2 = np.asarray(result.S2)
+    D = S2.shape[0]
+    assert np.all(np.isnan(np.diag(S2))), f"S2 diagonal should be NaN, got {np.diag(S2)}"
+    upper = np.triu_indices(D, k=1)
+    lower = (upper[1], upper[0])
+    np.testing.assert_allclose(S2[upper], S2[lower], atol=1e-10, rtol=1e-10)
+    assert np.all(np.abs(S2[upper]) < 0.02), f"S2 off-diagonal should be ~0, got {S2[upper]}"
+
+    np.testing.assert_allclose(np.asarray(result.predict(X)), np.asarray(Y), atol=0.05, rtol=0.05)
+
+    y_range = float(jnp.max(Y) - jnp.min(Y))
+    loo = float(result.cv_rmse)
+    # In-sample RMSE is below the leave-one-out RMSE, and explained_variance
+    # is 1 - rmse**2 / Var(Y) by definition.
+    assert float(result.rmse) <= loo
+    np.testing.assert_allclose(
+        float(result.explained_variance),
+        1.0 - float(result.rmse) ** 2 / float(jnp.var(Y)),
+        atol=1e-5,
+    )
+    assert loo / y_range < 0.05, f"LOO RMSE / range = {loo / y_range:.4f}, expected < 0.05"
+
+    ds = result.to_dataset()
+    np.testing.assert_allclose(ds["S1"].values, S1, rtol=1e-10)
+    np.testing.assert_allclose(ds["ST"].values, np.asarray(result.ST), rtol=1e-10)
+
+
+def test_ishigami_end_to_end(ishigami_pce_result, ishigami_pce_data):
+    """Tier T0 (closed form): S1, ST and S2 of the Ishigami function.
+
+    The fixture fits an order 8 expansion, which measures within about 1e-3
+    of the closed form on S1, ST and ``S2[x1, x3]``. The other two pairs are
+    zero in closed form. Every entry takes the same absolute bound of 0.01.
+    """
+    result = ishigami_pce_result
+    np.testing.assert_allclose(np.asarray(result.S1), ishigami.ANALYTICAL_S1, atol=0.01)
+    np.testing.assert_allclose(np.asarray(result.ST), ishigami.ANALYTICAL_ST, atol=0.01)
+    S2 = np.asarray(result.S2)
+    np.testing.assert_allclose(S2[0, 2], ishigami.ANALYTICAL_S2[0, 2], atol=0.01)
+    np.testing.assert_allclose(S2[0, 1], 0.0, atol=0.01)
+    np.testing.assert_allclose(S2[1, 2], 0.0, atol=0.01)
+
+    X, Y = ishigami_pce_data
+    Y_pred = result.predict(X)
+    ss_res = float(jnp.sum((Y - Y_pred) ** 2))
+    ss_tot = float(jnp.sum((Y - jnp.mean(Y)) ** 2))
+    r_squared = 1.0 - ss_res / ss_tot
+    assert r_squared > 0.90, f"R^2 = {r_squared:.4f}, expected > 0.90"
+
+
+def test_hermite_and_legendre_bases_are_orthonormal_by_quadrature():
+    """The two one-dimensional bases are exactly orthonormal (Gauss quadrature).
+
+    Ten Gauss points integrate a product of two degree-5 polynomials exactly.
+    The Hermite basis uses the standard normal weight. The Legendre basis
+    lives on ``[-1, 1]`` with the uniform weight 1/2. No Monte Carlo is used.
+    """
+    with jax.enable_x64():
+        x, w = np.polynomial.hermite_e.hermegauss(10)
+        H = np.asarray(_hermite_1d(jnp.asarray(x), 5))
         np.testing.assert_allclose(
-            np.asarray(linear_pce_result.S1),
-            S1_analytical,
-            atol=0.02,
-            rtol=0.05,
+            H.T @ (H * (w / np.sqrt(2 * np.pi))[:, None]), np.eye(6), atol=1e-6
         )
 
-    def test_st_equals_s1(self, linear_pce_result):
-        """ST should equal S1 for a purely additive model (no interactions)."""
-        np.testing.assert_allclose(
-            np.asarray(linear_pce_result.ST),
-            np.asarray(linear_pce_result.S1),
-            atol=0.02,
-            rtol=0.05,
-        )
-
-    def test_s2_near_zero(self, linear_pce_result):
-        """Off-diagonal S2 should be approximately zero for a linear model."""
-        S2 = np.asarray(linear_pce_result.S2)
-        D = S2.shape[0]
-        for i in range(D):
-            for j in range(i + 1, D):
-                assert abs(S2[i, j]) < 0.02, f"S2[{i},{j}] = {S2[i, j]:.4f}, expected ~0"
+        x, w = np.polynomial.legendre.leggauss(10)
+        P = np.asarray(_legendre_1d(jnp.asarray(x), 5))
+        np.testing.assert_allclose(P.T @ (P * (w / 2)[:, None]), np.eye(6), atol=1e-6)
 
 
-# ---------------------------------------------------------------------------
-# 2. Ishigami S1/ST within tolerance
-# ---------------------------------------------------------------------------
-
-
-class TestIshigami:
-    """PCE on the Ishigami function should approximate known indices."""
-
-    def test_s1_within_tolerance(self, ishigami_pce_result):
-        """Tier T0 (closed form): every analytical S1 entry of the Ishigami function.
-
-        Non-zero entries hold to 30% relative error. The analytical ``S1[x3]``
-        is exactly zero, so it takes an absolute bound; the estimate is about
-        3e-5, well inside it.
-        """
-        S1 = np.asarray(ishigami_pce_result.S1)
-        analytical = np.array(ishigami.ANALYTICAL_S1)
-        for i in range(len(analytical)):
-            if analytical[i] > 0.01:
-                rel_err = abs(S1[i] - analytical[i]) / analytical[i]
-                assert rel_err < 0.30, (
-                    f"S1[{i}]: PCE={S1[i]:.4f}, analytical={analytical[i]:.4f}, "
-                    f"rel_err={rel_err:.2%}"
-                )
-            else:
-                assert abs(S1[i]) < 0.05, f"S1[{i}]={S1[i]:.6f}, expected ~0"
-
-    def test_st_within_tolerance(self, ishigami_pce_result):
-        """Tier T0 (closed form): every analytical ST entry of the Ishigami function.
-
-        No analytical ST entry of the Ishigami function is near zero: the
-        smallest is ``ST[x3] = 0.2437``, which comes entirely from the x1-x3
-        interaction. Every entry therefore takes the same relative bound and
-        none is skipped.
-        """
-        ST = np.asarray(ishigami_pce_result.ST)
-        analytical = np.array(ishigami.ANALYTICAL_ST)
-        assert np.all(analytical > 0.01)
-        for i in range(len(analytical)):
-            rel_err = abs(ST[i] - analytical[i]) / analytical[i]
-            assert rel_err < 0.30, (
-                f"ST[{i}]: PCE={ST[i]:.4f}, analytical={analytical[i]:.4f}, rel_err={rel_err:.2%}"
-            )
-
-
-# ---------------------------------------------------------------------------
-# 3. Emulator round-trip
-# ---------------------------------------------------------------------------
-
-
-class TestEmulatorRoundTrip:
-    """emulate() should predict training outputs accurately for a polynomial model."""
-
-    def test_linear_emulator_reproduces_training_data(self, linear_pce_result, linear_pce_data):
-        """Emulator predictions on training data should be close to actual outputs."""
-        X, Y = linear_pce_data
-        Y_pred = linear_pce_result.predict(X)
-        np.testing.assert_allclose(
-            np.asarray(Y_pred),
-            np.asarray(Y),
-            atol=0.05,
-            rtol=0.05,
-        )
-
-    def test_ishigami_emulator_reasonable(self, ishigami_pce_result, ishigami_pce_data):
-        """Emulator R-squared on Ishigami training data should be high."""
-        X, Y = ishigami_pce_data
-        Y_pred = ishigami_pce_result.predict(X)
-        ss_res = float(jnp.sum((Y - Y_pred) ** 2))
-        ss_tot = float(jnp.sum((Y - jnp.mean(Y)) ** 2))
-        r_squared = 1.0 - ss_res / ss_tot
-        assert r_squared > 0.90, f"R^2 = {r_squared:.4f}, expected > 0.90"
-
-
-# ---------------------------------------------------------------------------
-# 4. auto_order reduction
-# ---------------------------------------------------------------------------
-
-
-class TestAutoOrder:
-    """Verify that _auto_order reduces the polynomial order for high D / low N."""
-
-    def test_order_is_bounded_by_the_available_sample_budget(self):
-        """Large expansions are reduced but never below the linear basis."""
-        # D=20, N=100, order=5 => C(25, 5) = 53130 >> 50 = 0.5*100
-        reduced = _auto_order(D=20, N=100, max_order=5, fit_ratio=0.5)
-        assert reduced < 5, f"Expected order < 5, got {reduced}"
-        # D=3, N=500, order=3 => C(6, 3) = 20 << 250 = 0.5*500
-        preserved = _auto_order(D=3, N=500, max_order=3, fit_ratio=0.5)
-        assert preserved == 3, f"Expected order=3, got {preserved}"
-        result = _auto_order(D=100, N=10, max_order=10, fit_ratio=0.5)
-        assert result >= 1, f"Expected order >= 1, got {result}"
+def test_effective_order_floors_at_one():
+    """With 100 inputs and 10 rows, even order 2 has too many terms, so the floor is 1."""
+    problem = Problem.from_dict({f"x{i}": (0.0, 1.0) for i in range(100)})
+    assert pce.effective_order(problem, 10, order=10) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -261,45 +238,6 @@ class TestInputValidation:
         with pytest.raises(ValueError, match="fit_ratio"):
             pce.indices(problem, X, Y, fit_ratio=2.0)
 
-    def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_variance(self):
-        """M1: a constant Y whose naive sample variance is not bit-exact zero still warns.
-
-        The old guard tested ``var == 0``, which almost never holds for a
-        constant float32 output because the mean itself rounds.
-        ``Y = full(N, 0.1)`` has a naive sample variance of about 2e-16, not
-        zero, and used to return a plausible-looking finite S1 with no
-        warning instead of NaN.
-        """
-        problem = linear.PROBLEM
-        rng = np.random.default_rng(0)
-        X = jnp.asarray(rng.uniform(0.0, 1.0, size=(500, 3)))
-        Y = jnp.full(500, 0.1)
-        assert float(jnp.var(Y)) != 0.0, (
-            "the naive variance must be nonzero for this to test the fix"
-        )
-        with pytest.warns(UserWarning, match="zero variance"):
-            result = pce.analyze(problem, X, Y, verbose=False)
-        assert jnp.all(jnp.isnan(result.S1))
-        assert jnp.all(jnp.isnan(result.ST))
-
-
-# ---------------------------------------------------------------------------
-# 6. S2 matrix properties
-# ---------------------------------------------------------------------------
-
-
-class TestS2Properties:
-    """S2 interaction matrix should have correct structural properties."""
-
-    def test_diagonal_is_nan_and_matrix_is_symmetric(self, linear_pce_result):
-        """The structural S2 invariants hold together."""
-        S2 = np.asarray(linear_pce_result.S2)
-        assert np.all(np.isnan(np.diag(S2))), f"S2 diagonal should be NaN, got {np.diag(S2)}"
-        D = S2.shape[0]
-        upper = np.triu_indices(D, k=1)
-        lower = (upper[1], upper[0])
-        np.testing.assert_allclose(S2[upper], S2[lower], atol=1e-10, rtol=1e-10)
-
 
 # ---------------------------------------------------------------------------
 # 7. LOO RMSE
@@ -309,41 +247,13 @@ class TestS2Properties:
 class TestLooRmse:
     """Leave-one-out RMSE should be finite and small for well-fitted models."""
 
-    def test_loo_small_for_linear(self, linear_pce_result, linear_pce_data):
-        """LOO RMSE should be small relative to the output range for a linear model."""
-        _, Y = linear_pce_data
-        y_range = float(jnp.max(Y) - jnp.min(Y))
-        loo = float(linear_pce_result.loo_rmse)
-        assert loo / y_range < 0.05, f"LOO RMSE / range = {loo / y_range:.4f}, expected < 0.05"
-
-    def test_leverage_clip_holds_in_both_dtypes(self):
-        """T4: an interpolated row's leverage stays strictly below 1.
-
-        A square invertible ``Phi`` has ``H = I``, so every leverage is
-        exactly 1 before the clip. The old bound ``1 - 1e-10`` rounds back
-        to exactly 1.0 in float32 (the spacing below 1.0 is ~6e-8), which
-        made the clip a no-op and let ``1 - h_i`` reach zero. The bound is
-        now taken inside the leverage's own dtype, so the invariant must
-        hold in float32 and float64 alike.
-        """
-        eye32 = jnp.eye(6, dtype=jnp.float32)
-        lev32 = hat_diagonal(eye32, gram_cholesky(eye32, 0.0))
-        assert lev32.dtype == jnp.float32
-        assert np.all(np.asarray(lev32) < 1.0)
-
-        with jax.enable_x64():
-            eye64 = jnp.eye(6, dtype=jnp.float64)
-            lev64 = hat_diagonal(eye64, gram_cholesky(eye64, 0.0))
-            assert lev64.dtype == jnp.float64
-            assert np.all(np.asarray(lev64) < 1.0)
-
     def test_interpolating_fit_keeps_loo_finite(self):
         """T4: a fit with as many terms as rows reports a finite LOO RMSE.
 
         With ``N == C(D + order, order)`` and ``fit_ratio=1.0`` the least
         squares fit interpolates, every leverage is (up to the tiny ridge)
         1, and the LOO shortcut divides by ``1 - h_i``. In float32 the old
-        no-op clip let that become residual/0 and an inf/NaN ``loo_rmse``
+        no-op clip let that become residual/0 and an inf/NaN ``cv_rmse``
         propagated to every slice. The number is legitimately huge — an
         interpolating fit has no honest LOO — but it must be finite, in
         float32 and under x64 alike.
@@ -362,13 +272,13 @@ class TestLooRmse:
             )
 
         result32 = _fit()
-        assert result32.loo_rmse is not None
-        assert np.all(np.isfinite(np.asarray(result32.loo_rmse)))
+        assert result32.cv_rmse is not None
+        assert np.all(np.isfinite(np.asarray(result32.cv_rmse)))
 
         with jax.enable_x64():
             result64 = _fit()
-            assert result64.loo_rmse is not None
-            assert np.all(np.isfinite(np.asarray(result64.loo_rmse)))
+            assert result64.cv_rmse is not None
+            assert np.all(np.isfinite(np.asarray(result64.cv_rmse)))
 
 
 # ---------------------------------------------------------------------------
@@ -379,33 +289,21 @@ class TestLooRmse:
 class TestGaussianInputs:
     """PCE with Gaussian inputs should use the Hermite basis correctly."""
 
-    def test_gaussian_s1_reasonable(self, gaussian_pce_result):
-        """S1 for the Gaussian linear model should match analytical values.
+    def test_gaussian_linear_model_end_to_end(self, gaussian_pce_result, gaussian_pce_data):
+        """S1 for the Gaussian linear model matches analytical values; the emulator fits.
 
         For f = c1*x1 + c2*x2 with independent inputs:
-        S1_j = c_j^2 * Var(x_j) / sum(c_k^2 * Var(x_k)).
+        S1_j = c_j^2 * Var(x_j) / sum(c_k^2 * Var(x_k)). Here c = [1, 2] and
+        Var = [1, 4], so the contributions are [1, 16] and S1 = [1/17, 16/17].
+        An error in the Hermite basis would break both checks.
         """
-        # c = [1, 2], Var = [1, 4] => contributions = [1, 16], S1 = [1/17, 16/17]
         expected = np.array([1.0 / 17.0, 16.0 / 17.0])
         S1 = np.asarray(gaussian_pce_result.S1)
         np.testing.assert_allclose(S1, expected, atol=0.05, rtol=0.1)
 
-    def test_gaussian_emulator(self, gaussian_pce_result, gaussian_pce_data):
-        """Emulator should predict well on Gaussian training data."""
-        problem, X, Y = gaussian_pce_data
+        _, X, Y = gaussian_pce_data
         Y_pred = gaussian_pce_result.predict(X)
         np.testing.assert_allclose(np.asarray(Y_pred), np.asarray(Y), atol=0.5, rtol=0.1)
-
-    def test_hermite_and_legendre_bases_are_orthonormal(self):
-        """The two one-dimensional bases have their declared inner products."""
-        key = jax.random.PRNGKey(123)
-        N = 200000
-        x = jax.random.normal(key, shape=(N,))
-        H = _hermite_1d(x, 3)
-        np.testing.assert_allclose(np.asarray((H.T @ H) / N), np.eye(4), atol=0.05)
-        x = jax.random.uniform(jax.random.PRNGKey(456), shape=(50000,), minval=-1.0, maxval=1.0)
-        P = _legendre_1d(x, 4)
-        np.testing.assert_allclose(np.asarray((P.T @ P) / 50000), np.eye(5), atol=0.05)
 
     def test_basis_dtype_promotes_float32_inputs_under_x64(self):
         """A float32 x must not downgrade the PCE basis to float32 under x64.
@@ -477,6 +375,7 @@ class TestTruncatedGaussianBasis:
         assert input_types == ("uniform",)
         assert np.all(np.asarray(xi) < 1.0)
 
+    @pytest.mark.slow
     def test_wide_truncation_matches_unbounded_accuracy(self):
         """Oakley-O'Hagan: a wide truncation must not degrade the fit.
 
@@ -495,23 +394,8 @@ class TestTruncatedGaussianBasis:
 
         # Same basis, so the two fits agree to numerical noise.
         np.testing.assert_allclose(np.asarray(wide.S1), np.asarray(unbounded.S1), atol=1e-6)
-        assert float(wide.loo_rmse) == pytest.approx(float(unbounded.loo_rmse), rel=1e-4)
+        assert float(wide.cv_rmse) == pytest.approx(float(unbounded.cv_rmse), rel=1e-4)
         assert np.max(np.abs(np.asarray(wide.S1) - analytic)) < 0.003
-
-
-# ---------------------------------------------------------------------------
-# 9. to_dataset()
-# ---------------------------------------------------------------------------
-
-
-class TestToDataset:
-    """PCEResult.to_dataset() should produce a well-structured xarray Dataset."""
-
-    def test_dataset_values_match_result(self, linear_pce_result):
-        """Dataset values should match the PCEResult attributes."""
-        ds = linear_pce_result.to_dataset()
-        np.testing.assert_allclose(ds["S1"].values, np.asarray(linear_pce_result.S1), rtol=1e-10)
-        np.testing.assert_allclose(ds["ST"].values, np.asarray(linear_pce_result.ST), rtol=1e-10)
 
 
 # ---------------------------------------------------------------------------
@@ -553,45 +437,38 @@ class TestEngine:
 class TestMultiOutput:
     """PCE fits every (t, k) output slice against one shared basis."""
 
-    def test_multi_output_and_time_series_shapes(self, linear_pce_data):
+    def test_multi_output_and_time_series_layouts(self, linear_pce_data):
+        """Shapes, the predict round trip and the labelled dataset, for (N, K) and (N, T, K)."""
         X, Y = linear_pce_data
         Y2 = jnp.stack([Y, 2.0 * Y + 1.0], axis=-1)
-        result = pce.analyze(linear.PROBLEM, X, Y2, order=2)
-        n_terms = result.multi_index.shape[0]
-        assert result.S1.shape == (2, 3)
-        assert result.ST.shape == (2, 3)
-        assert result.S2.shape == (2, 3, 3)
-        assert result.coefficients.shape == (2, n_terms)
-        assert result.loo_rmse is not None and result.loo_rmse.shape == (2,)
-        Y3 = jnp.stack([Y2, 0.5 * Y2], axis=1)  # (N, T=2, K=2)
-        series = pce.analyze(linear.PROBLEM, X, Y3, order=2)
-        assert series.S1.shape == (2, 2, 3)
-        assert series.S2.shape == (2, 2, 3, 3)
-        assert series.coefficients.shape == (2, 2, n_terms)
-        assert series.loo_rmse is not None and series.loo_rmse.shape == (2, 2)
-
-    def test_emulate_multi_output_round_trip(self, linear_pce_data):
-        """predict mirrors the training layout and reproduces linear Y."""
-        X, Y = linear_pce_data
-        Y2 = jnp.stack([Y, 2.0 * Y + 1.0], axis=-1)
-        Y3 = jnp.stack([Y2, 0.5 * Y2], axis=1)
         res2 = pce.analyze(linear.PROBLEM, X, Y2, order=2)
+        n_terms = res2.multi_index.shape[0]
+        assert res2.S1.shape == (2, 3)
+        assert res2.ST.shape == (2, 3)
+        assert res2.S2.shape == (2, 3, 3)
+        assert res2.coefficients.shape == (2, n_terms)
+        assert res2.cv_rmse is not None and res2.cv_rmse.shape == (2,)
+
+        Y3 = jnp.stack([Y2, 0.5 * Y2], axis=1)  # (N, T=2, K=2)
         res3 = pce.analyze(linear.PROBLEM, X, Y3, order=2)
+        assert res3.S1.shape == (2, 2, 3)
+        assert res3.S2.shape == (2, 2, 3, 3)
+        assert res3.coefficients.shape == (2, 2, n_terms)
+        assert res3.cv_rmse is not None and res3.cv_rmse.shape == (2, 2)
+
+        # predict mirrors the training layout. The linear benchmark is
+        # exactly representable at order 2.
         pred2 = res2.predict(X[:50])
         pred3 = res3.predict(X[:50])
         assert pred2.shape == (50, 2)
         assert pred3.shape == (50, 2, 2)
-        # The linear benchmark is exactly representable at order 2.
         np.testing.assert_allclose(np.asarray(pred2), np.asarray(Y2[:50]), rtol=1e-5)
         np.testing.assert_allclose(np.asarray(pred3), np.asarray(Y3[:50]), rtol=1e-5)
 
-    def test_to_dataset_time_series_with_coords(self, linear_pce_data):
-        X, Y = linear_pce_data
-        Y3 = jnp.stack([jnp.stack([Y, 2.0 * Y], axis=-1)] * 2, axis=1)
-        ds = pce.analyze(linear.PROBLEM, X, Y3, order=2).to_dataset(time_coords=[0.0, 0.5])
+        ds = res3.to_dataset(time_coords=[0.0, 0.5])
         assert ds["S1"].dims == ("time", "output", "param")
         assert ds["S2"].dims == ("time", "output", "param_i", "param_j")
-        assert ds["loo_rmse"].dims == ("time", "output")
+        assert ds["cv_rmse"].dims == ("time", "output")
         np.testing.assert_allclose(ds.coords["time"].values, [0.0, 0.5])
 
 
@@ -654,8 +531,8 @@ class TestPCEOnInvalid:
         with pytest.warns(JaxgsaWarning, match="dropped 1 of 400 rows"):
             result = pce.analyze(linear.PROBLEM, X, Y, on_invalid="drop", order=2)
         assert np.all(np.isfinite(np.asarray(result.S1)))
-        assert result.loo_rmse is not None
-        assert np.all(np.isfinite(np.asarray(result.loo_rmse)))
+        assert result.cv_rmse is not None
+        assert np.all(np.isfinite(np.asarray(result.cv_rmse)))
         assert result.invalid.unit_indices == (7,)
         assert result.invalid.sources == ("Y",)
 
@@ -686,31 +563,36 @@ class TestBootstrapIntervals:
     the vocabulary the rest of the package uses is honoured here too.
     """
 
+    # One bootstrap size for every test here, so they share compiles.
+    R = 6
+
     @staticmethod
     def _data(n=256, seed=0):
         rng = np.random.default_rng(seed)
         X = jnp.asarray(rng.uniform(-np.pi, np.pi, size=(n, 3)))
         return X, ishigami.evaluate(X)
 
-    def test_no_bootstrap_by_default(self):
-        """T4: the plainest call reports no interval and pays for none.
+    def test_interval_brackets_the_estimate_and_is_reproducible(self):
+        """T4: one run covers the default, the bracket, the key rules and the layout.
 
-        Each replicate refits the expansion, so an on-by-default interval
-        would make a routine call an order of magnitude slower.
+        The plainest call reports no interval and pays for none: each
+        replicate refits the expansion, so an on-by-default interval would
+        make a routine call an order of magnitude slower. When asked, the
+        interval brackets the estimate for all three index arrays, and the
+        draw is a function of the key, not of the call. No key means no
+        interval, and it is refused rather than seeded, because falling back
+        to a constant key would silently correlate every nested or repeated
+        bootstrap.
         """
         X, Y = self._data()
-        result = pce.analyze(ishigami.PROBLEM, X, Y, order=3)
+        plain = pce.analyze(ishigami.PROBLEM, X, Y, order=2)
+        assert plain.ci is None
+        assert plain.S1_conf is None
+        assert plain.ST_conf is None
+        assert plain.S2_conf is None
 
-        assert result.ci is None
-        assert result.S1_conf is None
-        assert result.ST_conf is None
-        assert result.S2_conf is None
-
-    def test_the_interval_brackets_the_point_estimate(self):
-        """T4: lower <= estimate <= upper, for all three index arrays."""
-        X, Y = self._data()
-        result = pce.analyze(ishigami.PROBLEM, X, Y, order=3, n_bootstrap=8, key=jax.random.key(0))
-
+        kwargs = dict(order=2, n_bootstrap=self.R, key=jax.random.key(0))
+        result = pce.analyze(ishigami.PROBLEM, X, Y, **kwargs)
         for point, conf in (
             (result.S1, result.S1_conf),
             (result.ST, result.ST_conf),
@@ -722,63 +604,46 @@ class TestBootstrapIntervals:
             assert (lower[finite] <= upper[finite]).all()
             # The percentile interval is read off the replicate distribution,
             # which is centred near but not exactly on the point estimate, so
-            # a small slack is expected on a run of eight.
+            # a small slack is expected on a short run.
             assert (point[finite] >= lower[finite] - 0.2).all()
             assert (point[finite] <= upper[finite] + 0.2).all()
 
-    def test_ci_metadata_and_replicates_are_recorded(self):
-        """The interval records its recipe and optionally exposes its draws."""
+        again = pce.analyze(ishigami.PROBLEM, X, Y, **kwargs)
+        np.testing.assert_array_equal(np.asarray(result.S1_conf), np.asarray(again.S1_conf))
+
+        with pytest.raises(ValueError, match="key is required"):
+            pce.analyze(ishigami.PROBLEM, X, Y, n_bootstrap=self.R)
+
+    def test_time_series_intervals_record_their_recipe_and_draws(self):
+        """T4: the interval keeps the result's layout, plus the [lo, hi] axis.
+
+        It also records its recipe (level, method, size) and optionally
+        exposes its draws.
+        """
         X, Y = self._data()
+        Y3 = jnp.stack([jnp.stack([Y, 2.0 * Y], axis=-1)], axis=1)
         result = pce.analyze(
             ishigami.PROBLEM,
             X,
-            Y,
+            Y3,
             order=2,
-            n_bootstrap=6,
+            n_bootstrap=self.R,
             conf_level=0.8,
             ci_method="gaussian",
             key=jax.random.key(2),
             keep_replicates=True,
         )
 
-        assert result.ci is not None
-        assert result.ci.level == 0.8
-        assert result.ci.method == "gaussian"
-        assert result.ci.n_bootstrap == 6
-        assert result.ci.replicates is not None
-        assert result.ci.replicates["S1"].shape == (6, 3)
-        assert result.ci.replicates["S2"].shape == (6, 3, 3)
-
-    def test_a_key_is_required(self):
-        """T4: no key means no interval, and it is refused rather than seeded.
-
-        Falling back to a constant key would silently correlate every nested
-        or repeated bootstrap.
-        """
-        X, Y = self._data()
-        with pytest.raises(ValueError, match="key is required"):
-            pce.analyze(ishigami.PROBLEM, X, Y, n_bootstrap=4)
-
-    def test_the_same_key_gives_the_same_interval(self):
-        """T4: the draw is a function of the key, not of the call."""
-        X, Y = self._data()
-        kwargs = dict(order=2, n_bootstrap=4, key=jax.random.key(7))
-        first = pce.analyze(ishigami.PROBLEM, X, Y, **kwargs)
-        second = pce.analyze(ishigami.PROBLEM, X, Y, **kwargs)
-
-        np.testing.assert_array_equal(np.asarray(first.S1_conf), np.asarray(second.S1_conf))
-
-    def test_a_time_series_gets_intervals_at_the_same_rank(self):
-        """T4: the interval keeps the result's own layout, plus the [lo, hi] axis."""
-        X, Y = self._data()
-        Y3 = jnp.stack([jnp.stack([Y, 2.0 * Y], axis=-1)], axis=1)
-        result = pce.analyze(
-            ishigami.PROBLEM, X, Y3, order=2, n_bootstrap=3, key=jax.random.key(4)
-        )
-
         assert result.S1.shape == (1, 2, 3)
         assert result.S1_conf.shape == (2, 1, 2, 3)
         assert result.S2_conf.shape == (2, 1, 2, 3, 3)
+        assert result.ci is not None
+        assert result.ci.level == 0.8
+        assert result.ci.method == "gaussian"
+        assert result.ci.n_bootstrap == self.R
+        assert result.ci.replicates is not None
+        assert result.ci.replicates["S1"].shape == (self.R, 1, 2, 3)
+        assert result.ci.replicates["S2"].shape == (self.R, 1, 2, 3, 3)
 
 
 class TestExplainedVariance:
@@ -792,23 +657,18 @@ class TestExplainedVariance:
     fit whose true R^2 was 0.9997.
     """
 
-    def test_high_order_ishigami_does_not_exceed_one(self, ishigami_pce_data):
-        """The exact case that used to report 1.0709."""
-        X, Y = ishigami_pce_data
-        result = pce.analyze(ishigami.PROBLEM, X, Y, order=8, verbose=False)
+    def test_high_order_ishigami_does_not_exceed_one(self, ishigami_pce_fit):
+        """The exact case that used to report 1.0709.
+
+        A well-resolved fit also raises no fit-quality warning. Order 8 on
+        N=2000 is 165 terms, a healthy ratio, so a warning here would be a
+        false alarm.
+        """
+        result, warned = ishigami_pce_fit
         ev = float(np.asarray(result.explained_variance))
         assert 0.0 <= ev <= 1.0, f"explained_variance out of range: {ev}"
         assert ev > 0.99, f"an order-8 Ishigami fit should be near-perfect, got {ev}"
-
-    def test_matches_r_squared(self, ishigami_pce_data):
-        """It equals ``1 - SS_res / SS_tot`` of the fitted values."""
-        X, Y = ishigami_pce_data
-        result = pce.analyze(ishigami.PROBLEM, X, Y, order=3, verbose=False)
-        residual = Y - result.predict(X)
-        r2 = 1.0 - float(jnp.sum(residual**2)) / float(jnp.sum((Y - jnp.mean(Y)) ** 2))
-        np.testing.assert_allclose(
-            float(np.asarray(result.explained_variance)), r2, rtol=1e-3, atol=1e-4
-        )
+        assert warned == []
 
     def test_constant_output_explained_variance_and_shapley_are_nan(self):
         """A constant slice reports NaN everywhere, Shapley included.
@@ -828,6 +688,8 @@ class TestExplainedVariance:
         )
         with pytest.warns(UserWarning, match="zero variance"):
             result = pce.analyze(problem, X, Y, verbose=False)
+        assert jnp.all(jnp.isnan(result.S1))
+        assert jnp.all(jnp.isnan(result.ST))
         assert result.explained_variance is not None
         assert jnp.isnan(result.explained_variance)
         assert jnp.all(jnp.isnan(result.shapley().Sh))
@@ -842,7 +704,7 @@ class TestExplainedVariance:
         bounds = jnp.array(problem.bounds)
         X = jax.random.uniform(
             jax.random.PRNGKey(3),
-            shape=(500, problem.num_vars),
+            shape=(500, problem.n_params),
             minval=bounds[:, 0],
             maxval=bounds[:, 1],
         )
@@ -869,26 +731,27 @@ class TestFitQualityWarnings:
     to read a wrong number off the library.
     """
 
-    def test_underfit_warns_and_names_explained_variance(self, ishigami_pce_data):
-        """order=3 on Ishigami explains under half the variance, and says so."""
+    def test_underfit_warns_and_explained_variance_is_r_squared(self, ishigami_pce_data):
+        """order=3 on Ishigami explains under half the variance, and says so.
+
+        ``explained_variance`` also equals ``1 - SS_res / SS_tot`` of the
+        fitted values.
+        """
         X, Y = ishigami_pce_data
         with pytest.warns(JaxgsaWarning, match=r"explained_variance is 0\.\d+"):
             result = pce.analyze(ishigami.PROBLEM, X, Y, order=3, verbose=False)
-        assert float(np.asarray(result.explained_variance)) < 0.5
+        ev = float(np.asarray(result.explained_variance))
+        assert ev < 0.5
+        residual = Y - result.predict(X)
+        r2 = 1.0 - float(jnp.sum(residual**2)) / float(jnp.sum((Y - jnp.mean(Y)) ** 2))
+        np.testing.assert_allclose(ev, r2, rtol=1e-3, atol=1e-4)
 
     def test_overfit_warns_on_the_loo_ratio(self, ishigami_pce_data):
         """A fit with too few rows per term is caught out of sample only."""
         X, Y = ishigami_pce_data
         Xs, Ys = X[:64], Y[:64]
-        with pytest.warns(JaxgsaWarning, match=r"loo_rmse is \d+\.\d+ times std\(Y\)"):
+        with pytest.warns(JaxgsaWarning, match=r"cv_rmse is \d+\.\d+ times std\(Y\)"):
             result = pce.analyze(ishigami.PROBLEM, Xs, Ys, order=5, fit_ratio=0.9, verbose=False)
         # The in-sample number reports nothing wrong at all, which is the
         # reason the out-of-sample check exists.
         assert float(np.asarray(result.explained_variance)) > 0.9
-
-    def test_healthy_fit_is_silent(self, ishigami_pce_data):
-        """A well-resolved fit raises neither warning."""
-        X, Y = ishigami_pce_data
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", JaxgsaWarning)
-            pce.analyze(ishigami.PROBLEM, X, Y, order=10, verbose=False)

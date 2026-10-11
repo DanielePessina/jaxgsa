@@ -27,6 +27,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.batching import resolve_batch_size
+from jaxgsa._core.invalid import _row_finite
 from jaxgsa.dgsm._poincare import axis_constants
 from jaxgsa.problem import Problem
 
@@ -263,18 +264,6 @@ def jac_batches(
         yield jac[:actual_len], Y_chunk[:actual_len], X[start:end]
 
 
-def _rows_finite(array: Array) -> Array:
-    """Return a ``(N,)`` mask that is True where a whole row is finite.
-
-    Args:
-        array: Any array whose leading axis is the sample axis.
-
-    Returns:
-        A boolean array of shape ``(N,)``.
-    """
-    return jnp.all(jnp.isfinite(array.reshape(array.shape[0], -1)), axis=1)
-
-
 def _mask_rows(array: Array, row_ok: Array) -> Array:
     """Zero out the rows a mask rejects, without arithmetic on their values.
 
@@ -343,6 +332,8 @@ class _JacobianSums:
         sum_jac2: Sum of the squared Jacobian over every row, same shape.
         sum_jac_kept: Sum of the Jacobian over the rows in ``row_ok``.
         sum_jac2_kept: Sum of the squared Jacobian over those same rows.
+        resample: The four bootstrap sums of :func:`resample_moment_sums` over
+            every row, or ``None`` when no ``idx`` was given.
     """
 
     Y: Array
@@ -352,6 +343,7 @@ class _JacobianSums:
     sum_jac2: Array
     sum_jac_kept: Array
     sum_jac2_kept: Array
+    resample: tuple[Array, Array, Array, Array] | None = None
 
 
 def jacobian_sums(
@@ -360,6 +352,7 @@ def jacobian_sums(
     batch_size: int | None,
     *,
     n_outputs: int | None = None,
+    idx: Array | None = None,
 ) -> _JacobianSums:
     """Sum the Jacobian and its square over every sample row, masked and not.
 
@@ -378,10 +371,14 @@ def jacobian_sums(
             active memory budget, as in :func:`jac_batches`.
         n_outputs: ``T*K``, passed straight to :func:`jac_batches` for a
             caller that already knows it.
+        idx: Resampled row indices, shape ``(n_bootstrap, N)``. When given,
+            the bootstrap sums of :func:`resample_moment_sums` over every row
+            are accumulated in the same sweep.
 
     Returns:
         A :class:`_JacobianSums` holding both pairs of sums, the stacked
-        outputs, and the two per-row finite masks.
+        outputs, the two per-row finite masks and, with ``idx``, the
+        bootstrap sums.
 
     Raises:
         ValueError: If ``X`` has no sample rows.
@@ -393,13 +390,23 @@ def jacobian_sums(
     Y_parts: list[Array] = []
     jac_finite_parts: list[Array] = []
     row_ok_parts: list[Array] = []
+    resample: list[Array] | None = None
+    offset = 0
 
     for jac, Y_chunk, X_chunk in jac_batches(fn, X, batch_size, n_outputs=n_outputs):
         Y_parts.append(Y_chunk)
+        if idx is not None:
+            parts = _resample_batch_sums(jac, Y_chunk, idx, offset)
+            resample = (
+                parts
+                if resample is None
+                else [a + b for a, b in zip(resample, parts, strict=True)]
+            )
+            offset += int(jac.shape[0])
         # The mask is built and applied here, before the sums below fold this
         # batch into the running totals. After that point the batch is gone.
-        chunk_jac_finite = _rows_finite(jac)
-        chunk_row_ok = chunk_jac_finite & _rows_finite(Y_chunk) & _rows_finite(X_chunk)
+        chunk_jac_finite = _row_finite(jac)
+        chunk_row_ok = chunk_jac_finite & _row_finite(Y_chunk) & _row_finite(X_chunk)
         jac_finite_parts.append(chunk_jac_finite)
         row_ok_parts.append(chunk_row_ok)
         jac_kept = _mask_rows(jac, chunk_row_ok)
@@ -424,6 +431,9 @@ def jacobian_sums(
         sum_jac2=sum_jac2,
         sum_jac_kept=sum_jac_kept,
         sum_jac2_kept=sum_jac2_kept,
+        resample=None
+        if resample is None
+        else (resample[0], resample[1], resample[2], resample[3]),
     )
 
 
@@ -485,36 +495,52 @@ def resample_moment_sums(
         ``(sum_jac, sum_jac2, sum_y, sum_y2)``, each with a leading
         ``n_bootstrap`` axis followed by the per-row shape.
     """
-    n_replicates = int(idx.shape[0])
-    rows = jnp.arange(n_replicates)[:, None]
-    offset = 0
     acc: list[Array] | None = None
+    offset = 0
     for jac, Y_chunk in batches:
-        n = int(jac.shape[0])
-        local = idx - offset
-        in_chunk = (local >= 0) & (local < n)
-        # Draw counts per (replicate, row of this batch). Indices from other
-        # batches are steered to column 0 and given weight 0, which is the
-        # explicit form of "drop" and does not rely on out-of-bounds
-        # behaviour.
-        weights = (
-            jnp.zeros((n_replicates, n), dtype=jac.dtype)
-            .at[rows, jnp.where(in_chunk, local, 0)]
-            .add(jnp.where(in_chunk, 1.0, 0.0).astype(jac.dtype))
-        )
-        jac_flat = jac.reshape(n, -1)
-        y_flat = Y_chunk.reshape(n, -1)
-        parts = [
-            (weights @ jac_flat).reshape((n_replicates, *jac.shape[1:])),
-            (weights @ jac_flat**2).reshape((n_replicates, *jac.shape[1:])),
-            (weights @ y_flat).reshape((n_replicates, *Y_chunk.shape[1:])),
-            (weights @ y_flat**2).reshape((n_replicates, *Y_chunk.shape[1:])),
-        ]
+        parts = _resample_batch_sums(jac, Y_chunk, idx, offset)
         acc = parts if acc is None else [a + b for a, b in zip(acc, parts, strict=True)]
-        offset += n
+        offset += int(jac.shape[0])
     if acc is None:
         raise ValueError("X has no sample rows, so there is nothing to resample")
     return acc[0], acc[1], acc[2], acc[3]
+
+
+def _resample_batch_sums(jac: Array, Y_chunk: Array, idx: Array, offset: int) -> list[Array]:
+    """Weighted sums of one batch for every bootstrap replicate.
+
+    Args:
+        jac: Jacobian rows of this batch.
+        Y_chunk: Output rows of this batch.
+        idx: Resampled row indices, shape ``(n_bootstrap, n)``.
+        offset: Number of rows that came before this batch.
+
+    Returns:
+        ``[sum_jac, sum_jac2, sum_y, sum_y2]`` for this batch, each with a
+        leading ``n_bootstrap`` axis.
+    """
+    n_replicates = int(idx.shape[0])
+    rows = jnp.arange(n_replicates)[:, None]
+    n = int(jac.shape[0])
+    local = idx - offset
+    in_chunk = (local >= 0) & (local < n)
+    # Draw counts per (replicate, row of this batch). Indices from other
+    # batches are steered to column 0 and given weight 0, which is the
+    # explicit form of "drop" and does not rely on out-of-bounds
+    # behaviour.
+    weights = (
+        jnp.zeros((n_replicates, n), dtype=jac.dtype)
+        .at[rows, jnp.where(in_chunk, local, 0)]
+        .add(jnp.where(in_chunk, 1.0, 0.0).astype(jac.dtype))
+    )
+    jac_flat = jac.reshape(n, -1)
+    y_flat = Y_chunk.reshape(n, -1)
+    return [
+        (weights @ jac_flat).reshape((n_replicates, *jac.shape[1:])),
+        (weights @ jac_flat**2).reshape((n_replicates, *jac.shape[1:])),
+        (weights @ y_flat).reshape((n_replicates, *Y_chunk.shape[1:])),
+        (weights @ y_flat**2).reshape((n_replicates, *Y_chunk.shape[1:])),
+    ]
 
 
 def promote_jac(jac: Array) -> Array:
@@ -563,8 +589,8 @@ def bounds_from_moments(
     problem: Problem,
     *,
     nu: Array,
-    sigma: Array,
-    var_y: Array,
+    mu: Array,
+    variance: Array,
     standardize_outputs: bool,
 ) -> tuple[Array, Array, Array, Array, Array]:
     """Turn the derivative moments into the two Sobol-index bounds.
@@ -574,7 +600,7 @@ def bounds_from_moments(
 
     - upper (Poincare / Sobol-Kucherenko): ``ST_i <= C_i * nu_i / Var(Y)``,
       which holds for every marginal this package supports.
-    - lower: ``Var(x_i) * sigma_i^2 / Var(Y)``. Kucherenko & Song (2016),
+    - lower: ``Var(x_i) * mu_i^2 / Var(Y)``. Kucherenko & Song (2016),
       Theorem 6 (Section 4.1, eq. 31), prove ``ST_i >=`` this for a Gaussian
       marginal only. On a uniform or truncated marginal it is an estimate.
       It is exact for a linear response and can overshoot ``ST_i`` for a
@@ -591,14 +617,14 @@ def bounds_from_moments(
             and the marginal variances. Not an array, so reading it is a host
             operation on static data and stays traceable.
         nu: ``E[(df/dx_i)^2]``, shape ``(T, K, D)``.
-        sigma: ``E[df/dx_i]``, shape ``(T, K, D)``.
-        var_y: Output variance per slice, shape ``(T, K)``.
+        mu: ``E[df/dx_i]``, shape ``(T, K, D)``.
+        variance: Output variance per slice, shape ``(T, K)``.
         standardize_outputs: Whether to report the moments for the
             standardized output ``(Y - mean) / std``. The map is affine, so
             the standardized moments are the ones already computed, rescaled.
 
     Returns:
-        ``(nu, sigma, upper, lower, var_y)``, the first four shaped
+        ``(nu, mu, upper, lower, variance)``, the first four shaped
         ``(T, K, D)`` and the last ``(T, K)``.
     """
     if standardize_outputs:
@@ -607,11 +633,11 @@ def bounds_from_moments(
         # differentiating a wrapped function leaves the autodiff sweep alone.
         # Both bounds are ratios of quantities that scale the same way, so
         # they come out unchanged, which the tests assert.
-        y_std = jnp.sqrt(var_y)  # (T, K)
+        y_std = jnp.sqrt(variance)  # (T, K)
         safe_scale = jnp.where(y_std == 0, jnp.ones_like(y_std), y_std)
-        sigma = sigma / safe_scale[..., None]
+        mu = mu / safe_scale[..., None]
         nu = nu / (safe_scale**2)[..., None]
-        var_y = var_y / safe_scale**2
+        variance = variance / safe_scale**2
 
     # Per-axis constants: C for the Poincare upper bound, Var for the lower.
     C, Var = axis_constants(problem)
@@ -620,9 +646,9 @@ def bounds_from_moments(
 
     # A constant output slice has zero variance; map it to NaN bounds rather
     # than dividing by zero.
-    denom = jnp.where(var_y == 0, jnp.nan, var_y)[..., None]  # (T, K, 1)
+    denom = jnp.where(variance == 0, jnp.nan, variance)[..., None]  # (T, K, 1)
 
     # The (D,) constants broadcast against (T, K, D) on the trailing axis.
     upper = C_jnp * nu / denom
-    lower = Var_jnp * sigma**2 / denom
-    return nu, sigma, upper, lower, var_y
+    lower = Var_jnp * mu**2 / denom
+    return nu, mu, upper, lower, variance

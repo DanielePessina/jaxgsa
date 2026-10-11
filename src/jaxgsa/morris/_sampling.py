@@ -7,7 +7,7 @@ This module follows the same two-layer contract as :mod:`jaxgsa.sampling`:
    design and to locate each elementary effect inside it.
 
 Both designs cost ``n_trajectories * (D + 1)`` expanded rows. Trajectory points
-live on a coarse ``num_levels`` grid. Exact duplicate rows across trajectories
+live on a coarse ``n_levels`` grid. Exact duplicate rows across trajectories
 are therefore common in low dimensions, and deduplication saves real model
 evaluations. A pair of expanded-row indices plus a signed unit-cube step
 describes every elementary effect, so the analysis reduces to one
@@ -36,6 +36,7 @@ from jaxgsa._core.sampling import (
     _next_power_of_2,
     _stable_unique_rows,
     _transform_samples,
+    check_seed,
 )
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -82,7 +83,7 @@ class MorrisSamples(UniqueDesignSamples):
         expanded_to_unique: Integer index map of shape ``(n_expanded,)``
             from each expanded row to its row index in ``samples``.
         n_trajectories: Number of trajectories (r), the Morris repetition unit.
-        num_levels: Grid levels ``p`` used by the trajectory design
+        n_levels: Grid levels ``p`` used by the trajectory design
             (unused by the radial design).
         method: Design generator, ``"trajectory"`` or ``"radial"``.
         ee_idx_after: Expanded-row index of the perturbed point of each
@@ -110,7 +111,7 @@ class MorrisSamples(UniqueDesignSamples):
     n_expanded: int
     expanded_to_unique: np.ndarray
     n_trajectories: int
-    num_levels: int
+    n_levels: int
     method: Literal["trajectory", "radial"]
     ee_idx_after: np.ndarray
     ee_idx_before: np.ndarray
@@ -118,6 +119,14 @@ class MorrisSamples(UniqueDesignSamples):
     n_params: int
     problem: Problem
     n_blocks_dropped: int = 0
+
+    def __repr__(self) -> str:
+        """Return a compact summary with no arrays."""
+        return (
+            f"MorrisSamples(n_runs={self.n_runs}, n_params={self.n_params}, "
+            f"n_trajectories={self.n_trajectories}, n_levels={self.n_levels}, "
+            f"method={self.method!r})"
+        )
 
     @overload
     def downsample(self, n_trajectories: int) -> MorrisSamples: ...
@@ -182,7 +191,7 @@ class MorrisSamples(UniqueDesignSamples):
             n_expanded=new_expanded_n,
             expanded_to_unique=new_exp2uniq,
             n_trajectories=n_trajectories,
-            num_levels=self.num_levels,
+            n_levels=self.n_levels,
             method=self.method,
             ee_idx_after=self.ee_idx_after[:n_trajectories].copy(),
             ee_idx_before=self.ee_idx_before[:n_trajectories].copy(),
@@ -214,7 +223,7 @@ class MorrisSamples(UniqueDesignSamples):
         """Persist the Morris design parameters in the metadata blob."""
         return {
             "n_trajectories": self.n_trajectories,
-            "num_levels": self.num_levels,
+            "n_levels": self.n_levels,
             "method": self.method,
             "n_blocks_dropped": self.n_blocks_dropped,
         }
@@ -231,6 +240,20 @@ class MorrisSamples(UniqueDesignSamples):
         meta: Mapping[str, Any],
     ) -> MorrisSamples:
         """Rebuild a :class:`MorrisSamples` from a loaded NPZ payload."""
+        required_meta = ("method", "n_trajectories")
+        required_arrays = ("ee_idx_after", "ee_idx_before", "ee_delta")
+        if (
+            any(key not in meta for key in required_meta)
+            or "n_levels" not in meta
+            or any(name not in arrays for name in required_arrays)
+        ):
+            # Name the class the file claims, when the metadata stores one.
+            stored = meta.get("samples_class")
+            held = f"; it holds a {stored}" if stored is not None else ""
+            raise ValueError(
+                f"jaxgsa.morris: this file was not saved by MorrisSamples{held}. "
+                "Load it with the samples class that saved it."
+            )
         method = meta["method"]
         if method not in ("trajectory", "radial"):
             raise ValueError(f"method must be 'trajectory' or 'radial', got {method!r}")
@@ -239,12 +262,12 @@ class MorrisSamples(UniqueDesignSamples):
             n_expanded=n_expanded,
             expanded_to_unique=expanded_to_unique,
             n_trajectories=int(meta["n_trajectories"]),
-            num_levels=int(meta["num_levels"]),
+            n_levels=int(meta["n_levels"]),
             method=method,
             ee_idx_after=arrays["ee_idx_after"],
             ee_idx_before=arrays["ee_idx_before"],
             ee_delta=arrays["ee_delta"],
-            n_params=problem.num_vars,
+            n_params=problem.n_params,
             problem=problem,
             # Files written before this field existed have no entry for it.
             n_blocks_dropped=int(meta.get("n_blocks_dropped", 0)),
@@ -289,7 +312,7 @@ def _radial_samples_from_blocks(
         JaxgsaWarning: If any block is dropped because its base and perturbed
             points coincide at the model's floating-point resolution.
     """
-    D = problem.num_vars
+    D = problem.n_params
     # The elementary-effect denominator must be the unit-cube step, matching
     # what ``sample()`` records, so recover unit coordinates in float64.
     samples_unit = _inverse_transform_samples(problem, samples)
@@ -337,7 +360,7 @@ def _radial_samples_from_blocks(
         expanded_to_unique=np.ascontiguousarray(block_rows, dtype=np.int64).reshape(-1),
         n_trajectories=n_blocks,
         # Unused by the radial design, so hold it at the sample() default.
-        num_levels=4,
+        n_levels=4,
         method="radial",
         ee_idx_after=offsets[:, None] + 1 + param_idx.astype(np.int64),
         ee_idx_before=np.broadcast_to(offsets[:, None], (n_blocks, D)).copy(),
@@ -351,10 +374,10 @@ def _radial_samples_from_blocks(
 def _build_trajectories(
     n_trajectories: int,
     n_params: int,
-    num_levels: int,
+    n_levels: int,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Generate Morris trajectories on the ``num_levels`` grid.
+    """Generate Morris trajectories on the ``n_levels`` grid.
 
     The function builds the points on an integer half-level grid, in units of
     ``1 / (2 * (p - 1))``. The Morris step ``delta = p / (2 * (p - 1))`` is
@@ -372,7 +395,7 @@ def _build_trajectories(
         and the three bookkeeping arrays have shape ``(r, D)``.
     """
     D = n_params
-    p = num_levels
+    p = n_levels
     # delta = p / (2(p-1)) expressed in half-level units of 1/(2(p-1)).
     delta_int = p
     delta = p / (2.0 * (p - 1))
@@ -518,14 +541,14 @@ def _print_morris_summary(
     n_params: int,
     method: str,
     n_trajectories: int,
-    num_levels: int,
+    n_levels: int,
     n_runs: int,
     n_expanded: int,
 ) -> None:
     """Print a compact summary of the generated unique Morris design."""
     duplicates_removed = n_expanded - n_runs
     duplicate_fraction = duplicates_removed / n_expanded if n_expanded else 0.0
-    levels_label = f", num_levels={num_levels}" if method == "trajectory" else ""
+    levels_label = f", n_levels={n_levels}" if method == "trajectory" else ""
     _verbose.emit(
         "jaxgsa.morris.sample: "
         f"D={n_params}, method={method}, n_trajectories={n_trajectories}{levels_label}, "
@@ -538,7 +561,7 @@ def sample(
     problem: Problem,
     n_trajectories: int,
     *,
-    num_levels: int = 4,
+    n_levels: int = 4,
     method: Literal["trajectory", "radial"] = "trajectory",
     scramble: bool = True,
     seed: int | np.random.Generator | None = None,
@@ -584,7 +607,7 @@ def sample(
             every screening measure. More trajectories tighten the mu_star
             ranking and any bootstrap intervals, at proportionally more model
             evaluations. Typical screening uses 10-50.
-        num_levels: Grid levels ``p`` for the trajectory design (default 4,
+        n_levels: Grid levels ``p`` for the trajectory design (default 4,
             step ``delta = p / (2 * (p - 1))``). An even value makes all levels
             equally probable. An odd value triggers a warning. The radial
             design ignores this argument.
@@ -592,10 +615,10 @@ def sample(
             ``"radial"`` for Campolongo 2011 star designs around
             scrambled-Sobol' base points. The radial design spreads points
             quasi-randomly instead of on a coarse grid, and it has no
-            ``num_levels`` to choose. In exchange it leaves fewer duplicate
+            ``n_levels`` to choose. In exchange it leaves fewer duplicate
             rows to deduplicate.
-        scramble: Whether to Owen-scramble the Sobol' sequence. Radial design
-            only.
+        scramble: Whether to scramble the Sobol' sequence (linear matrix
+            scramble plus a digital shift). Radial design only.
         seed: Random seed or generator for reproducibility. Pass an ``int`` or
             ``None`` to keep the prefix-nesting guarantee of
             :meth:`MorrisSamples.downsample`. A reused ``np.random.Generator``
@@ -615,7 +638,7 @@ def sample(
         elementary-effect bookkeeping for the later analysis.
 
     Raises:
-        ValueError: If ``n_trajectories``, ``num_levels``, ``method``, or
+        ValueError: If ``n_trajectories``, ``n_levels``, ``method``, or
             ``truncation_quantile`` is invalid. It also raises when
             ``problem.correlation`` declares a dependence structure, because
             the one-at-a-time design assumes independent inputs. It raises
@@ -623,29 +646,30 @@ def sample(
             design steps each parameter along a grid and a grid has no meaning
             for unordered level codes.
     """
+    check_seed(seed, "jaxgsa.morris.sample")
     _raise_correlated_design(problem, "jaxgsa.morris.sample")
     _raise_categorical_design(problem, "jaxgsa.morris.sample")
     if not 0.0 < truncation_quantile < 0.5:
         raise ValueError(f"truncation_quantile must be in (0, 0.5), got {truncation_quantile}")
     if n_trajectories < 2:
         raise ValueError(f"n_trajectories must be >= 2, got {n_trajectories}")
-    if num_levels < 2:
-        raise ValueError(f"num_levels must be >= 2, got {num_levels}")
+    if n_levels < 2:
+        raise ValueError(f"n_levels must be >= 2, got {n_levels}")
     if method not in ("trajectory", "radial"):
         raise ValueError(f"method must be 'trajectory' or 'radial', got {method!r}")
-    if method == "trajectory" and num_levels % 2 != 0:
+    if method == "trajectory" and n_levels % 2 != 0:
         warnings.warn(
-            f"jaxgsa.morris: num_levels={num_levels} is odd — grid levels are not equally "
+            f"jaxgsa.morris: n_levels={n_levels} is odd — grid levels are not equally "
             "probable and steps land off-grid; an even value is recommended",
             stacklevel=2,
             category=JaxgsaWarning,
         )
 
-    D = problem.num_vars
+    D = problem.n_params
     if method == "trajectory":
         rng = np.random.default_rng(seed)
         expanded_unit, ee_idx_after, ee_idx_before, ee_delta = _build_trajectories(
-            n_trajectories, D, num_levels, rng
+            n_trajectories, D, n_levels, rng
         )
     else:
         expanded_unit, ee_idx_after, ee_idx_before, ee_delta = _build_radial(
@@ -663,7 +687,7 @@ def sample(
             n_params=D,
             method=method,
             n_trajectories=n_trajectories,
-            num_levels=num_levels,
+            n_levels=n_levels,
             n_runs=unique_samples.shape[0],
             n_expanded=expanded_samples.shape[0],
         )
@@ -673,7 +697,7 @@ def sample(
         n_expanded=expanded_samples.shape[0],
         expanded_to_unique=expanded_to_unique,
         n_trajectories=n_trajectories,
-        num_levels=num_levels,
+        n_levels=n_levels,
         method=method,
         ee_idx_after=ee_idx_after,
         ee_idx_before=ee_idx_before,

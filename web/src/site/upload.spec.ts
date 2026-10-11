@@ -127,3 +127,63 @@ describe("parseUpload", () => {
     ).rejects.toThrow(/too large/);
   });
 });
+
+describe("parseUpload strictness and limits", () => {
+  it("rejects non-finite parquet numbers and names row and column", async () => {
+    const buf = parquetWriteBuffer({
+      columnData: [
+        { name: "run_id", data: [0, 1], type: "INT32" },
+        { name: "y", data: [1, Number.POSITIVE_INFINITY], type: "DOUBLE" },
+      ],
+    });
+
+    await expect(parseUpload(new File([buf], "o.parquet"))).rejects.toThrow(
+      /row 2, column "y": Infinity is not a finite number/,
+    );
+
+    const nan = parquetWriteBuffer({
+      columnData: [{ name: "y", data: [Number.NaN, 1], type: "DOUBLE" }],
+    });
+
+    await expect(parseUpload(new File([nan], "o.parquet"))).rejects.toThrow(/not a finite number|empty cell/);
+  });
+
+  it("rejects non-finite text in a parquet string column", async () => {
+    const buf = parquetWriteBuffer({
+      columnData: [{ name: "y", data: ["1e999", "2"], type: "STRING" }],
+    });
+
+    await expect(parseUpload(new File([buf], "o.parquet"))).rejects.toThrow(
+      /row 1, column "y": 1e999 is not a finite number/,
+    );
+  });
+
+  it("rejects an oversize parquet file from its metadata", async () => {
+    const buf = parquetWriteBuffer({
+      columnData: [
+        { name: "a", data: [1, 2, 3, 4], type: "INT32" },
+        { name: "b", data: [1, 2, 3, 4], type: "INT32" },
+      ],
+    });
+
+    await expect(parseUpload(new File([buf], "o.parquet"), 7)).rejects.toThrow(
+      /file is too large: 4 rows x 2 columns exceeds the 7 cell limit/,
+    );
+
+    await expect(parseUpload(new File([buf], "o.parquet"), 8)).resolves.toBeDefined();
+  });
+
+  it("rejects an oversize CSV with the same message, using a small limit", async () => {
+    const text = "a,b\n" + "1,2\n".repeat(10);
+
+    await expect(parseUpload(new File([text], "big.csv"), 10)).rejects.toThrow(
+      /file is too large: 10 rows x 2 columns exceeds the 10 cell limit/,
+    );
+  });
+
+  it("parses a semicolon CSV with a BOM through the upload path", async () => {
+    const parsed = await parseUpload(new File(["\uFEFFrun_id;y\r\n0;1\r\n"], "y.csv"));
+    expect(parsed.headers).toEqual(["run_id", "y"]);
+    expect(parsed.rows).toEqual([[0, 1]]);
+  });
+});

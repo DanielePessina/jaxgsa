@@ -17,13 +17,13 @@ from jaxgsa.sampling import monte_carlo
 
 @pytest.fixture(scope="module")
 def linear_data():
-    X = jnp.asarray(monte_carlo(linear.PROBLEM, n=1024, seed=4))
+    X = jnp.asarray(monte_carlo(linear.PROBLEM, n_samples=1024, seed=4))
     return X, linear.evaluate(X)
 
 
 @pytest.fixture(scope="module")
 def ishigami_data():
-    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=2048, seed=5))
+    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=2048, seed=5))
     return X, ishigami.evaluate(X)
 
 
@@ -34,7 +34,7 @@ def test_linear_fixture_matches_true_shapley(backend, linear_data):
     if backend == "pce":
         kwargs["order"] = 2
     else:
-        kwargs.update(maxorder=2, maxiter=20)
+        kwargs.update(order=2, max_iter=20)
     result = jaxgsa.shapley.analyze(linear.PROBLEM, X, Y, **kwargs)
     np.testing.assert_allclose(result.Sh, linear.ANALYTICAL_SHAPLEY, atol=0.05)
     np.testing.assert_allclose(result.Sh.sum(axis=-1), 1.0, atol=1e-5)
@@ -70,6 +70,7 @@ def test_bootstrap_returns_bracketed_effects(linear_data):
         linear.PROBLEM, X, Y, backend="pce", order=2, n_bootstrap=4, key=jax.random.key(3)
     )
     assert result.Sh_conf is not None
+    assert np.asarray(result.Sh_conf).shape == (2, 3)
     assert np.all(np.asarray(result.Sh_conf[0]) <= np.asarray(result.Sh_conf[1]))
 
 
@@ -86,7 +87,7 @@ def test_correlative_hdmr_matches_closed_form():
     X = jnp.asarray(np.random.default_rng(7).normal(size=(2048, 2)) @ L.T)
     Y = X[:, 0] + 2.0 * X[:, 1]
     result = jaxgsa.shapley.analyze(
-        problem, X, Y, backend="hdmr", include_correlative=True, maxorder=2, maxiter=20
+        problem, X, Y, backend="hdmr", include_correlative=True, order=2, max_iter=20
     )
     expected = np.array([2.0 / 7.0, 5.0 / 7.0])
     np.testing.assert_allclose(result.Sh, expected, atol=0.06)

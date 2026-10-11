@@ -28,17 +28,26 @@ output needs a concrete value and a tracer has none. Neither route accepts a
 categorical problem for differentiation: a step CDF has no useful derivative.
 """
 
-from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa._core.registry import MethodSpec, register
+from jaxgsa._core.invalid import InvalidUnit as _InvalidUnit
+from jaxgsa._core.registry import MethodSpec as _MethodSpec
+from jaxgsa._core.registry import register as _register
 from jaxgsa._core.sampling import Theta
-from jaxgsa.sobol._analyze import analyze, indices
+from jaxgsa.sobol._analyze import SobolIndices, analyze, indices
 from jaxgsa.sobol._result import SobolResult
 from jaxgsa.sobol._sampling import SobolSamples, sample
 
-__all__ = ["SobolResult", "SobolSamples", "Theta", "analyze", "indices", "sample"]
+__all__ = [
+    "SobolIndices",
+    "SobolResult",
+    "SobolSamples",
+    "Theta",
+    "analyze",
+    "indices",
+    "sample",
+]
 
-SPEC = register(
-    MethodSpec(
+_SPEC = _register(
+    _MethodSpec(
         name="sobol",
         analyze=analyze,
         sample=sample,
@@ -49,6 +58,6 @@ SPEC = register(
         bootstrap="n_bootstrap",
         # A Saltelli group is D+2 or 2D+2 rows for one base point. Dropping
         # part of one leaves the estimator reading misaligned rows.
-        invalid_unit=InvalidUnit.SALTELLI_GROUP,
+        invalid_unit=_InvalidUnit.SALTELLI_GROUP,
     )
 )

@@ -1,7 +1,7 @@
 """Shared linear-Gaussian closed-form reference for correlated-index tests.
 
-One model serves ``test_vkoga.py``, ``test_kucherenko.py``, and
-``test_correlated_agreement.py``: ``Y = a . X`` with ``X ~ N(0, R)`` under a
+One model serves ``test_vkoga.py``, ``test_kucherenko.py`` and the
+custom-sampler tests: ``Y = a . X`` with ``X ~ N(0, R)`` under a
 Gaussian copula, where every correlated variance-based index is closed form:
 
     V(Y)   = a' R a
@@ -44,6 +44,7 @@ silently produces an index outside ``[0, 1]``: for
 from __future__ import annotations
 
 import numpy as np
+from scipy.special import ndtri
 
 from jaxgsa.problem import Problem
 
@@ -84,6 +85,48 @@ for (_i, _j), _rho in zip(
 ):
     R_ASYM[_i, _j] = R_ASYM[_j, _i] = _rho
 assert np.linalg.eigvalsh(R_ASYM).min() > 0, "R_ASYM must be positive definite"
+
+
+def gaussian_sampler(R: np.ndarray):
+    """Build a custom sampler for ``N(0, R)`` written by hand.
+
+    It follows the ``InputSampler`` contract (``sampler(uniform_points, *,
+    conditioning_rows=None, fixed_indices=())``). The joint draw is
+    ``z @ chol(R).T``. A conditional draw keeps the fixed columns exactly and
+    draws the free ones from the closed-form Gaussian conditional. It does not
+    use :mod:`jaxgsa._core.copula`, so it is an independent route to the same
+    distribution.
+
+    Args:
+        R: Correlation matrix of the inputs. The marginals are ``N(0, 1)``.
+
+    Returns:
+        The sampler. Pair it with ``GAUSS_PROBLEM.with_sampler(sampler)``.
+    """
+    D = R.shape[0]
+    chol = np.linalg.cholesky(R)
+
+    def sampler(
+        u: np.ndarray,
+        *,
+        conditioning_rows: np.ndarray | None = None,
+        fixed_indices: tuple[int, ...] = (),
+    ) -> np.ndarray:
+        z = ndtri(np.clip(u, 1e-12, 1 - 1e-12))
+        if not fixed_indices:
+            return z @ chol.T
+        assert conditioning_rows is not None
+        rows = conditioning_rows.copy()
+        fixed = list(fixed_indices)
+        free = [j for j in range(D) if j not in fixed]
+        if not free:
+            return rows
+        beta = R[np.ix_(free, fixed)] @ np.linalg.inv(R[np.ix_(fixed, fixed)])
+        cov = R[np.ix_(free, free)] - beta @ R[np.ix_(fixed, free)]
+        rows[:, free] = rows[:, fixed] @ beta.T + z[:, free] @ np.linalg.cholesky(cov).T
+        return rows
+
+    return sampler
 
 
 def analytic_indices(a: np.ndarray, R: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
@@ -163,3 +206,89 @@ def _check_su_le_stu(a: np.ndarray, R: np.ndarray, label: str) -> None:
 
 _check_su_le_stu(A_COEF, R_GAUSS, "R_GAUSS")
 _check_su_le_stu(A_COEF_ASYM, R_ASYM, "R_ASYM")
+
+
+# --- subset costs, Shapley effects and PME from the analytic closed index ------
+# These helpers do not use jaxgsa.kucherenko. The Shapley and PME values come
+# from the permutation (random-order) definitions, not the subset formulas
+# that the estimator code uses.
+
+
+def analytic_closed(a: np.ndarray, R: np.ndarray, subset: tuple[int, ...]) -> float:
+    """Closed index ``V(E(Y|X_u)) / V(Y)`` of a linear model on ``N(0, R)``.
+
+    ``E(Y|X_u) = a' R[:,u] R[u,u]^-1 X_u``, so its variance is
+    ``a' R[:,u] R[u,u]^-1 R[u,:] a``.
+    """
+    var_y = float(a @ R @ a)
+    if not subset:
+        return 0.0
+    u = list(subset)
+    cross = R[:, u] @ np.linalg.solve(R[np.ix_(u, u)], R[u, :])
+    return float(a @ cross @ a) / var_y
+
+
+def analytic_costs(a: np.ndarray, R: np.ndarray) -> tuple[dict, dict]:
+    """Closed and total cost of every subset, keyed by a frozenset of indices.
+
+    The total index is the dual: ``S^T_u = 1 - S^clos_{D - u}``.
+    """
+    from itertools import combinations
+
+    D = a.shape[0]
+    closed, total = {}, {}
+    for size in range(D + 1):
+        for u in combinations(range(D), size):
+            closed[frozenset(u)] = analytic_closed(a, R, u)
+    for u in closed:
+        total[u] = 1.0 - closed[frozenset(range(D)) - u]
+    return closed, total
+
+
+def shapley_by_permutations(cost: dict, D: int) -> np.ndarray:
+    """Shapley values as the uniform average over orderings (Owen 2014)."""
+    from itertools import permutations
+
+    out = np.zeros(D)
+    perms = list(permutations(range(D)))
+    for pi in perms:
+        seen: frozenset = frozenset()
+        for i in pi:
+            out[i] += cost[seen | {i}] - cost[seen]
+            seen = seen | {i}
+    return out / len(perms)
+
+
+def pme_by_permutations(total: dict, D: int) -> np.ndarray:
+    """Proportional values of a positive game by Eqs. 10 and 11 of Herin et al. (2024).
+
+    ``p(pi)`` is proportional to ``1 / prod_j v(C_j(pi))``. This needs every
+    ``v(C_j(pi)) > 0``, so call it on games with no null coalition.
+    """
+    from itertools import permutations
+
+    weights, perms = [], list(permutations(range(D)))
+    for pi in perms:
+        chain = [frozenset(pi[: j + 1]) for j in range(D)]
+        weights.append(1.0 / np.prod([total[c] for c in chain]))
+    weights_a = np.array(weights) / np.sum(weights)
+    out = np.zeros(D)
+    for w, pi in zip(weights_a, perms):
+        seen: frozenset = frozenset()
+        for i in pi:
+            out[i] += w * (total[seen | {i}] - total[seen])
+            seen = seen | {i}
+    return out
+
+
+# A D=4 correlated Gaussian case with mixed-sign coefficients for subset tests.
+R_SUBSET4 = np.array(
+    [
+        [1.0, 0.5, 0.2, 0.0],
+        [0.5, 1.0, 0.3, 0.1],
+        [0.2, 0.3, 1.0, -0.4],
+        [0.0, 0.1, -0.4, 1.0],
+    ]
+)
+A_SUBSET4 = np.array([1.0, 0.5, -1.0, 2.0])
+assert np.linalg.eigvalsh(R_SUBSET4).min() > 0, "R_SUBSET4 must be positive definite"

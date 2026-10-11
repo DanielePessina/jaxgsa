@@ -1,6 +1,6 @@
 ---
 name: jaxgsa
-description: Use when writing, reviewing, or documenting code that uses jaxgsa for global sensitivity analysis in JAX. Covers defining a Problem, drawing a Sobol, Morris, eFAST, or Kucherenko design, drawing plain Monte Carlo samples, and running any of the thirteen analysis methods (sobol, morris, efast, kucherenko, pce, hdmr, shapley, dgsm, hsic, pawn, borgonovo, optimal_transport, vkoga), including correlated and categorical inputs, regular and bucketed irregular outputs, confidence intervals, batching, and xarray export.
+description: Use when writing, reviewing, or documenting code that uses jaxgsa for global sensitivity analysis in JAX. Covers defining a Problem, drawing a Sobol, Morris, eFAST, or Kucherenko design, drawing plain Monte Carlo samples, and running any of the fourteen analysis methods (sobol, morris, efast, kucherenko, pce, hdmr, shapley, dgsm, hsic, pawn, borgonovo, optimal_transport, vkoga, rank), including correlated and categorical inputs, regular and bucketed irregular outputs, confidence intervals, batching, and xarray export.
 ---
 
 # jaxgsa
@@ -15,7 +15,8 @@ jaxgsa.Problem, jaxgsa.UniformSpec, jaxgsa.GaussianSpec, jaxgsa.CategoricalSpec
 jaxgsa.sampling            # plain draws and correlation helpers
 jaxgsa.sobol, jaxgsa.morris, jaxgsa.efast, jaxgsa.kucherenko   # build own design
 jaxgsa.pce, jaxgsa.hdmr, jaxgsa.shapley, jaxgsa.dgsm, jaxgsa.hsic,
-jaxgsa.pawn, jaxgsa.borgonovo, jaxgsa.optimal_transport, jaxgsa.vkoga  # given data
+jaxgsa.pawn, jaxgsa.borgonovo, jaxgsa.optimal_transport, jaxgsa.vkoga,
+jaxgsa.rank  # given data
 jaxgsa.benchmarks, jaxgsa.config
 ```
 
@@ -38,26 +39,47 @@ result = jaxgsa.sobol.analyze(design, Y)
 result.S1, result.ST, result.S2
 ```
 
-`verbose=True` is the default on all thirteen `analyze()` functions and on the
+`verbose=True` is the default on all fourteen `analyze()` functions and on the
 four design samplers. The printed block is a receipt. It echoes the marginals,
 the inferred `(N, T, K)` shape, the invalid-run count, and the top-k ranking, so
 a transposed `Y` shows up before you plot anything. Read it on the first run and
 pass `verbose=False` in loops and tests. `jaxgsa.sampling.monte_carlo` has no
 `verbose` keyword.
 
+## Reference files
+
+This file is the overview. Read the matching reference file before you pick
+between methods of one family or explain their results:
+
+- `reference/variance-based.md`: `sobol`, `efast`, `pce`, `hdmr`, `shapley`
+  and `rank`.
+- `reference/moment-independent.md`: `pawn`, `borgonovo`,
+  `optimal_transport` and `hsic`.
+- `reference/screening.md`: `morris` and `dgsm`.
+- `reference/dependent-inputs.md`: correlated inputs, custom samplers,
+  `kucherenko` and `vkoga`.
+
 ## Problem
 
-The direct constructor takes uniform marginals only.
+The direct constructor takes uniform marginals only. `sampler` is described in
+"Custom input sampler" below.
 
 ```python
 jaxgsa.Problem(
     names: tuple[str, ...],
     bounds: tuple[tuple[float, float], ...],
+    *,
     output_names: tuple[str, ...] | None = None,
     correlation=None,
     correlation_type: Literal["latent", "spearman"] = "latent",
+    sampler=None,
+    sampler_dimension: int | None = None,
 )
 ```
+
+Every argument after `bounds` is keyword-only, and so is every argument of
+`from_dict` after `params`. A bare string for `names` or `output_names` raises
+`TypeError`.
 
 `from_dict` takes any mix of marginals, in dict insertion order, which is the
 model's column order.
@@ -73,6 +95,7 @@ problem = jaxgsa.Problem.from_dict(
     truncate_gaussians=None,     # e.g. 1e-4 to bound every Gaussian at its own quantiles
     correlation=None,
     correlation_type="latent",
+    # sampler=None, sampler_dimension=None also work here
 )
 ```
 
@@ -81,8 +104,8 @@ Each value may be a `(low, high)` tuple, a spec dataclass (`UniformSpec`,
 (`UniformInputSpec`, `GaussianInputSpec`, `CategoricalInputSpec`). The dict form
 is a TypedDict, so a problem written that way is JSON-expressible.
 
-Properties: `names`, `bounds`, `output_names`, `num_vars`, `input_specs`,
-`correlation`, `has_correlated_inputs`, `has_non_uniform_inputs`,
+Properties: `names`, `bounds`, `output_names`, `n_params`, `input_specs`,
+`correlation`, `sampler`, `sampler_dimension`, `dependence`, `has_non_uniform_inputs`,
 `has_categorical_inputs`, `categorical_labels`.
 
 Keep in mind:
@@ -108,25 +131,30 @@ Keep in mind:
 
 ```python
 # Design builders. The method must be able to run your model at its points.
-jaxgsa.sobol.sample(problem, n_samples, *, base_n=None, calc_second_order=True,
+jaxgsa.sobol.sample(problem, n_samples=None, *, base_n=None, calc_second_order=True,
                     scramble=True, seed=None, verbose=True)      -> SobolSamples
-jaxgsa.morris.sample(problem, n_trajectories, *, num_levels=4,
+jaxgsa.morris.sample(problem, n_trajectories, *, n_levels=4,
                      method="trajectory", scramble=True, seed=None,
                      truncation_quantile=1e-4, verbose=True)     -> MorrisSamples
 jaxgsa.efast.sample(problem, n_per_curve, *, M=4, seed=None,
                     verbose=True)                                -> EFASTSamples
-jaxgsa.kucherenko.sample(problem, n_samples, *, scramble=True, seed=None,
+jaxgsa.kucherenko.sample(problem, n_samples=None, *, base_n=None,
+                         subsets="singletons", scramble=True, seed=None,
                          verbose=True)                           -> KucherenkoSamples
 
-# Plain draws and correlation helpers, for the nine given-data methods.
-jaxgsa.sampling.monte_carlo(problem, n, *, seed=None)     -> np.ndarray  (n, D)
-jaxgsa.sampling.correlate(X, problem, *, seed=None)       -> np.ndarray  (N, D)
+# Plain draws and correlation helpers, for the ten given-data methods.
+jaxgsa.sampling.monte_carlo(problem, n_samples, *, seed=None)     -> np.ndarray  (n, D)
+jaxgsa.sampling.correlate(problem, X, *, seed=None)       -> np.ndarray  (N, D)
 jaxgsa.sampling.fit_correlation(problem, X)               -> np.ndarray  (D, D)
 jaxgsa.sampling.correlation_from_covariance(cov)          -> np.ndarray  (D, D)
 ```
 
 `seed` is keyword-only everywhere. It accepts an int, an existing
-`np.random.Generator`, or `None` for fresh OS entropy.
+`np.random.Generator`, or `None` for fresh OS entropy. A JAX key raises
+`TypeError`: keys go to `analyze(key=...)`, which also takes an int.
+`jaxgsa.sampling.transform(problem, U)` maps your own unit-cube design
+(for example a Latin hypercube) through the problem's marginals, copula or
+sampler.
 
 Keep in mind:
 
@@ -137,17 +165,19 @@ Keep in mind:
 - Duplicate rows are removed, so `n_runs` is below `n_expanded`. Evaluate
   exactly the rows in `samples.samples`, in order, and pass the outputs straight
   to `analyze`, which rebuilds the blocks itself.
-- The seed feeds the Owen scramble, not the sequence. Keep `scramble=True`.
+- The seed feeds the scramble (a linear matrix scramble with a digital shift), not the sequence. Keep `scramble=True`.
   Scrambling is what removes the Sobol sequence's structural duplicates, and
   without it a Saltelli design loses real blocks to deduplication.
-  `kucherenko.sample` raises on `scramble=False, seed=...` rather than accept a
-  seed that would do nothing. `efast.sample` has no `scramble`, because its
+  `sobol.sample` and `kucherenko.sample` raise `ValueError` on
+  `scramble=False, seed=...` rather than accept a seed that would do nothing. `efast.sample` has no `scramble`, because its
   randomness is the phase shift of each search curve.
 - `monte_carlo` honors `problem.correlation` through the NORTA construction and
-  returns level codes for categorical columns. An independent problem keeps the
+  a custom `problem.sampler` through its joint branch. It returns level codes
+  for categorical columns. An independent problem keeps the
   plain uniform path bit for bit, so old seeds reproduce old samples.
 - `correlate` re-pairs an existing sample by rank with the Iman-Conover method,
   so the marginal values survive untouched and only the pairing changes. It
+  needs `problem.correlation` and raises without it. It
   raises on a non-finite `X`, because `np.sort` puts `NaN` last and a bad row
   would be pinned to the extreme rank scores.
 - `fit_correlation` estimates the latent matrix from data through the Spearman
@@ -172,7 +202,7 @@ narrow = samples.transform({"x1": {"low": 0.0, "high": 1.0}, ...})
 wide   = samples.transform({"x1": {"low": -1.0, "high": 2.0}, ...})
 ```
 
-`theta` has type `jaxgsa.Theta`, a mapping keyed by parameter name and then by
+`theta` has type `jaxgsa.sobol.Theta`, a mapping keyed by parameter name and then by
 the field names of that parameter's distribution. `transform` is written in JAX
 and is differentiable with respect to `theta`. It raises for a problem with
 categorical parameters, because a categorical inverse CDF is a step function.
@@ -205,32 +235,35 @@ Y = [
     (times_b, values_b),  # values_b: (N, T_b) or (N,)
 ]
 result = jaxgsa.sobol.analyze(samples, Y)
-result.channels["y0"].S1
+result.channels["y0"].S1   # channel names are problem.output_names, else y0, y1, ...
 result.to_dataset()
 ```
 
 Ragged `Y` automatically selects bucketing. It analyzes each channel through
 the regular method kernels without padding or fabricated values. Bucketing is
-available on twelve methods; DGSM needs a fixed-layout Jacobian and rejects the
+available on thirteen methods; DGSM needs a fixed-layout Jacobian and rejects the
 ragged form. There is no mask mode: a padded/masked estimator would be a
 separate missing-data contract rather than this per-channel path.
 
 ## Cross-cutting keywords
 
-Every `analyze()` takes `verbose` and `on_invalid`. Eleven of the thirteen take
+Every `analyze()` takes `verbose` and `on_invalid`. Every `analyze()` also accepts
+`key` as an int and turns it into a `jax.random.key`. Twelve of the fourteen take
 the bootstrap block. Which batching keyword exists depends on the axis the
 method batches over.
 
 ### Failed model runs
 
-`on_invalid: "raise" | "propagate" | "drop"`, default `"raise"`. The default
+`on_invalid: "raise" | "propagate" | "drop" | "skip"`, default `"raise"`. The default
 refuses, because an index computed from part of a sample is a different quantity
 from the one you asked for, and `analyze()` is cheap to run again.
 
 `"drop"` removes the whole block a bad value sits in: a Saltelli group, a Morris
 trajectory, a Kucherenko base point, or one row for a given-data method.
-`jaxgsa.efast.analyze` accepts only `"raise"` and `"propagate"`, because its
-ordered Fourier sweep changes meaning if a point is removed.
+`jaxgsa.efast.analyze` refuses `"drop"`, because its ordered Fourier sweep
+changes meaning if a point is removed. `"skip"` turns the non-finite check off.
+It is for output you have already cleaned, and `result.invalid` then always
+reads clean. `"none"` is not a value and raises `ValueError`.
 
 Every result carries `result.invalid`.
 
@@ -245,8 +278,8 @@ result.invalid.unit             # ROW, SALTELLI_GROUP, TRAJECTORY, BASE_POINT, C
 
 Both index arrays refer to the array as you passed it, so they name model runs
 you can find. For a block design they differ by a large factor: one failed run
-inside an eFAST search curve gives one entry in `bad_row_indices` and 257 in
-`row_indices`.
+inside an eFAST search curve gives one entry in `bad_row_indices` and
+`n_per_curve` entries in `row_indices`.
 
 ### Confidence intervals
 
@@ -256,11 +289,12 @@ result = jaxgsa.sobol.analyze(
     n_bootstrap=1000,          # default 0, meaning no interval
     conf_level=0.95,
     ci_method="quantile",      # or "gaussian"
-    key=jax.random.key(0),     # REQUIRED once n_bootstrap > 0, raises without it
+    key=jax.random.key(0),     # or an int. REQUIRED once n_bootstrap > 0, raises without it
     keep_replicates=True,      # keeps result.ci.replicates
 )
 result.S1_conf   # (2, ...), the leading axis holds [lower, upper]
-result.ci.level, result.ci.method, result.ci.n_bootstrap, result.ci.replicates
+result.ci.level, result.ci.method, result.ci.n_bootstrap
+result.ci.replicates   # dict of draws per index, e.g. replicates["S1"]: (n_bootstrap, ...)
 ```
 
 `"quantile"` reads the endpoints off the empirical bootstrap distribution.
@@ -302,10 +336,16 @@ holds `2D+1` matrices of shape `(N, N)` at once and only `N` bounds that.
 
 ### indices(), the traceable core
 
-Eleven namespaces expose `indices(...)`, which returns raw arrays, checks
+Twelve namespaces expose `indices(...)`, which returns raw arrays, checks
 nothing, builds no result, and is safe under `jax.jit`, `jax.vmap`, and
 `jax.grad`. `kucherenko` and `vkoga` do not have one, because Kucherenko is host
 NumPy from end to end and VKOGA's index stage is a host quasi-Monte-Carlo loop.
+Each `indices()` returns a named tuple, for example `SobolIndices(S1, ST, S2)` or
+`HSICIndices(R2, T, p_values, hsic_raw)`, so you can unpack it or read fields by
+name. `sobol.indices` always returns three fields, with `S2=None` for a
+first-order design. The first argument of every design-based `analyze` and
+`indices` is `samples`. Pass a `Problem` there and you get a `TypeError` that
+points you to the given-data methods.
 Pair `sobol.indices` with `SobolSamples.transform` to differentiate an index
 with respect to the input distribution parameters.
 
@@ -338,9 +378,9 @@ jaxgsa.config.get_memory_budget()
 
 JAX computes in 32-bit by default and downcasts a `float64` `Y` you pass it.
 jaxgsa warns when it sees this. HSIC and VKOGA need float64 outright, for the
-reasons in their sections. `set_memory_budget` reads megabytes unless `unit=`
-says otherwise, and an old byte-count call raises rather than silently meaning
-512 TB.
+reasons in their sections. `set_memory_budget` and `get_memory_budget` use megabytes unless `unit=`
+says otherwise (`"b"` for bytes). A byte count passed without `unit=` is read as
+megabytes, so pass `unit="b"` for bytes.
 
 ## Method capabilities
 
@@ -355,6 +395,7 @@ says otherwise, and an old byte-count call raises rather than silently meaning
 | `morris` | mu\*, sigma | yes | no | no | `n_bootstrap` |
 | `optimal_transport` | W2 squared index, advective and diffusive | no | yes, section | yes | `n_bootstrap` |
 | `pawn` | KS distance | no | yes, section | yes | `n_bootstrap` |
+| `rank` | S1 from one sample, rank statistic | no | yes | no | `n_bootstrap` |
 | `pce` | S1, S2, ST, surrogate | no | no | no | `n_bootstrap` |
 | `shapley` | allocation summing to 1 | no | pce no, hdmr yes | no | `n_bootstrap` |
 | `sobol` | S1, S2, ST | yes | no | yes | `n_bootstrap` |
@@ -388,6 +429,7 @@ Choosing a method:
   `optimal_transport`.
 - Want one fair number per parameter that sums to 1: Shapley effects.
 - Want a reusable surrogate too: `pce`, `hdmr`, `vkoga`.
+- Only S1, from one existing sample, with no surrogate to fit: `rank`.
 
 ## Methods
 
@@ -426,7 +468,7 @@ Keep in mind:
 ### morris, elementary-effects screening
 
 ```python
-samples = jaxgsa.morris.sample(problem, n_trajectories=50, num_levels=4,
+samples = jaxgsa.morris.sample(problem, n_trajectories=50, n_levels=4,
                                method="trajectory", seed=0)
 Y = model(samples.samples)
 result = jaxgsa.morris.analyze(samples, Y, n_bootstrap=0,
@@ -470,7 +512,8 @@ result.S1, result.ST
 ```
 
 `M`, `n_per_curve`, and the problem travel inside `EFASTSamples`, so sampling
-and analysis can never be mismatched.
+and analysis can never be mismatched. `n_per_curve` must be at least
+`4*M^2*(D-1) + 1`, and `sample` raises below that.
 
 Keep in mind: no `S2`, no bootstrap, no `on_invalid="drop"`, and a known upward
 bias on `ST` from harmonic interference. Pick eFAST when the run budget is the
@@ -480,7 +523,7 @@ accuracy you need. Otherwise run `sobol`, which gives you more.
 ### kucherenko, Sobol indices under declared dependence
 
 ```python
-ks = jaxgsa.kucherenko.sample(problem, 4096, seed=0)   # reads problem.correlation
+ks = jaxgsa.kucherenko.sample(problem, base_n=4096, seed=0)   # reads problem.correlation or problem.sampler
 Y = model(ks.samples)
 result = jaxgsa.kucherenko.analyze(ks, Y, n_bootstrap=0)
 result.S1   # correlation-inclusive first order, VKOGA's S_TC
@@ -488,8 +531,25 @@ result.ST   # correlation-exclusive total, VKOGA's S_TU
 result.variance
 ```
 
-Cost is `N(2D + 1)` model runs. It evaluates the real model on a
+Cost is `N(2D + 1)` model runs for `N` base points. `n_samples` is the minimum
+number of model runs, as in `sobol`. `base_n=N` sets the base points exactly.
+Give exactly one of them. The method evaluates the real model on a
 conditional-copula design and uses no surrogate.
+
+For exact Shapley effects, build the design with `subsets="all"`:
+
+```python
+ka = jaxgsa.kucherenko.sample(problem, base_n=256, subsets="all", seed=0)  # 2 <= D <= 12
+ra = jaxgsa.kucherenko.analyze(ka, model(ka.samples), n_bootstrap=100, key=0,
+                               keep_replicates=True)
+ra.shapley(cost="total")   # or cost="closed"; ShapleyResult with backend="exact"
+ra.pme()                   # proportional marginal effects; an unused input gets 0
+ra.closed, ra.subset_total, ra.subsets
+```
+
+This design has `base_n * 2^D` runs. `shapley()` and `pme()` raise `ValueError`
+on a default `"singletons"` design. Intervals need `n_bootstrap > 0` and
+`keep_replicates=True`.
 
 Keep in mind:
 
@@ -498,22 +558,23 @@ Keep in mind:
   estimates of the wrong quantity. Conditioning is closed-form only in latent
   normal space, which means tail-dependent or non-monotone dependence is not
   representable here.
-- With no declared correlation it reduces to the Saltelli column-swap scheme,
+- With no declared dependence it reduces to the Saltelli column-swap scheme,
   but uses the Homma-Saltelli S1 estimator, so it agrees with `sobol` only up to
   Monte Carlo noise. Run `sobol` in that case, which also gives you `S2`.
 - No `S2`, no surrogate, and a categorical parameter raises.
+- `result.aggregate()` is available (see Aggregating outputs).
 
 ### pce, polynomial chaos expansion
 
 Given data, and it keeps a surrogate.
 
 ```python
-X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n=4000, seed=0))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n_samples=4000, seed=0))
 Y = model(X)
 result = jaxgsa.pce.analyze(problem, X, Y, order=3, ridge=1e-8,
                             fit_ratio=0.5, batch_size=None)
 result.S1, result.S2, result.ST, result.coefficients
-result.loo_rmse, result.explained_variance, result.order
+result.rmse, result.cv_rmse, result.explained_variance, result.order
 Y_pred = result.predict(X_new, batch_size=2048)
 effects = result.shapley()
 
@@ -525,10 +586,10 @@ Keep in mind:
 - **Check the fit before you read the indices.** They are exact within the
   fitted polynomial, so a wrong polynomial gives exactly wrong indices. `order`
   defaults to 3, which is not enough for a strong nonlinearity. On Ishigami,
-  `order=3` reports `S1(x1) = 0.662` against a truth of 0.314 and captures 46%
-  of the variance.
-- `explained_variance` should sit near 1, and `loo_rmse` should be small next to
-  `Y.std()`. Raise `order` until `loo_rmse` stops falling, and watch for it
+  `order=3` with 4096 rows reports `S1(x1) = 0.662` against a truth of 0.314
+  and captures 46% of the variance.
+- `explained_variance` should sit near 1, and `cv_rmse` (out of sample) should be small next to
+  `Y.std()`. Raise `order` until `cv_rmse` stops falling, and watch for it
   turning back up, which is overfitting. `explained_variance` is in-sample, so
   it climbs as you add terms and cannot detect an overfit on its own.
   `pce.analyze` does not warn about it, so check both numbers yourself.
@@ -548,8 +609,8 @@ Keep in mind:
 Given data, and it keeps a surrogate.
 
 ```python
-result = jaxgsa.hdmr.analyze(problem, X, Y, maxorder=2, maxiter=100, m=2,
-                             lambdax=0.01, slice_chunk_size=None,
+result = jaxgsa.hdmr.analyze(problem, X, Y, order=2, max_iter=100, n_intervals=2,
+                             ridge=0.01, slice_chunk_size=None,
                              batch_size=None)
 result.Sa, result.Sb, result.S, result.ST, result.terms, result.rmse
 result.S1, result.S2, result.S3          # dense vector, matrix, tensor views
@@ -573,11 +634,13 @@ Keep in mind:
   `kucherenko.ST` or `vkoga.S_TU` for a conditional-variance total. `S1` carries
   the matching caveat: it is the structural share `Sa` of the first-order term,
   not the Sobol first-order index.
+- HDMR with fewer than 300 rows warns. It raises only below
+  `(n_intervals + 3)**min(order, D) + 1` rows.
 - **Check `result.S.sum()` is near 1 before ranking anything.** The shortfall is
   variance the surrogate left unexplained, and every index inherits it. Raise
-  `maxorder` or `m`, or accept that this model does not decompose into low-order
+  `order` or `n_intervals`, or accept that this model does not decompose into low-order
   terms.
-- Only the first-order components are backfitted, up to `maxiter` sweeps with an
+- Only the first-order components are backfitted, up to `max_iter` sweeps with an
   early stop once the coefficients settle. Every higher-order component is a
   single ridge solve.
 - The surrogate is trained on the outputs you supply, so `predict` and `rmse`
@@ -591,7 +654,7 @@ Keep in mind:
 ```python
 # Canonical form: derive from a fitted surrogate.
 result = jaxgsa.pce.analyze(problem, X, Y, order=10, verbose=False).shapley()
-result = jaxgsa.hdmr.analyze(problem, X, Y, maxorder=2).shapley(
+result = jaxgsa.hdmr.analyze(problem, X, Y, order=2).shapley(
     include_correlative=True)
 
 # Convenience wrapper: fit the chosen surrogate and allocate in one step.
@@ -618,9 +681,9 @@ Keep in mind:
 - Shapley dissolves interactions into the participants by design. For the
   interaction itself, read `S2` from `sobol` or `pce`, or the `ST - S1` gap.
 - Backend keyword arguments are forwarded unchecked, so `backend="pce",
-  maxorder=3` raises a plain `TypeError` from `pce.analyze` rather than a
+  n_intervals=3` raises a plain `TypeError` from `pce.analyze` rather than a
   jaxgsa-specific message.
-- `VKOGAResult.shapley()` raises `NotImplementedError` on purpose, because a
+- `VKOGAResult` has no `shapley()` method on purpose, because a
   kernel expansion has no term-wise variance decomposition to allocate from.
 - With `backend="hdmr", include_correlative=True` the correlative shares can go
   negative. That is a defensible reading of the ANCOVA split, and it no longer
@@ -631,16 +694,16 @@ Keep in mind:
 ### dgsm, derivative-based screening
 
 ```python
-X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n=1024, seed=0))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n_samples=1024, seed=0))
 
 # fn takes ONE sample row, shape (D,), and returns a scalar, (K,), or (T, K).
-result = jaxgsa.dgsm.analyze(problem, lambda x: model(x[None, :])[0], X,
+result = jaxgsa.dgsm.analyze(problem, X, fn=lambda x: model(x[None, :])[0],
                              batch_size=None)
 
 # Or pass a Jacobian computed elsewhere and skip fn entirely.
-result = jaxgsa.dgsm.analyze(problem, Y=Y, dfdx=dfdx)
+result = jaxgsa.dgsm.analyze(problem, X, Y, dfdx=dfdx)
 
-result.nu, result.sigma, result.upper_bound, result.lower_bound, result.var_y
+result.nu, result.mu, result.upper_bound, result.lower_bound, result.variance
 ```
 
 Cost is `N` Jacobians, each about `min(D, T*K)` evaluations. jaxgsa picks
@@ -673,7 +736,7 @@ jax.config.update("jax_enable_x64", True)      # before the analysis
 
 result = jaxgsa.hsic.analyze(problem, X, Y, n_perms=200,
                              key=jax.random.key(0), bandwidth=1.0)
-result.R2_HSIC, result.T_HSIC, result.p_values, result.hsic_raw
+result.R2, result.T, result.p_values, result.hsic_raw
 ```
 
 `key` is required, because the permutation test always runs and there is no
@@ -700,29 +763,29 @@ Keep in mind:
   `borgonovo`.
 - Outputs of extreme magnitude can overflow float32 in the squared distances.
   Rescale by hand with `(Y - Y.mean(0)) / Y.std(0)`, which changes nothing else.
-- The `T_HSIC` minus `R2_HSIC` gap says interactions exist, not which pairs.
+- The `T` minus `R2` gap says interactions exist, not which pairs.
 
 ### pawn, CDF-based sensitivity
 
 ```python
-result = jaxgsa.pawn.analyze(problem, X, Y, n_bins=10, statistic="median",
+result = jaxgsa.pawn.analyze(problem, X, Y, n_classes=10, statistic="median",
                              n_bootstrap=0, slice_chunk_size=None)
-result.pawn, result.n_valid_bins
+result.pawn, result.n_valid_classes
 ```
 
 `statistic` is `"median"`, `"max"`, or `"mean"` over the per-bin KS distances.
 
 Keep in mind:
 
-- `n_bins` trades conditioning resolution against sample density per bin. Check
-  `result.n_valid_bins`, which counts the bins that held at least 2 samples per
+- `n_classes` trades conditioning resolution against sample density per bin. Check
+  `result.n_valid_classes`, which counts the bins that held at least 2 samples per
   parameter. Bins below that are dropped, and `analyze` warns when a parameter
   keeps fewer than half its bins.
 - Bins are equal-probability on the marginal's own CDF, so a skewed marginal
   does not by itself starve a tail bin. What empties one is a small `N`, a large
-  `n_bins`, or samples that land outside the declared marginal.
+  `n_classes`, or samples that land outside the declared marginal.
 - Categorical parameters need no binning. The level code already names the
-  conditioning class, so PAWN uses one bin per level, `n_bins` does not apply,
+  conditioning class, so PAWN uses one bin per level, `n_classes` does not apply,
   and relabelling the levels gives the same number.
 - The KS distance is a supremum, so it reacts to the single largest gap between
   two CDFs and ignores everything else. It is the sharper instrument when a
@@ -735,7 +798,7 @@ Keep in mind:
 ```python
 result = jaxgsa.borgonovo.analyze(problem, X, Y, n_classes=None, grid_size=100,
                                   bandwidth="silverman", n_bootstrap=0,
-                                  bias_correct=None, degenerate_tol=...,
+                                  bias_correct=False, degenerate_tol=...,
                                   degenerate_bandwidth="auto",
                                   slice_chunk_size=None)
 result.delta, result.S1
@@ -755,9 +818,9 @@ Keep in mind:
   `analyze` raises, naming the parameter and the knob that applies to that case.
   The value is never clipped, because a clipped value looks plausible and is
   still wrong. A confidence bound outside the range only warns.
-- `n_bootstrap > 0` with `bias_correct` not `False` applies the bias correction,
-  including under the `bias_correct=None` default, which warns once per process
-  that it did. The corrected estimate can fall marginally below 0 for weak
+- `bias_correct` is a plain `bool`, default `False`, which always gives the plain
+  estimate. `bias_correct=True` applies the bias correction and needs
+  `n_bootstrap > 0`. The corrected estimate can fall marginally below 0 for weak
   parameters. Set `n_bootstrap=0` for the raw plug-in estimate.
 - Below about 500 samples, read the ranking and ignore the magnitudes. The
   plug-in estimate is biased upward and the correction can push weak parameters
@@ -777,7 +840,7 @@ Keep in mind:
 result = jaxgsa.optimal_transport.analyze(
     problem, X, Y,
     mode="univariate",          # or "multivariate" or "trajectory"
-    n_partitions=None, standardize_outputs=True,
+    n_classes=None, standardize_outputs=True,
     epsilon=0.03, max_iter=2000, tol=None,
     dummy=False, n_bootstrap=0, slice_chunk_size=None,
 )
@@ -802,11 +865,11 @@ Keep in mind:
   irrelevant parameters visibly above zero. Reading those indices without the
   dummy floor will make you believe in parameters that do nothing. Read
   `above_dummy`.
-- Cost is `(n_bootstrap + 1) * D * n_partitions` Sinkhorn solves for continuous
+- Cost is `(n_bootstrap + 1) * D * n_classes` Sinkhorn solves for continuous
   parameters, times `K` in `"trajectory"` mode, plus one single-replicate dummy
   pass. At 100 replicates, 10 parameters, and 25 partitions that is over 25000
   solves. A categorical parameter costs its own level count instead of
-  `n_partitions`.
+  `n_classes`.
 - Valid under correlated inputs, and correlation-inclusive by construction.
 - One parameter at a time, so no `S2`, no total order, and no surrogate.
 
@@ -820,30 +883,29 @@ jax.config.update("jax_enable_x64", True)      # before fitting
 
 result = jaxgsa.vkoga.analyze(
     problem, X, Y,
-    correlation=None,        # overrides problem.correlation for this call
     gamma=None, ridge=None, max_centers=None, n_folds=10,
     n_outer=512, n_inner=128, n_variance=8192,
-    key=jax.random.key(0),   # REQUIRED, the index stage is always Monte Carlo
+    key=jax.random.key(0),   # REQUIRED, keyword-only, the index stage is always Monte Carlo
     batch_size=None,
 )
 result.S_TC     # total correlated, the input-prioritisation measure
 result.S_TU     # total uncorrelated, the input-fixing measure
 result.S_U, result.S_C, result.S_IU
-result.correlation, result.n_centers, result.gamma, result.ridge, result.rmse
+result.problem.correlation, result.dependence, result.n_centers, result.gamma, result.ridge, result.rmse
 Y_pred = result.predict(X_new, batch_size=2048)
 ```
 
 Keep in mind:
 
-- **Train on an independent, space-filling design, even when the analysis is
-  correlated.** This is the easy way to get wrong answers. A correlated sample
-  concentrates on a ridge through the parameter space, but `S_TU` conditions on
-  the other parameters and then resamples `X_i` across its whole marginal, which
-  is precisely the off-ridge region a correlated training set never visited. The
-  surrogate extrapolates exactly where the estimator leans on it hardest. If
-  your data is observational, you can still fit the copula from it with
-  `fit_correlation`, but read `S_TU`, and so `S_U`, `S_C`, and `S_IU`, as
-  carrying that extrapolation error.
+- **Training data must cover the analysis distribution.** The surrogate must
+  be accurate where the distribution in `problem` puts its mass. Both nested
+  estimators draw from conditionals of the joint distribution, never from a
+  whole marginal with the rest held fixed. So rows drawn from the analysis
+  distribution work. An independent design is a safe default when the
+  correlation is not fixed yet, or when one fit is reused under several
+  correlations. Avoid training data that misses regions the analysis covers,
+  for example trained under rho=+0.8 and analysed under rho=-0.8. Check
+  `cv_rmse`.
 - **Use float64.** The coefficient step forms the normal matrix, which squares
   the condition number of the cross kernel, and for small `gamma` that exceeds
   what single precision carries. The surrogate can come out an order of
@@ -855,8 +917,31 @@ Keep in mind:
   `ridge` explicitly once you know good values to skip the search.
   `n_outer`, `n_inner`, and `n_variance` only touch the surrogate, so they are
   cheap to raise.
-- `result.shapley()` raises `NotImplementedError`, and there is no `S2`. Use
+- `VKOGAResult` has no `shapley()` method, and there is no `S2`. Use
   `hdmr` when you need to know which interaction carries the variance.
+
+### rank, first-order index from one sample
+
+```python
+result = jaxgsa.rank.analyze(problem, X, Y, n_bootstrap=0)   # key= needed if n_bootstrap > 0
+result.S1     # not clipped, so it can be negative
+```
+
+Rank statistic of Gamboa, Gremaud, Klein and Lagnoux (2022). It needs at least
+3 rows and refuses categorical inputs. It accepts independent, Gaussian-copula
+and custom-sampler problems, and every `Y` shape. The intervals come from 80%
+subsamples without replacement. They are a checked heuristic, not an exact
+interval. It is the cheapest first-order check on an existing dataset.
+
+## Aggregating outputs
+
+`SobolResult`, `KucherenkoResult` and `PCEResult` have
+`aggregate(*, weights="variance")`. It collapses the output axes into one index
+per input, weighted by output variance (`weights="equal"` for equal weights).
+The one output is named `"aggregate"`. With a bootstrap, pass
+`keep_replicates=True` to `analyze`, or the aggregated intervals are `None` and
+a warning says why. An aggregated `PCEResult` holds indices only, so `predict()`
+and `shapley()` raise `ValueError`.
 
 ## Export
 
@@ -885,3 +970,72 @@ from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate, ANALYTICAL_S1
 ```
 
 Use them to check an estimator, or to measure how fast it converges.
+
+## Custom input sampler
+
+A problem can carry a custom sampler. It declares a joint distribution that is
+not a Gaussian copula. Declare it with the problem:
+
+```python
+problem = jaxgsa.Problem(names=..., bounds=..., sampler=f, sampler_dimension=2)
+problem = jaxgsa.Problem.from_dict(..., sampler=f, sampler_dimension=2)
+problem = problem.with_sampler(f, sampler_dimension=2)   # copy with a sampler
+problem = problem.with_sampler(None)             # copy without it
+```
+
+A problem has either a Gaussian-copula `correlation` or a `sampler`, never both
+(`ValueError`). `problem.dependence` is `"independent"`, `"gaussian"` or
+`"custom"`. Kucherenko and VKOGA results carry the same `dependence` field.
+
+The sampler type is `jaxgsa.sampling.InputSampler`:
+
+```python
+sampler(uniform_points, *, conditioning_rows=None, fixed_indices=())
+```
+
+The package supplies `(n, sampler_dimension)` uniform points. Return `(n, D)`
+finite real physical inputs in `problem.names` order. `sampler_dimension`
+defaults to `D`. The package makes exactly three kinds of call:
+
+- `fixed_indices=()`: joint draws, `conditioning_rows=None`.
+- `fixed_indices=(i,)`: keep column `i` of `conditioning_rows`, redraw the rest
+  given `x_i`.
+- `fixed_indices` holding every index except `i`: keep those columns, redraw
+  `x_i` given the rest.
+
+Copy the fixed columns exactly. Overwriting fixed columns after a joint draw is
+valid only for independent inputs. The callback must be deterministic: identical
+arguments give identical outputs. The package passes copies, so changing the
+arguments does no harm. All randomness comes from the package: Kucherenko's
+`seed` and `scramble`, or VKOGA's required `key`. Everything uses scrambled Sobol' points, and sample sizes round up to
+the next power of two. Shapes, finite values and fixed columns are checked.
+Statistical consistency is the user's responsibility.
+
+`kucherenko.sample(problem, n_samples, seed=...)` and
+`vkoga.analyze(problem, X_train, Y_train, key=...)` read the sampler from the
+problem.Kucherenko and VKOGA share one estimator for both dependence kinds, and the
+custom path costs about the same time.
+
+Sobol, Morris and eFAST designs and the independence-only analyses refuse a
+custom-sampler problem, as they refuse a correlated one. For given-data
+methods, draw `X` with `jaxgsa.sampling.monte_carlo(problem, n_samples, seed=...)`. It
+sends pseudo-random uniforms through the joint branch, so rows are independent
+draws and row bootstrap and HSIC permutation tests stay valid. This does not
+turn an ordinary `X` matrix into a Kucherenko analysis design. Saved designs
+retain sampled rows and provenance, not callable code. VKOGA's declared
+marginals must match the sampler, because its coordinate transform and
+component bases still use them. Training data must cover the analysis
+distribution. Dependence fitting remains explicit, never triggered just by
+supplying data.
+
+Custom samplers can preserve higher-order dependence, not just pairwise
+correlations. Use the documented `U, V ~ Uniform(0, 1)`, `W = (U + V) % 1`
+example when explaining or testing this: every pair is independent but any two
+determine the third. For `Y = W`, population `S1 = [0, 0, 1]` and conditional
+`ST = [0, 0, 0]`. Zero `ST` expresses redundant information, not causal
+inactivity. An identity Gaussian copula loses the constraint and gives
+`ST = [0, 0, 1]`. A two-variable example with zero correlations alone does not
+test higher-order dependence. Validate all fixed subsets, including empty and
+all, and preserve held coordinates. These are per-input sensitivity summaries,
+not discovery of dependent groups.
+See `docs/examples/correlated-inputs.md` for a runnable sampler.

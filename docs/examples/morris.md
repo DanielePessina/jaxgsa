@@ -49,7 +49,7 @@ import jax.numpy as jnp
 import jaxgsa
 from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-sr = jaxgsa.morris.sample(PROBLEM, n_trajectories=50, num_levels=4, seed=42)
+sr = jaxgsa.morris.sample(PROBLEM, n_trajectories=50, n_levels=4, seed=42)
 Y = evaluate(jnp.asarray(sr.samples))
 result = jaxgsa.morris.analyze(sr, Y)
 
@@ -60,11 +60,11 @@ print("sigma/mu_star:", result.sigma / result.mu_star)
 ```
 
 ```
-jaxgsa.morris.sample: D=3, method=trajectory, n_trajectories=50, num_levels=4, n_expanded=200, n_runs=63, duplicates_removed=137 (68.5%)
+jaxgsa.morris.sample: D=3, method=trajectory, n_trajectories=50, n_levels=4, n_expanded=200, n_runs=63, duplicates_removed=137 (68.5%)
 jaxgsa.morris.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=200 runs, T=1 x K=1 output slice
     invalid: none found in 50 trajectories (policy 'raise')
   timing:
@@ -109,7 +109,7 @@ answer, and it cost 63 runs.
 
 ## The grid resolution is a real choice
 
-`num_levels` sets the grid the trajectory design walks, and the step is
+`n_levels` sets the grid the trajectory design walks, and the step is
 `delta = p / (2 * (p - 1))` of the unit range. At the default `p = 4` that step
 is two thirds of each input's range. That is a very coarse difference, and on a
 periodic response it can alias.
@@ -122,15 +122,15 @@ Ishigami shows this in the numbers above. Its `x2` term is `7 * sin(x2)^2` on
 
 ```python
 for p in (4, 8, 20):
-    sr = jaxgsa.morris.sample(PROBLEM, n_trajectories=50, num_levels=p, seed=42, verbose=False)
+    sr = jaxgsa.morris.sample(PROBLEM, n_trajectories=50, n_levels=p, seed=42, verbose=False)
     r = jaxgsa.morris.analyze(sr, evaluate(jnp.asarray(sr.samples)), verbose=False)
-    print(f"num_levels={p:2d}  n_runs={sr.n_runs:3d}  mu_star={r.mu_star}  sigma={r.sigma}")
+    print(f"n_levels={p:2d}  n_runs={sr.n_runs:3d}  mu_star={r.mu_star}  sigma={r.sigma}")
 ```
 
 ```
-num_levels= 4  n_runs= 63  mu_star=[8.453911 7.875    7.498556]  sigma=[6.266625  7.9485855 9.765831 ]
-num_levels= 8  n_runs=169  mu_star=[9.295623  3.3047838 6.264612 ]  sigma=[11.627379  3.463286  8.936818]
-num_levels=20  n_runs=196  mu_star=[9.278381  1.3413888 5.7308774]  sigma=[10.888729   1.4947498  8.25101  ]
+n_levels= 4  n_runs= 63  mu_star=[8.453911 7.875    7.498556]  sigma=[6.266625  7.9485855 9.765831 ]
+n_levels= 8  n_runs=169  mu_star=[9.295623  3.3047838 6.264612 ]  sigma=[11.627379  3.463286  8.936818]
+n_levels=20  n_runs=196  mu_star=[9.278381  1.3413888 5.7308774]  sigma=[10.888729   1.4947498  8.25101  ]
 ```
 
 `x2`'s `mu_star` falls from 7.88 to 1.34 as the grid gets finer, and its rank
@@ -138,8 +138,8 @@ drops from second to third. Nothing warns you about this, because nothing is
 wrong. A Morris measure is defined relative to the step the design takes, and a
 two-thirds-of-range step on a bumpy function is a legitimate but very blunt
 instrument. The failure mode to watch for is a `mu_star` that moves a lot when
-you change `num_levels`, and its tell is a suspiciously round or repeated
-value. If your model is oscillatory in an input, raise `num_levels` or switch
+you change `n_levels`, and its tell is a suspiciously round or repeated
+value. If your model is oscillatory in an input, raise `n_levels` or switch
 to the radial design below, which uses random step sizes and cannot alias in
 this way.
 
@@ -284,7 +284,7 @@ never visits. The derivative of `7 * sin(x2)^2` is `7 * sin(2*x2)`, with
 magnitude up to 7 where the response is steepest. The fixed `delta = 2/3`
 grid step always connects the same two sampled values, so it reports one
 secant slope with the steep parts averaged away. The radial number is the
-trustworthy one here. `num_levels` is ignored by this design, and
+trustworthy one here. `n_levels` is ignored by this design, and
 `scramble=True` (the default) should stay on.
 
 ![Morris mu-star for the trajectory and radial designs on the same 100-trajectory budget](./figures/morris_gsa_trajectory-vs-radial-mu-at-the-same-budget-r-100.png)
@@ -299,7 +299,7 @@ and `AB_j` differ in exactly one input. That is a radial star, so
 `SobolSamples.to_morris()` just relabels the design.
 
 ```python
-samples = jaxgsa.sobol.sample(PROBLEM, 0, base_n=512, seed=0)
+samples = jaxgsa.sobol.sample(PROBLEM, base_n=512, seed=0)
 Y = evaluate(jnp.asarray(samples.samples))
 
 sobol_result = jaxgsa.sobol.analyze(samples, Y)
@@ -314,7 +314,7 @@ jaxgsa.sobol.sample: D=3, mode=second-order, base_n=512, requested_runs>=4096, n
 jaxgsa.sobol.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=4096 runs, T=1 x K=1 output slice
     invalid: none found in 512 Saltelli groups (policy 'raise')
   timing:
@@ -329,7 +329,7 @@ jaxgsa.sobol.SobolSamples.to_morris: D=3, mode=second-order, base_n=512, blocks=
 jaxgsa.morris.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=2048 runs, T=1 x K=1 output slice
     invalid: none found in 512 trajectories (policy 'raise')
   timing:
@@ -411,11 +411,11 @@ print("mu_star:\n", result.mu_star)
 ```
 
 ```
-jaxgsa.morris.sample: D=3, method=trajectory, n_trajectories=50, num_levels=4, n_expanded=200, n_runs=63, duplicates_removed=137 (68.5%)
+jaxgsa.morris.sample: D=3, method=trajectory, n_trajectories=50, n_levels=4, n_expanded=200, n_runs=63, duplicates_removed=137 (68.5%)
 jaxgsa.morris.analyze
   problem: D=3 (amplitude, frequency, damping)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=200 runs, T=1 x K=2 output slices
     invalid: none found in 50 trajectories (policy 'raise')
   timing:
@@ -495,11 +495,11 @@ print("mu_star:", result.mu_star)
 ```
 
 ```
-jaxgsa.morris.sample: D=2, method=trajectory, n_trajectories=50, num_levels=4, n_expanded=150, n_runs=16, duplicates_removed=134 (89.3%)
+jaxgsa.morris.sample: D=2, method=trajectory, n_trajectories=50, n_levels=4, n_expanded=150, n_runs=16, duplicates_removed=134 (89.3%)
 jaxgsa.morris.analyze
   problem: D=2 (x1, x2)
     marginals: uniform=1, gaussian=1
-    correlation: independent
+    dependence: independent
     output: N=150 runs, T=1 x K=1 output slice
     invalid: none found in 50 trajectories (policy 'raise')
   timing:
@@ -604,7 +604,7 @@ D is always the last axis.
   rebuilds the expanded trajectory layout itself.
 - Morris does not produce Sobol indices. `mu_star` ranks like `ST` but is not
   a variance fraction, and `sigma` flags interaction without saying with whom.
-- An even `num_levels` (default 4) makes all grid levels equally probable. An
+- An even `n_levels` (default 4) makes all grid levels equally probable. An
   odd value warns, because the step then lands off-grid.
 - `truncation_quantile` must lie in `(0, 0.5)` or `sample()` raises.
 - A trajectory holding any non-finite output raises by default. Pass

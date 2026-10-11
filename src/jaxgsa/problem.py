@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Literal, NotRequired, TypeAlias, TypedDict
 
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
     from jaxgsa._core.copula import RepairPolicy
+    from jaxgsa._core.dependence import InputSampler
 
 
 class UniformInputSpec(TypedDict):
@@ -262,6 +264,7 @@ InputSpec: TypeAlias = UniformSpec | GaussianSpec | CategoricalSpec
 # Public-facing input union -- users pass one of these per parameter.
 InputSpecValue: TypeAlias = (
     tuple[float, float]
+    | list[float]
     | UniformInputSpec
     | GaussianInputSpec
     | CategoricalInputSpec
@@ -282,9 +285,9 @@ def _normalize_input_spec(spec: InputSpecValue) -> InputSpec:
     """
     if isinstance(spec, UniformSpec | GaussianSpec | CategoricalSpec):
         return spec  # already canonical and validated by its own __post_init__
-    if isinstance(spec, tuple):  # bare (low, high) tuple is shorthand for uniform
+    if isinstance(spec, tuple | list):  # bare (low, high) pair is shorthand for uniform
         if len(spec) != 2:
-            raise ValueError("Tuple input specs must have exactly two values: (low, high)")
+            raise ValueError("Bounds must have exactly two values: (low, high)")
         return UniformSpec(spec[0], spec[1])
     if not isinstance(spec, dict):
         raise ValueError(
@@ -516,6 +519,44 @@ def _check_correlation_touches_categorical(
             )
 
 
+def _reject_bare_str(value: object, label: str) -> None:
+    """Refuse a bare ``str`` where a sequence of strings is expected.
+
+    ``tuple("temp")`` is ``('t', 'e', 'm', 'p')``, so a single name passed
+    without a tuple around it would silently become four names.
+
+    Args:
+        value: The user-supplied sequence.
+        label: Argument name for the message.
+
+    Raises:
+        TypeError: If ``value`` is a ``str`` or ``bytes``.
+    """
+    if isinstance(value, str | bytes):
+        raise TypeError(
+            f"{label} must be a sequence of strings, not a single string {value!r}. "
+            f"Write ({value!r},) for one name."
+        )
+
+
+def _output_names_tuple(output_names: Sequence[str] | None) -> tuple[str, ...] | None:
+    """Return ``output_names`` as a tuple, refusing a bare string.
+
+    Args:
+        output_names: User-supplied output labels, or ``None``.
+
+    Returns:
+        The labels as a tuple, or ``None``.
+
+    Raises:
+        TypeError: If ``output_names`` is a ``str``.
+    """
+    if output_names is None:
+        return None
+    _reject_bare_str(output_names, "output_names")
+    return tuple(output_names)
+
+
 def _validate_names(names: tuple[str, ...]) -> None:
     """Reject parameter names that are not strings or not unique.
 
@@ -558,6 +599,50 @@ def _categorical_dims_from_specs(
     )
 
 
+Dependence: TypeAlias = Literal["independent", "gaussian", "custom"]
+"""How a problem's inputs depend on each other (see :attr:`Problem.dependence`)."""
+
+
+def _validated_sampler(
+    sampler: InputSampler | None,
+    dimension: int | None,
+    n_params: int,
+    has_correlation: bool,
+) -> tuple[InputSampler | None, int | None]:
+    """Check a custom sampler declaration and resolve its uniform dimension.
+
+    Args:
+        sampler: User transformation from uniform points to physical rows.
+        dimension: Uniform coordinates per row, or ``None`` for ``n_params``.
+        n_params: Number of problem parameters.
+        has_correlation: Whether a Gaussian-copula matrix is also declared.
+
+    Returns:
+        ``(sampler, dimension)``, both ``None`` when no sampler is declared.
+
+    Raises:
+        TypeError: If ``sampler`` is not callable.
+        ValueError: If ``dimension`` is given without a sampler or is not a
+            positive integer, or if a correlation is also declared.
+    """
+    if sampler is None:
+        if dimension is not None:
+            raise ValueError("a sampler dimension requires a sampler")
+        return None, None
+    if not callable(sampler):
+        raise TypeError("sampler must be callable")
+    if has_correlation:
+        raise ValueError(
+            "A problem takes either a Gaussian-copula correlation or a custom "
+            "sampler, not both. Drop one with problem.with_correlation(None) or "
+            "problem.with_sampler(None)."
+        )
+    resolved = n_params if dimension is None else dimension
+    if isinstance(resolved, bool) or not isinstance(resolved, (int, np.integer)) or resolved < 1:
+        raise ValueError(f"sampler_dimension must be a positive integer, got {dimension!r}")
+    return sampler, int(resolved)
+
+
 def _categorical_dims(problem: "Problem") -> tuple[tuple[int, int], ...]:
     """Return ``(dimension index, level count)`` per categorical parameter."""
     return _categorical_dims_from_specs(problem.input_specs)
@@ -580,9 +665,12 @@ class Problem:
     A Gaussian-copula ``correlation`` matrix optionally couples the
     marginals. Samples then follow the declared dependence structure, and
     each parameter still keeps its marginal exactly as written.
-    ``jaxgsa.sampling.monte_carlo`` honors the matrix transparently. Methods
-    whose indices assume independent inputs refuse a correlated problem with
-    a ``ValueError``.
+    ``jaxgsa.sampling.monte_carlo`` honors the matrix transparently.
+
+    A custom ``sampler`` replaces the Gaussian copula with any other joint
+    distribution (see :class:`jaxgsa.sampling.InputSampler`). A problem
+    declares one or the other, never both. Methods whose indices assume
+    independent inputs refuse a dependent problem with a ``ValueError``.
 
     Attributes:
         names: Parameter names in model-input order.
@@ -598,14 +686,19 @@ class Problem:
     _input_specs: tuple[InputSpec, ...] = field(repr=False)
     output_names: tuple[str, ...] | None = None
     _correlation: _CorrelationTuple | None = field(repr=False, default=None)
+    _sampler: InputSampler | None = field(repr=False, default=None)
+    _sampler_dimension: int | None = field(repr=False, default=None)
 
     def __init__(
         self,
-        names: tuple[str, ...],
-        bounds: tuple[tuple[float, float], ...],
-        output_names: tuple[str, ...] | None = None,
+        names: Sequence[str],
+        bounds: Sequence[Sequence[float]],
+        *,
+        output_names: Sequence[str] | None = None,
         correlation: "npt.ArrayLike | None" = None,
         correlation_type: Literal["latent", "spearman"] = "latent",
+        sampler: InputSampler | None = None,
+        sampler_dimension: int | None = None,
     ) -> None:
         """Create a uniform-only problem from finite bounds.
 
@@ -626,7 +719,14 @@ class Problem:
                 ``"latent"`` (default) for the Pearson correlation of the
                 copula's latent normals, ``"spearman"`` for a rank
                 correlation (converted via ``2 sin(pi rho_s / 6)``).
+            sampler: Optional custom joint and conditional transformation
+                from uniform points to physical rows (see
+                :class:`jaxgsa.sampling.InputSampler`). Cannot be combined
+                with ``correlation``.
+            sampler_dimension: Uniform coordinates the sampler consumes per
+                row. ``None`` (default) means one per parameter.
         """
+        _reject_bare_str(names, "names")
         normalized_names = tuple(names)
         normalized_bounds = tuple((float(low), float(high)) for low, high in bounds)
         if len(normalized_names) != len(normalized_bounds):
@@ -639,7 +739,7 @@ class Problem:
         self._set_fields(
             names=normalized_names,
             input_specs=input_specs,
-            output_names=output_names,
+            output_names=_output_names_tuple(output_names),
             # User-declared matrices deserve the repair warning.
             correlation=_canonical_correlation(
                 correlation,
@@ -648,17 +748,21 @@ class Problem:
                 correlation_type,
                 policy="declared",
             ),
+            sampler=sampler,
+            sampler_dimension=sampler_dimension,
         )
 
     @classmethod
     def from_dict(
         cls,
         params: dict[str, InputSpecValue],
-        output_names: tuple[str, ...] | None = None,
         *,
+        output_names: Sequence[str] | None = None,
         truncate_gaussians: float | None = None,
         correlation: "npt.ArrayLike | None" = None,
         correlation_type: Literal["latent", "spearman"] = "latent",
+        sampler: InputSampler | None = None,
+        sampler_dimension: int | None = None,
     ) -> "Problem":
         """Create a ``Problem`` from per-parameter distribution specs.
 
@@ -693,6 +797,12 @@ class Problem:
                 means independent inputs.
             correlation_type: Scale ``correlation`` is expressed on:
                 ``"latent"`` (default) or ``"spearman"``.
+            sampler: Optional custom joint and conditional transformation
+                from uniform points to physical rows (see
+                :class:`jaxgsa.sampling.InputSampler`). Cannot be combined
+                with ``correlation``.
+            sampler_dimension: Uniform coordinates the sampler consumes per
+                row. ``None`` (default) means one per parameter.
 
         Returns:
             A normalized ``Problem`` instance.
@@ -713,7 +823,7 @@ class Problem:
         return cls._from_normalized_inputs(
             names=names,
             input_specs=input_specs,
-            output_names=output_names,
+            output_names=_output_names_tuple(output_names),
             correlation=_canonical_correlation(
                 correlation,
                 names,
@@ -721,6 +831,8 @@ class Problem:
                 correlation_type,
                 policy="declared",
             ),
+            sampler=sampler,
+            sampler_dimension=sampler_dimension,
         )
 
     def with_correlation(
@@ -761,6 +873,46 @@ class Problem:
                 correlation_type,
                 policy="declared",
             ),
+            sampler=self._sampler,
+            sampler_dimension=self._sampler_dimension,
+        )
+
+    def with_sampler(
+        self,
+        sampler: InputSampler | None,
+        *,
+        sampler_dimension: int | None = None,
+    ) -> "Problem":
+        """Return a copy of this problem with the given custom sampler.
+
+        ``Problem`` is frozen, so a sampler attached after construction goes
+        through this copy constructor:
+
+        .. code-block:: python
+
+            problem = problem.with_sampler(sample_modular, sampler_dimension=2)
+
+        Args:
+            sampler: Joint and conditional transformation from uniform points
+                to physical rows (see :class:`jaxgsa.sampling.InputSampler`),
+                or ``None`` to drop a previously declared sampler.
+            sampler_dimension: Uniform coordinates the sampler consumes per
+                row. ``None`` (default) means one per parameter.
+
+        Returns:
+            A new ``Problem`` with the same marginals, names, and output
+            names, and the sampler attached.
+
+        Raises:
+            ValueError: If the problem declares a correlation.
+        """
+        return Problem._from_normalized_inputs(
+            names=self.names,
+            input_specs=self._input_specs,
+            output_names=self.output_names,
+            correlation=self._correlation,
+            sampler=sampler,
+            sampler_dimension=sampler_dimension,
         )
 
     def with_output_names(self, output_names: tuple[str, ...] | None) -> "Problem":
@@ -781,8 +933,10 @@ class Problem:
         return Problem._from_normalized_inputs(
             names=self.names,
             input_specs=self._input_specs,
-            output_names=None if output_names is None else tuple(output_names),
+            output_names=_output_names_tuple(output_names),
             correlation=self._correlation,
+            sampler=self._sampler,
+            sampler_dimension=self._sampler_dimension,
         )
 
     @classmethod
@@ -793,6 +947,8 @@ class Problem:
         input_specs: tuple[InputSpec, ...],
         output_names: tuple[str, ...] | None = None,
         correlation: _CorrelationTuple | None = None,
+        sampler: InputSampler | None = None,
+        sampler_dimension: int | None = None,
     ) -> "Problem":
         """Create a problem from internal normalized input specs.
 
@@ -812,6 +968,8 @@ class Problem:
             input_specs=tuple(input_specs),
             output_names=output_names,
             correlation=correlation,
+            sampler=sampler,
+            sampler_dimension=sampler_dimension,
         )
         return obj
 
@@ -822,16 +980,22 @@ class Problem:
         input_specs: tuple[InputSpec, ...],
         output_names: tuple[str, ...] | None,
         correlation: _CorrelationTuple | None,
+        sampler: InputSampler | None = None,
+        sampler_dimension: int | None = None,
     ) -> None:
         """Assign validated frozen dataclass fields in one place."""
         _validate_names(names)
         _check_correlation_touches_categorical(names, input_specs, correlation)
+        sampler, sampler_dimension = _validated_sampler(
+            sampler, sampler_dimension, len(names), correlation is not None
+        )
         # Bypass frozen dataclass protection -- only called during construction.
         object.__setattr__(self, "names", names)
-        normalized = tuple(output_names) if output_names is not None else None
-        object.__setattr__(self, "output_names", normalized)
+        object.__setattr__(self, "output_names", output_names)
         object.__setattr__(self, "_input_specs", input_specs)
         object.__setattr__(self, "_correlation", correlation)
+        object.__setattr__(self, "_sampler", sampler)
+        object.__setattr__(self, "_sampler_dimension", sampler_dimension)
 
     def __repr__(self) -> str:
         """Show every parameter's marginal, not just uniform bounds.
@@ -853,6 +1017,8 @@ class Problem:
             parts.append(f"output_names={self.output_names!r}")
         if self._correlation is not None:
             parts.append("correlation=<declared>")
+        if self._sampler is not None:
+            parts.append(f"sampler=<custom, dimension={self._sampler_dimension}>")
         return f"Problem({', '.join(parts)})"
 
     @property
@@ -889,13 +1055,32 @@ class Problem:
         return np.asarray(self._correlation, dtype=np.float64)
 
     @property
-    def has_correlated_inputs(self) -> bool:
-        """Return ``True`` when a non-identity correlation matrix is declared."""
+    def sampler(self) -> InputSampler | None:
+        """Custom joint and conditional sampler, or ``None``."""
+        return self._sampler
+
+    @property
+    def sampler_dimension(self) -> int | None:
+        """Uniform coordinates the custom sampler consumes per row, or ``None``."""
+        return self._sampler_dimension
+
+    @property
+    def dependence(self) -> Dependence:
+        """How the inputs depend on each other.
+
+        ``"custom"`` when a :attr:`sampler` is declared, ``"gaussian"`` when a
+        non-identity :attr:`correlation` is declared, and ``"independent"``
+        otherwise. An identity matrix counts as independent.
+        """
+        if self._sampler is not None:
+            return "custom"
         if self._correlation is None:
-            return False
+            return "independent"
         from jaxgsa._core.copula import is_independent
 
-        return not is_independent(np.asarray(self._correlation, dtype=np.float64))
+        if is_independent(np.asarray(self._correlation, dtype=np.float64)):
+            return "independent"
+        return "gaussian"
 
     @property
     def has_non_uniform_inputs(self) -> bool:
@@ -923,6 +1108,6 @@ class Problem:
         }
 
     @property
-    def num_vars(self) -> int:
+    def n_params(self) -> int:
         """Return the number of parameters."""
         return len(self.names)

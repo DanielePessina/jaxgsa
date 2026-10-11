@@ -16,13 +16,13 @@ from . import (
     optimal_transport,
     pawn,
     pce,
+    rank,
     sampling,
     shapley,
     sobol,
     vkoga,
 )
 from ._core.invalid import InvalidReport, InvalidUnit, OnInvalid
-from ._core.sampling import Theta
 from ._core.warning_types import JaxgsaWarning
 from .problem import (
     CategoricalInputSpec,
@@ -51,7 +51,6 @@ __all__ = [
     "JaxgsaWarning",
     "OnInvalid",
     "Problem",
-    "Theta",
     "UniformInputSpec",
     "UniformSpec",
     "__version__",
@@ -67,6 +66,7 @@ __all__ = [
     "optimal_transport",
     "pawn",
     "pce",
+    "rank",
     "sampling",
     "shapley",
     "sobol",

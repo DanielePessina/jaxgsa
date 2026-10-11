@@ -24,28 +24,29 @@ Example::
     from jaxgsa import borgonovo
     from jaxgsa.sampling import monte_carlo
 
-    X = monte_carlo(problem, n=5000, seed=42)
+    X = monte_carlo(problem, n_samples=5000, seed=42)
     Y = model(X)
     # The bootstrap is opt-in, and a key is required whenever it is asked for.
     result = borgonovo.analyze(problem, X, Y, n_bootstrap=100, key=jax.random.key(0))
 """
 
-from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.borgonovo._analyze import analyze, indices
-from jaxgsa.borgonovo._result import DeltaResult
+from jaxgsa._core.invalid import InvalidUnit as _InvalidUnit
+from jaxgsa._core.registry import MethodSpec as _MethodSpec
+from jaxgsa._core.registry import register as _register
+from jaxgsa.borgonovo._analyze import BorgonovoIndices, analyze, indices
+from jaxgsa.borgonovo._result import BorgonovoResult
 
-__all__ = ["DeltaResult", "analyze", "indices"]
+__all__ = ["BorgonovoIndices", "BorgonovoResult", "analyze", "indices"]
 
-SPEC = register(
-    MethodSpec(
+_SPEC = _register(
+    _MethodSpec(
         name="borgonovo",
         analyze=analyze,
         sample=None,
-        result=DeltaResult,
+        result=BorgonovoResult,
         correlation="accepts",
         categorical="accepts",
         bootstrap="n_bootstrap",
-        invalid_unit=InvalidUnit.ROW,
+        invalid_unit=_InvalidUnit.ROW,
     )
 )

@@ -104,7 +104,32 @@ def _problem_to_meta(problem: Problem) -> dict[str, Any]:
         "input_specs": [_normalized_input_to_dict(spec) for spec in problem.input_specs],
         "output_names": list(problem.output_names) if problem.output_names is not None else None,
         "correlation": correlation.tolist() if correlation is not None else None,
+        "sampler_dimension": problem.sampler_dimension,
     }
+
+
+def _unsaved_sampler(
+    uniform_points: np.ndarray,
+    /,
+    *,
+    conditioning_rows: np.ndarray | None = None,
+    fixed_indices: tuple[int, ...] = (),
+) -> np.ndarray:
+    """Stand in for a custom sampler that a saved file cannot store.
+
+    A loaded problem keeps ``dependence == "custom"`` through this stand-in, so
+    the independence checks still refuse it. Drawing new rows needs the real
+    sampler.
+
+    Raises:
+        ValueError: Always.
+    """
+    del uniform_points, conditioning_rows, fixed_indices
+    raise ValueError(
+        "This problem was loaded from a file. The file does not store the "
+        "custom sampler, so it cannot draw new rows. Attach it again with "
+        "problem.with_sampler(f, sampler_dimension=k)."
+    )
 
 
 def _problem_from_meta(problem_meta: Mapping[str, Any]) -> Problem:
@@ -123,6 +148,9 @@ def _problem_from_meta(problem_meta: Mapping[str, Any]) -> Problem:
         correlation=_canonical_correlation(
             problem_meta.get("correlation"), names, input_specs, policy="fitted"
         ),
+        # `.get`: files written before the custom sampler carry no key.
+        sampler=_unsaved_sampler if problem_meta.get("sampler_dimension") is not None else None,
+        sampler_dimension=problem_meta.get("sampler_dimension"),
     )
 
 
@@ -212,7 +240,7 @@ class UniqueDesignSamples:
         """
         if Y.shape[0] != self.n_runs:
             raise ValueError(
-                f"Y.shape[0] must match sampling_result.n_runs ({self.n_runs}), got {Y.shape[0]}"
+                f"Y.shape[0] must match samples.n_runs ({self.n_runs}), got {Y.shape[0]}"
             )
         # expanded_to_unique[i] gives the unique-row index for expanded
         # position i. The map was warmed at construction (see
@@ -357,6 +385,10 @@ class UniqueDesignSamples:
         )
         meta = {
             "jaxgsa_version": _jaxgsa_version(),
+            "samples_class": type(self).__name__,
+            "samples_class_path": ".".join(
+                [*type(self).__module__.split(".")[:2], type(self).__name__]
+            ),
             "problem": _problem_to_meta(self.problem),
             "n_expanded": self.n_expanded,
             "identity_mapping": identity_mapping,
@@ -386,11 +418,22 @@ class UniqueDesignSamples:
 
         Raises:
             FileNotFoundError: If no file exists at the resolved path.
+            ValueError: If the file holds a different samples class, for
+                example a ``SobolSamples`` file loaded with
+                ``MorrisSamples.load``. Files saved by older versions carry
+                no class name and skip this check.
             KeyError: If the file is missing required arrays or metadata
                 entries (i.e. it was not written by :meth:`save`).
         """
         with np.load(_npz_path(path), allow_pickle=False) as data:
             meta = json.loads(data["metadata"].item())
+            saved_class = meta.get("samples_class")
+            if saved_class is not None and saved_class != cls.__name__:
+                saved_path = meta.get("samples_class_path", saved_class)
+                raise ValueError(
+                    f"this file holds a {saved_class}; load it with {saved_path}.load, "
+                    f"not {cls.__name__}.load"
+                )
             problem = _problem_from_meta(meta["problem"])
             n_expanded = int(meta["n_expanded"])
             if meta["identity_mapping"]:

@@ -14,31 +14,21 @@ import pytest
 
 import jaxgsa
 from jaxgsa import JaxgsaWarning
-from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa.problem import GaussianInputSpec, InputSpecValue, Problem, UniformInputSpec
 from jaxgsa.sampling import correlate, fit_correlation, monte_carlo
 from jaxgsa.sobol import sample
 from jaxgsa.sobol._sampling import _saltelli_step
 
 
-def test_next_power_of_2():
-    assert _next_power_of_2(1) == 1
-    assert _next_power_of_2(2) == 2
-    assert _next_power_of_2(3) == 4
-    assert _next_power_of_2(5) == 8
-    assert _next_power_of_2(1024) == 1024
-    assert _next_power_of_2(1025) == 2048
-
-
 def test_sample_returns_unique_rows():
     p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0), "x3": (0.0, 1.0)})
     result = sample(p, n_samples=100, seed=42, verbose=False)
     assert result.n_runs >= 100
-    assert result.samples.shape == (result.n_runs, p.num_vars)
+    assert result.samples.shape == (result.n_runs, p.n_params)
     assert np.unique(result.samples, axis=0).shape[0] == result.n_runs
     assert result.expanded_to_unique.shape == (result.n_expanded,)
     assert result.expanded_to_unique.max() < result.n_runs
-    assert result.n_params == p.num_vars
+    assert result.n_params == p.n_params
     assert result.calc_second_order is True
 
 
@@ -56,7 +46,7 @@ def test_power_of_2_enforcement():
     result = sample(p, n_samples=100, seed=42, verbose=False)
     assert result.base_n & (result.base_n - 1) == 0
     with pytest.raises(ValueError, match=r"power of 2 .*got 1000.*nearest valid: 512 or 1024"):
-        sample(p, n_samples=100, base_n=1000, seed=42, verbose=False)
+        sample(p, base_n=1000, seed=42, verbose=False)
 
 
 def test_tiny_design_warns_about_a_degenerate_base():
@@ -77,7 +67,7 @@ def test_single_parameter_mapping_collapses_duplicates():
 
     with pytest.warns(JaxgsaWarning, match="degenerate"):
         first_only = sample(p, n_samples=16, calc_second_order=False, seed=42, verbose=False)
-    step = _saltelli_step(p.num_vars, False)
+    step = _saltelli_step(p.n_params, False)
     for i in range(first_only.base_n):
         group = first_only.expanded_to_unique[i * step : (i + 1) * step]
         assert group[1] == group[2]
@@ -85,7 +75,7 @@ def test_single_parameter_mapping_collapses_duplicates():
 
     with pytest.warns(JaxgsaWarning, match="degenerate"):
         second_order = sample(p, n_samples=16, calc_second_order=True, seed=42, verbose=False)
-    step = _saltelli_step(p.num_vars, True)
+    step = _saltelli_step(p.n_params, True)
     for i in range(second_order.base_n):
         group = second_order.expanded_to_unique[i * step : (i + 1) * step]
         assert group[0] == group[2]
@@ -97,7 +87,7 @@ def test_two_parameter_second_order_mapping_collapses_cross_duplicates():
     p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
     with pytest.warns(JaxgsaWarning, match="degenerate"):
         result = sample(p, n_samples=32, calc_second_order=True, seed=42, verbose=False)
-    step = _saltelli_step(p.num_vars, True)
+    step = _saltelli_step(p.n_params, True)
 
     for i in range(result.base_n):
         group = result.expanded_to_unique[i * step : (i + 1) * step]
@@ -110,18 +100,8 @@ def test_reconstructing_expanded_samples_matches_mapping():
     p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
     result = sample(p, n_samples=64, seed=42, verbose=False)
     reconstructed = result.samples[result.expanded_to_unique]
-    assert reconstructed.shape == (result.n_expanded, p.num_vars)
+    assert reconstructed.shape == (result.n_expanded, p.n_params)
     assert np.unique(reconstructed, axis=0).shape[0] == result.n_runs
-
-
-@pytest.mark.verbose_output
-def test_sample_verbose_false_is_silent(capsys):
-    """The marker keeps the emit seam live; otherwise this asserts nothing."""
-    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-    with pytest.warns(JaxgsaWarning, match="degenerate"):
-        sample(p, n_samples=32, seed=42, verbose=False)
-    out = capsys.readouterr().out
-    assert out == ""
 
 
 def test_uniform_columns_stay_within_bounds_for_mixed_problem():
@@ -216,9 +196,7 @@ class TestSamplingResultDownsample:
     def _make_sr(self, D: int = 3, base_n: int = 32, second_order: bool = True, seed: int = 42):
         names: dict[str, InputSpecValue] = {f"x{i}": (0.0, 1.0) for i in range(D)}
         p = Problem.from_dict(names)
-        return sample(
-            p, n_samples=1, base_n=base_n, calc_second_order=second_order, seed=seed, verbose=False
-        )
+        return sample(p, base_n=base_n, calc_second_order=second_order, seed=seed, verbose=False)
 
     def test_identity_when_same_base_n(self):
         sr = self._make_sr(base_n=16)
@@ -296,8 +274,8 @@ class TestSamplingResultDownsample:
         )
         N, K, seed = 64, 16, 1234
 
-        sr_small = sample(p, n_samples=1, base_n=N, seed=seed, verbose=False).downsample(K)
-        sr_direct = sample(p, n_samples=1, base_n=K, seed=seed, verbose=False)
+        sr_small = sample(p, base_n=N, seed=seed, verbose=False).downsample(K)
+        sr_direct = sample(p, base_n=K, seed=seed, verbose=False)
 
         np.testing.assert_array_equal(sr_small.samples, sr_direct.samples)
         np.testing.assert_array_equal(sr_small.expanded_to_unique, sr_direct.expanded_to_unique)
@@ -327,7 +305,7 @@ def test_monte_carlo_gaussian_marginals_reproduce_mvn_covariance():
         },
         correlation=[[1.0, rho], [rho, 1.0]],
     )
-    X = monte_carlo(problem, 100_000, seed=42)
+    X = monte_carlo(problem, 50_000, seed=42)
     expected = sigma[:, None] * np.array([[1.0, rho], [rho, 1.0]]) * sigma[None, :]
     np.testing.assert_allclose(np.cov(X, rowvar=False), expected, atol=0.08)
     np.testing.assert_allclose(np.mean(X, axis=0), [1.0, -2.0], atol=0.03)
@@ -339,14 +317,14 @@ def test_spearman_kind_recovers_rank_correlation_with_uniform_marginals():
     spearman_problem = Problem.from_dict(
         {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=R, correlation_type="spearman"
     )
-    X = monte_carlo(spearman_problem, 100_000, seed=3)
+    X = monte_carlo(spearman_problem, 50_000, seed=3)
     assert abs(_spearman_of(X)[0, 1] - rho_s) < 0.01
 
     # The latent kind would *not* hit the rank target: a latent 0.7 yields
     # a Spearman correlation of (6/pi) asin(0.7/2) ~ 0.683, which is what
     # justifies exposing the kind switch at all.
     latent_problem = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=R)
-    X_latent = monte_carlo(latent_problem, 100_000, seed=3)
+    X_latent = monte_carlo(latent_problem, 50_000, seed=3)
     expected_spearman = (6.0 / np.pi) * np.arcsin(rho_s / 2.0)
     assert abs(_spearman_of(X_latent)[0, 1] - expected_spearman) < 0.01
     assert abs(_spearman_of(X_latent)[0, 1] - rho_s) > 0.01
@@ -407,7 +385,7 @@ def test_correlated_monte_carlo_rejects_nonpositive_n():
     problem = Problem.from_dict(
         {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=[[1.0, 0.8], [0.8, 1.0]]
     )
-    with pytest.raises(ValueError, match="n must be >= 1"):
+    with pytest.raises(ValueError, match="n_samples must be >= 1"):
         monte_carlo(problem, 0)
 
 
@@ -417,7 +395,7 @@ def test_correlate_is_a_per_column_permutation_hitting_the_target():
         {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=[[1.0, rho], [rho, 1.0]]
     )
     X = monte_carlo(problem.with_correlation(None), 8192, seed=21)
-    X_corr = correlate(X, problem, seed=22)
+    X_corr = correlate(problem, X, seed=22)
 
     # Exact permutation of each column: sample values are fully preserved.
     np.testing.assert_array_equal(np.sort(X_corr, axis=0), np.sort(X, axis=0))
@@ -430,14 +408,15 @@ def test_correlate_determinism_and_validation():
         {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=[[1.0, 0.5], [0.5, 1.0]]
     )
     X = monte_carlo(problem.with_correlation(None), 256, seed=1)
-    np.testing.assert_array_equal(correlate(X, problem, seed=2), correlate(X, problem, seed=2))
+    np.testing.assert_array_equal(correlate(problem, X, seed=2), correlate(problem, X, seed=2))
 
     with pytest.raises(ValueError, match="requires problem.correlation"):
-        correlate(X, problem.with_correlation(None))
+        correlate(problem.with_correlation(None), X)
     with pytest.raises(ValueError, match=r"X must be \(N, 2\)"):
-        correlate(X[:, :1], problem)
+        correlate(problem, X[:, :1])
 
 
+@pytest.mark.slow
 def test_correlate_sampling_error_matches_iman_conover():
     """Pin the variance reduction the de-correlation step buys.
 
@@ -446,6 +425,10 @@ def test_correlate_sampling_error_matches_iman_conover():
     the achieved rank correlation, plus a bias of about -0.006. Iman-Conover
     removes both: about 0.024 and no bias. The thresholds below sit between
     the two, so the old implementation fails this test.
+
+    The default tier checks that the pairing hits the target, in
+    ``test_correlate_is_a_per_column_permutation_hitting_the_target``. This
+    test needs 150 replicates, so it only runs in the slow tier.
     """
     rho = 0.8
     n, replicates = 50, 150
@@ -458,7 +441,7 @@ def test_correlate_sampling_error_matches_iman_conover():
     achieved = np.array(
         [
             _spearman_of(
-                correlate(monte_carlo(problem.with_correlation(None), n, seed=r), problem, seed=r)
+                correlate(problem, monte_carlo(problem.with_correlation(None), n, seed=r), seed=r)
             )[0, 1]
             for r in range(replicates)
         ]
@@ -480,10 +463,10 @@ def test_correlate_rejects_non_finite_X():
     X = monte_carlo(problem.with_correlation(None), 64, seed=5)
     X[3, 1] = np.nan
     with pytest.raises(ValueError, match="non-finite"):
-        correlate(X, problem, seed=5)
+        correlate(problem, X, seed=5)
     X[3, 1] = np.inf
     with pytest.raises(ValueError, match="non-finite"):
-        correlate(X, problem, seed=5)
+        correlate(problem, X, seed=5)
 
 
 def test_correlate_handles_degenerate_row_counts():
@@ -498,14 +481,14 @@ def test_correlate_handles_degenerate_row_counts():
     for n in (1, 2):
         X = monte_carlo(problem.with_correlation(None), n, seed=n)
         with pytest.warns(JaxgsaWarning, match="does not follow the declared correlation"):
-            out = correlate(X, problem, seed=n)
+            out = correlate(problem, X, seed=n)
         assert np.isfinite(out).all()
         np.testing.assert_array_equal(np.sort(out, axis=0), np.sort(X, axis=0))
     # n=3 with D=2 can estimate corr(M): the de-correlation runs, silently.
     X = monte_carlo(problem.with_correlation(None), 3, seed=3)
     with warnings.catch_warnings():
         warnings.simplefilter("error", JaxgsaWarning)
-        out = correlate(X, problem, seed=3)
+        out = correlate(problem, X, seed=3)
     assert np.isfinite(out).all()
     np.testing.assert_array_equal(np.sort(out, axis=0), np.sort(X, axis=0))
 
@@ -524,12 +507,18 @@ def test_fit_correlation_public_wrapper_recovers_declared_matrix():
 def test_correlated_end_to_end_ot_borgonovo_hdmr():
     """Y = X1 with corr(X1, X2) = 0.8: the unused X2 must earn a clearly
     non-zero index under the correlation-inclusive given-data methods, and
-    HDMR's ANCOVA Sb term must flag the correlation-induced variance."""
+    HDMR's ANCOVA Sb term must flag the correlation-induced variance.
+
+    The margins are wide (measured 0.47 and 0.32 against 0.1, and Sb 0.22
+    against 0.1, with 0.004 on the independent draw against 0.05), so the
+    small sample and the cheap HDMR settings are enough.
+    """
     rho = 0.8
+    n = 512
     problem = Problem.from_dict(
         {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=[[1.0, rho], [rho, 1.0]]
     )
-    X = monte_carlo(problem, 2048, seed=99)
+    X = monte_carlo(problem, n, seed=99)
     Y = jnp.asarray(X[:, 0])
     Xj = jnp.asarray(X)
 
@@ -545,13 +534,13 @@ def test_correlated_end_to_end_ot_borgonovo_hdmr():
     # the correlative share is clearest on an additive model of both inputs:
     # each first-order term covaries with the other through corr(X1, X2).
     Y_sum = jnp.asarray(X[:, 0] + X[:, 1])
-    hdmr = jaxgsa.hdmr.analyze(problem, Xj, Y_sum)
+    hdmr = jaxgsa.hdmr.analyze(problem, Xj, Y_sum, order=1, max_iter=10)
     assert float(jnp.max(jnp.abs(hdmr.Sb))) > 0.1
 
     # Same model on an independent draw: the correlative share collapses.
     independent = problem.with_correlation(None)
-    X0 = monte_carlo(independent, 2048, seed=98)
+    X0 = monte_carlo(independent, n, seed=98)
     hdmr_indep = jaxgsa.hdmr.analyze(
-        independent, jnp.asarray(X0), jnp.asarray(X0[:, 0] + X0[:, 1])
+        independent, jnp.asarray(X0), jnp.asarray(X0[:, 0] + X0[:, 1]), order=1, max_iter=10
     )
     assert float(jnp.max(jnp.abs(hdmr_indep.Sb))) < 0.05

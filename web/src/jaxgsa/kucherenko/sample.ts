@@ -34,6 +34,27 @@ export interface KucherenkoDesign {
   baseN: number;
 }
 
+/** Design blocks per base point: `2D + 1` (singletons mode). */
+export function kucherenkoBlocks(nParams: number): number {
+  return 2 * nParams + 1;
+}
+
+/**
+ * Base points per block for a minimum run budget.
+ *
+ * Mirrors `n = max(2, _next_power_of_2(-(-n_samples // n_blocks)))` in
+ * `jaxgsa.kucherenko.sample` (src/jaxgsa/kucherenko/_sampling.py).
+ */
+export function kucherenkoBaseN(nSamples: number, nParams: number): number {
+  return nextPowerOfTwo(Math.max(2, Math.ceil(nSamples / kucherenkoBlocks(nParams))));
+}
+
+/** Model runs in the design for a minimum run budget: `base_n * (2D + 1)`. */
+export function kucherenkoRuns(nSamples: number, nParams: number): number {
+  return kucherenkoBaseN(nSamples, nParams) * kucherenkoBlocks(nParams);
+}
+
+/** `nSamples` is the minimum number of model runs, as in `jaxgsa.kucherenko.sample`. */
 export function sampleKucherenkoDesign(
   problem: ProblemSpec,
   nSamples: number,
@@ -41,15 +62,15 @@ export function sampleKucherenkoDesign(
 ): KucherenkoDesign {
   validateProblem(problem, "kucherenko");
 
-  if (!Number.isInteger(nSamples) || nSamples < 1) {
+  if (!Number.isInteger(nSamples) || nSamples < 2) {
     throw new Error(
-      `jaxgsa.kucherenko.sample: n_samples must be a positive integer, got ${nSamples}`,
+      `jaxgsa.kucherenko.sample: n_samples must be a whole number, at least 2, got ${nSamples}`,
     );
   }
 
   const D = problem.names.length;
-  const baseN = nextPowerOfTwo(Math.max(2, nSamples));
-  const blocks = 2 * D + 1;
+  const baseN = kucherenkoBaseN(nSamples, D);
+  const blocks = kucherenkoBlocks(D);
   const draws = sobolSequence(2 * D, baseN, true, seed);
   // Block-major layout: block b holds base points 0..baseN-1 in rows
   // [b*baseN, (b+1)*baseN).

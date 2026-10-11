@@ -56,18 +56,22 @@ class ShapleyResult(SchemaResult):
         ST: Total-order indices from the same surrogate, shape ``(D,)`` /
             ``(K, D)`` / ``(T, K, D)``.
         problem: Problem definition used for the analysis.
-        backend: Surrogate backend used, ``"hdmr"`` or ``"pce"``.
-        explained_variance: How much of the output variance the surrogate
+        backend: Surrogate backend used, ``"hdmr"`` or ``"pce"``, or ``"exact"``
+            for an allocation of design-based subset costs from
+            :meth:`jaxgsa.kucherenko.KucherenkoResult.shapley` or ``.pme()``.
+        explained_variance: ``None`` for ``backend="exact"``, where no
+            surrogate is fitted. Otherwise how much of the output variance the surrogate
             captured, shape ``()`` / ``(K,)`` / ``(T, K)``. The quantity
             depends on the backend. For ``"pce"`` it is the coefficient of
-            determination of the fit, the sample variance of the fitted
-            values over the sample variance of ``Y``, so it lies in
-            ``[0, 1]``; read ``loo_rmse`` on the PCE result for the
+            determination of the fit, ``1 - rmse**2 / Var(Y)`` from the
+            in-sample residuals, so it is at most 1 and can be negative for a
+            poor fit; read ``cv_rmse`` on the PCE result for the
             out-of-sample view. For ``"hdmr"`` it is ``sum_u V_u / Var(Y)``,
             which can go above 1 when an overfit surrogate over-counts
             shared variance. Both are close to 1 for a good fit and below 1
             when truncation or fit error leaves variance unexplained.
-        order: Effective surrogate order actually used. For ``"pce"`` it is
+        order: ``None`` for ``backend="exact"``. Otherwise the effective
+            surrogate order actually used. For ``"pce"`` it is
             the polynomial degree, which may be reduced from the requested
             value to fit the sample budget. For ``"hdmr"`` it is the HDMR
             expansion order.
@@ -104,9 +108,9 @@ class ShapleyResult(SchemaResult):
     S1: Array
     ST: Array
     problem: Problem
-    backend: Literal["hdmr", "pce"]
-    explained_variance: Array
-    order: int
+    backend: Literal["hdmr", "pce", "exact"]
+    explained_variance: Array | None
+    order: int | None
     invalid: InvalidReport
     include_correlative: bool = False
     Sh_conf: Array | None = None

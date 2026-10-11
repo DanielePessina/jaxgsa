@@ -47,10 +47,10 @@ problem = jaxgsa.Problem.from_dict(
 problem.input_specs[1].variance  # 4.0
 ```
 
-`jaxgsa.Theta` is the type of the distribution-parameter mapping that
+`jaxgsa.sobol.Theta` is the type of the distribution-parameter mapping that
 `SobolSamples.transform(theta)` takes: `Mapping[str, Mapping[str, Any]]`,
-keyed by parameter name and then by field name. It is re-exported from
-`jaxgsa.sobol` as well, next to the method that consumes it. See
+keyed by parameter name and then by field name. It lives in `jaxgsa.sobol`,
+next to the method that consumes it. See
 [Sampling](/api/sampling#sobolsamples).
 
 ### Warnings
@@ -89,7 +89,7 @@ those produces numbers that look fine and mean less than they appear to.
 
 ### Printed run summaries
 
-All thirteen `analyze()` functions and all four `sample()` functions take a
+All fourteen `analyze()` functions and all four `sample()` functions take a
 keyword-only `verbose: bool = True`. The default prints, so a bare call writes
 to stdout:
 
@@ -101,7 +101,7 @@ result = jaxgsa.sobol.analyze(samples, Y)
 jaxgsa.sobol.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=8192 runs, T=1 x K=1 output slice
     invalid: none found in 1024 Saltelli groups (policy 'raise')
   timing:
@@ -125,7 +125,7 @@ anywhere the print is noise.
 Every `analyze()` function takes `on_invalid`, which says what to do when the
 model output holds `NaN` or `Inf`. It accepts `"raise"` (the default, which
 stops the analysis), `"propagate"` (warns and computes), `"drop"` (removes the
-method's invalid row or design block), and `"none"` (skips the finite-value
+method's invalid row or design block), and `"skip"` (skips the finite-value
 and constant-output scans for data you have already checked). See
 [When a model run fails](/guide/getting-started#when-a-model-run-fails)
 for advice on failed model runs.
@@ -138,7 +138,7 @@ Two supporting types live at the package root.
 result as `result.invalid`. It records `n_invalid`, `n_units`, `n_kept`,
 `unit_indices`, `bad_row_indices`, `row_indices`, `sources` and the `policy`
 that ran. A report with `n_invalid == 0` means the check found nothing,
-except with `on_invalid="none"`, where the check was skipped.
+except with `on_invalid="skip"`, where the check was skipped.
 
 `bad_row_indices` names the rows that actually held a non-finite value;
 `row_indices` names every row of the blocks those rows condemn, which is what
@@ -148,7 +148,7 @@ refer to the array as you passed it, so they name model runs you can find.
 #### OnInvalid
 
 `jaxgsa.OnInvalid` — the type of the `on_invalid` argument, the literal
-`"raise" | "propagate" | "drop" | "none"`. Exported so that typed code can
+`"raise" | "propagate" | "drop" | "skip"`. Exported so that typed code can
 name the policy it passes.
 
 #### InvalidUnit
@@ -187,7 +187,7 @@ together with `correlation_type="latent"` (the default) or
 as `problem.correlation`.
 
 Methods whose indices assume independent inputs raise a `ValueError` on a
-correlated problem. Use `jaxgsa.kucherenko` or `jaxgsa.vkoga` instead. The
+correlated problem. They refuse a problem with a custom sampler the same way. Use `jaxgsa.kucherenko` or `jaxgsa.vkoga` instead. The
 [method capability table](/guide/methods#method-capabilities) lists which
 routes accept a correlated problem.
 
@@ -266,8 +266,8 @@ result.to_dataset()                   # time_concentration and time_diameter
 ```
 
 Ragged `Y` automatically selects bucketing; there is no mode keyword. The
-analysis does not pad channels or fabricate values. It is implemented on twelve
-of the thirteen `analyze` entry points; `dgsm` refuses the ragged form because
+analysis does not pad channels or fabricate values. It is implemented on thirteen
+of the fourteen `analyze` entry points; `dgsm` refuses the ragged form because
 it requires a fixed-layout Jacobian. There is no mask mode: a padded/masked
 estimator would be a separate missing-data contract rather than the
 per-channel analysis described here. See [Irregular output grids](/examples/irregular-outputs)
@@ -299,13 +299,18 @@ distributions are applied, and `SobolSamples.transform(theta)` applies a set
 of distribution parameters to it. See
 [Sampling](/api/sampling#sobolsamples).
 
-`jaxgsa.sobol.indices(samples, Y)` returns `S1` and `ST` as plain arrays. It
+Every samples class has the same `load`. It raises a clear error when the file
+holds a different samples class, for example a Morris file read with
+`SobolSamples.load`.
+
+`jaxgsa.sobol.indices(samples, Y)` returns a `SobolIndices(S1, ST, S2)` named
+tuple of plain arrays. `S2` is `None` for a first-order design. It
 runs the same estimator as `analyze`, but it checks nothing and builds no
 result, so it works inside `jax.jit`, `jax.vmap` and `jax.grad`. Pair it with
 `transform` to differentiate an index with respect to the input distribution
 parameters. See [Sobol](/api/sobol).
 
-Eleven of the thirteen methods expose an `indices()` with the same deal: raw
+Twelve of the fourteen methods expose an `indices()` with the same deal: raw
 arrays, no checks, no result object, safe under a JAX transformation. Only
 `kucherenko` and `vkoga` do not. `kucherenko` is host NumPy from end to end,
 which is what makes it the fastest method here, and `vkoga`'s index stage is
@@ -313,7 +318,7 @@ a host quasi-Monte-Carlo loop. Neither has a traceable core to export.
 
 ## Confidence intervals
 
-Eleven of the thirteen `analyze()` functions compute bootstrap confidence
+Twelve of the fourteen `analyze()` functions compute bootstrap confidence
 intervals. Only `jaxgsa.efast` and `jaxgsa.hsic` do not, and in both cases
 that is a decision rather than a gap.
 
@@ -323,13 +328,13 @@ does not shrink the sample, it changes what the estimator computes. An eFAST
 interval needs replicated designs at different random phase shifts, which
 would be a change to `efast.sample`, not a keyword on `analyze`.
 
-HSIC already reports its uncertainty as a permutation `p_value`. Its index is
+`eFAST` and `hsic` do not accept `n_bootstrap`. Passing it raises a `TypeError`. An eFAST result always has `ci=None`. HSIC reports its uncertainty as permutation `p_values`. Its index is
 a V-statistic, a double sum over all `N^2` pairs, so a row bootstrap would
 duplicate rows onto the kernel diagonal where the kernel is exactly 1. That
 biases the resampled statistic upward by construction. HSIC still requires
 `key`, because the permutation test needs randomness.
 
-The keyword is `n_bootstrap` on all eleven, and it defaults to `0`, meaning no
+The keyword is `n_bootstrap` on all twelve, and it defaults to `0`, meaning no
 interval. Three more keywords travel with it, everywhere with the same
 meaning:
 
@@ -339,10 +344,12 @@ meaning:
   distribution. `"gaussian"` centres them on the point estimate and takes
   `± z · sd` of the draws, which is smoother at small `n_bootstrap` but
   assumes the draws are normal.
-- `key: jax.Array | None = None` — a `jax.random` key for the resampling.
+- `key: jax.Array | int | None = None` — a `jax.random` key for the resampling.
+  An `int` also works. jaxgsa converts it with `jax.random.key`.
   Required as soon as `n_bootstrap > 0`; the call raises without it rather
-  than seeding itself, so a reported interval is always reproducible. Pass
-  `jax.random.key(0)` if all you have is an integer.
+  than seeding itself, so a reported interval is always reproducible. Every
+  analyze function that takes a `key` takes the same type. This includes `hsic` and `vkoga`,
+  where `key` is required.
 
 Every interval comes with `result.ci`, a `CIInfo` record that says how it was
 made. A bare `*_conf` array does not say whether it is a 95% or a 68%
@@ -357,7 +364,7 @@ interval, or how many resamples it rests on. `CIInfo` does:
 
 ### Keeping the bootstrap draws
 
-All eleven take `keep_replicates`. It defaults to `False`, which throws the
+All twelve take `keep_replicates`. It defaults to `False`, which throws the
 draws away once the interval is computed. Pass `keep_replicates=True` to keep
 them in `result.ci.replicates`, a mapping from the name of an estimate
 (`"S1"`, `"mu_star"`, and so on) to an array whose leading axis has length
@@ -381,18 +388,19 @@ they are dropped by default.
 
 ## Given-data methods
 
-These nine methods analyze arbitrary aligned `(X, Y)` pairs. They need no
+These ten methods analyze arbitrary aligned `(X, Y)` pairs. They need no
 design of their own.
 
 | Namespace | Command | Result |
 | --- | --- | --- |
-| `jaxgsa.borgonovo` | `analyze` | `DeltaResult` |
+| `jaxgsa.borgonovo` | `analyze` | `BorgonovoResult` |
 | `jaxgsa.dgsm` | `analyze` | `DGSMResult` |
 | `jaxgsa.hdmr` | `analyze` | `HDMRResult` |
 | `jaxgsa.hsic` | `analyze` | `HSICResult` |
 | `jaxgsa.optimal_transport` | `analyze` | `OTResult` |
 | `jaxgsa.pawn` | `analyze` | `PAWNResult` |
 | `jaxgsa.pce` | `analyze` | `PCEResult` |
+| `jaxgsa.rank` | `analyze` | `RankResult` |
 | `jaxgsa.shapley` | `analyze` | `ShapleyResult` |
 | `jaxgsa.vkoga` | `analyze` | `VKOGAResult` |
 
@@ -410,11 +418,11 @@ by construction.
 ### Drawing inputs
 
 Draw plain Monte Carlo inputs with
-`jaxgsa.sampling.monte_carlo(problem, n, seed=...)`. It honors
+`jaxgsa.sampling.monte_carlo(problem, n_samples, seed=...)`. It honors
 `problem.correlation` transparently when one is declared. The same namespace
 provides three more helpers:
 
-- `correlate(X, problem)` — impose the declared correlation on an existing
+- `correlate(problem, X)` — impose the declared correlation on an existing
   sample by rank re-pairing.
 - `fit_correlation(problem, X)` — estimate the latent correlation matrix from
   data.
@@ -432,7 +440,7 @@ pce_result = jaxgsa.pce.analyze(problem, X, Y, order=4)
 Y_pred = pce_result.predict(X_new, batch_size=2048)
 effects = pce_result.shapley()
 
-hdmr_result = jaxgsa.hdmr.analyze(problem, X, Y, maxorder=2)
+hdmr_result = jaxgsa.hdmr.analyze(problem, X, Y, order=2)
 Y_pred = hdmr_result.predict(X_new, batch_size=2048)
 effects = hdmr_result.shapley(include_correlative=True)
 ```
@@ -455,11 +463,11 @@ Y_pred = vkoga_result.predict(X_new, batch_size=2048)
 ```
 
 `VKOGAResult` carries the indices `S_TC`, `S_TU`, `S_U`, `S_C`, and `S_IU`. It
-also carries the `correlation` matrix used and the `n_centers`, `gamma`,
-`ridge`, and `rmse` fit diagnostics. `VKOGAResult.shapley()` raises
-`NotImplementedError`, because a kernel expansion has no term-wise variance
-decomposition to allocate from. Use `jaxgsa.hdmr` or `jaxgsa.pce` for Shapley
-effects. See the [VKOGA page](/api/vkoga) for the full index reference.
+also carries the `n_centers`, `gamma`, `ridge`, `rmse`, `cv_rmse` and
+`explained_variance` fit diagnostics. The dependence it used is
+`result.problem.correlation`. `VKOGAResult` has no `shapley()` method, because
+a kernel expansion has no term-wise variance decomposition to allocate from.
+Use `jaxgsa.hdmr` or `jaxgsa.pce` for Shapley effects. See the [VKOGA page](/api/vkoga) for the full index reference.
 
 ### Batching
 
@@ -477,7 +485,7 @@ and it never selects a different algorithm, so the answer does not depend on it
 beyond float summation order. `None` derives a width from the memory budget; an
 explicit value always overrides the budget.
 
-`hsic`, `shapley` and `kucherenko` take none of the three.
+`hsic` and `kucherenko` take none of the three. `shapley.analyze` has no batching keyword of its own, but it passes `batch_size` (PCE and HDMR) and `slice_chunk_size` (HDMR) on to its backend through `**backend_kwargs`.
 `jaxgsa.hsic.analyze(..., batch_size=...)` raises a `TypeError`. HSIC holds
 `2D+1` kernel matrices of shape `(N, N)` at once, and no keyword bounds that,
 so `N` is the only knob.
@@ -521,12 +529,12 @@ classes persist the same way.
 
 `jaxgsa.kucherenko` estimates Sobol' indices for dependent inputs. It
 evaluates the actual model on a conditional-copula design and uses no
-surrogate. It reads `problem.correlation` and is exempt from the
-correlated-design error. With no declared correlation it reduces to the
+surrogate. It reads `problem.correlation` or `problem.sampler` and is exempt from the
+correlated-design error. With no declared dependence it reduces to the
 classic Saltelli column-swap scheme and the classic `S1` and `ST`:
 
 ```python
-ks = jaxgsa.kucherenko.sample(problem, 4096, seed=0)
+ks = jaxgsa.kucherenko.sample(problem, base_n=4096, seed=0)
 Y = model(ks.samples)
 result = jaxgsa.kucherenko.analyze(ks, Y)
 result.S1   # correlation-inclusive first-order (VKOGA's S_TC)
@@ -546,7 +554,7 @@ with `result.shapley(...)`. There is no separate Shapley pipeline.
 `jaxgsa.shapley.analyze(problem, X, Y, backend="pce")` is a thin convenience
 that fits the chosen surrogate and calls `.shapley()` in one step.
 
-All result objects support `to_dataset(...)` for labeled xarray export.
+All result objects support `to_dataset(...)` for labeled xarray export. The dataset `attrs` include `method` (the method name) and `jaxgsa_version` (the version that made the result).
 
 ## Benchmarks
 

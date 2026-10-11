@@ -1,6 +1,7 @@
 """Shared low-level sampling helpers.
 
-This module holds four groups of helper. Marginal transforms map the unit
+This module holds five groups of helper. Argument guards check what a
+sampler or a design-based ``analyze()`` was given. Marginal transforms map the unit
 cube to the problem's declared distributions and back. A second, JAX-native
 copy of the forward transform does the same job differentiably, so a design
 can be re-expressed as a function of its distribution parameters. Power-of-2
@@ -12,8 +13,9 @@ and eFAST samplers use them, as does :func:`jaxgsa.sampling.monte_carlo`.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Any, Mapping, TypeAlias
+from typing import Any, Mapping, TypeAlias
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
@@ -21,10 +23,101 @@ from jax.scipy.special import ndtr, ndtri
 from scipy.stats import norm, truncnorm
 
 from jaxgsa._core.precision import unit_clip_bounds
-from jaxgsa.problem import CategoricalSpec, UniformSpec
+from jaxgsa.problem import CategoricalSpec, Problem, UniformSpec
 
-if TYPE_CHECKING:
-    from jaxgsa.problem import Problem
+
+def check_seed(seed: object, who: str) -> None:
+    """Refuse a JAX key passed as a sampler ``seed``.
+
+    A sampler draws on the host with NumPy and SciPy, so it takes an ``int``
+    or a ``numpy.random.Generator``. A JAX key would otherwise fail deep in
+    NumPy with an error that does not name the mistake.
+
+    Args:
+        seed: The value the user passed as ``seed=``.
+        who: Qualified function name for the message, such as
+            ``"jaxgsa.sobol.sample"``.
+
+    Raises:
+        TypeError: If ``seed`` is a JAX array, which includes typed keys.
+    """
+    if isinstance(seed, jax.Array):
+        raise TypeError(
+            f"{who}: seed takes an int or numpy Generator; jax keys go to analyze(key=...)"
+        )
+
+
+def check_budget_choice(n_samples: int | None, base_n: int | None, where: str) -> None:
+    """Require exactly one of ``n_samples`` and ``base_n``.
+
+    Args:
+        n_samples: Minimum run budget, or ``None``.
+        base_n: Exact base-point count, or ``None``.
+        where: Fully qualified name of the calling sampler, for the message.
+
+    Raises:
+        TypeError: If a given value is not an int (``bool`` included).
+        ValueError: If both or neither are given, or a value is below 1.
+    """
+    if n_samples is None and base_n is None:
+        raise ValueError(
+            f"{where}: give exactly one of n_samples (minimum number of model "
+            "runs) or base_n (exact number of base points). Neither was given."
+        )
+    if n_samples is not None and base_n is not None:
+        raise ValueError(
+            f"{where}: give exactly one of n_samples (minimum number of model "
+            "runs) or base_n (exact number of base points), not both."
+        )
+    for name, value in (("n_samples", n_samples), ("base_n", base_n)):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise TypeError(f"{where}: {name} must be an int, got {type(value).__name__}")
+        if value < 1:
+            raise ValueError(f"{where}: {name} must be >= 1, got {value}")
+
+
+def require_design(obj: object, cls: type, function: str, sampler: str) -> None:
+    """Require the design class that ``function`` analyzes.
+
+    Args:
+        obj: The first argument the caller passed.
+        cls: The design class the function accepts.
+        function: Fully qualified name of the analyzing function.
+        sampler: Fully qualified name of the sampler that builds ``cls``.
+
+    Raises:
+        TypeError: If ``obj`` is not an instance of ``cls``. The message names
+            the type received and points given-data users to the right methods.
+    """
+    if isinstance(obj, cls):
+        return
+    received = "a Problem" if isinstance(obj, Problem) else f"a {type(obj).__name__}"
+    raise TypeError(
+        f"{function} takes the {cls.__name__} from {sampler} as its first "
+        f"argument, not {received}. For given-data X and Y, use a given-data "
+        "method such as jaxgsa.rank or jaxgsa.pce."
+    )
+
+
+def check_seed_scramble(scramble: bool, seed: Any, where: str) -> None:
+    """Reject a seed when the Sobol' sequence is not scrambled.
+
+    Args:
+        scramble: Whether the sequence is scrambled.
+        seed: The seed the caller passed.
+        where: Fully qualified name of the calling sampler, for the message.
+
+    Raises:
+        ValueError: If ``scramble`` is false and a seed is given.
+    """
+    if not scramble and seed is not None:
+        raise ValueError(
+            f"{where}: seed has no effect with scramble=False. "
+            "The unscrambled Sobol' sequence is deterministic, so the seed "
+            "would do nothing. Use scramble=True, or drop the seed."
+        )
 
 
 # Distribution parameters keyed by parameter name, then by field name. The

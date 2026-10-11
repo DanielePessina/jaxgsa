@@ -3,8 +3,9 @@
 Implements the surrogate-based sensitivity analysis (SSA) of Hilhorst et al.
 (2024). Stage one fits a greedy kernel surrogate to the given ``(X, Y)`` data.
 Stage two computes the correlated variance-based indices of Li et al. (2010)
-against that surrogate under a Gaussian copula. The split is what makes the
-method affordable. The indices need nested conditional sampling, which is
+against that surrogate under the problem's input distribution: a Gaussian
+copula, or a custom sampler declared on the problem. The split is what makes
+the method affordable. The indices need nested conditional sampling, which is
 unaffordable against an expensive model but cheap against a kernel expansion.
 
 **This module has no pure core.** Stage two is a host NumPy/SciPy quasi-Monte
@@ -34,15 +35,8 @@ from jax import Array
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import apply_batched, resolve_batch_size
 from jaxgsa._core.bootstrap import interval
-from jaxgsa._core.copula import (
-    _ConditionalPlan,
-    build_conditional_plan,
-    canonicalize_correlation,
-    fit_gaussian_copula,
-    independent_correlation,
-    is_independent,
-)
-from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
+from jaxgsa._core.dependence import Draws, draws_for
+from jaxgsa._core.entry import at_least, bootstrap_checks, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -56,9 +50,10 @@ from jaxgsa._core.result import CIInfo
 from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import cdf_to_unit_interval
+from jaxgsa._core.validation import _is_constant_slice, as_key
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
-from jaxgsa.vkoga._engine import _cross_validate, _fit_vkoga, _predict_vkoga
+from jaxgsa.vkoga._engine import _content_digest, _cross_validate, _fit_vkoga, _predict_vkoga
 from jaxgsa.vkoga._indices import estimate_correlated_indices
 from jaxgsa.vkoga._result import VKOGAResult
 
@@ -66,7 +61,6 @@ from jaxgsa.vkoga._result import VKOGAResult
 # per-channel recursive analyze() calls. verbose is excluded:
 # the engine owns it.
 _IRREGULAR_KWARGS = (
-    "correlation",
     "gamma",
     "ridge",
     "max_centers",
@@ -112,19 +106,6 @@ _DEFAULT_MAX_CENTERS = 300
 # true ones, and on oscillatory models they can even invert the ranking.
 _CV_RMSE_WARN_FRACTION = 0.5
 
-# Largest fitted off-diagonal latent correlation the training X may show
-# before the design is called correlated. Spearman rank-correlation noise on
-# an independent design of n rows has standard deviation about 1/sqrt(n)
-# (~0.18 at n=30, ~0.07 at n=200), and the check takes a max over D(D-1)/2
-# entries, which inflates the expected extreme further. So at very small n
-# with many parameters this can fire on an independent design; at the
-# training sizes the surrogate needs to be any good (hundreds of rows) the
-# noise sits well below 0.3. A training set actually drawn from the analysis
-# copula, the mistake this check catches, fits near the declared entries,
-# which sit well above 0.3 whenever the correlation matters at all. The
-# consequence of a false positive is one warning, not a wrong number.
-_TRAINING_CORRELATION_WARN = 0.3
-
 # The index fields a bootstrap reports an interval for. The diagnostics
 # (variance, rmse, cv_rmse, n_centers, gamma, ridge) get none: they describe
 # the fit, not the sensitivity of the model, and a caller reading them wants
@@ -137,7 +118,6 @@ def analyze(
     X: Array,
     Y: Array | IrregularY,
     *,
-    correlation: Array | np.ndarray | None = None,
     gamma: float | None = None,
     ridge: float | None = None,
     max_centers: int | None = None,
@@ -148,7 +128,7 @@ def analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int,
     batch_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
@@ -158,24 +138,25 @@ def analyze(
 
     Fits a Vectorial Kernel Orthogonal Greedy Algorithm surrogate to given
     ``(X, Y)`` data, then estimates the five correlated indices of Li et al.
-    (2010) against it under a Gaussian copula.
+    (2010) against it under the problem's input distribution: independent,
+    a Gaussian copula (``problem.correlation``), or a custom sampler
+    (``problem.with_sampler(...)``). A custom sampler's marginals must match
+    the declarations in ``problem``.
 
-    The training design must be independent and space-filling even when the
-    analysis is correlated. The correlated measure concentrates on a ridge, but
-    ``S_TU`` conditions on the other parameters and then resamples ``X_i``
-    across its whole marginal. A surrogate trained only on correlated data
-    would be extrapolating for exactly those draws.
+    The surrogate must be accurate where the analysis distribution puts its
+    mass. Both nested estimators draw from conditionals of the joint
+    distribution, never from a whole marginal with the rest held fixed, so
+    every surrogate evaluation lies where the joint distribution puts mass.
+    Training rows drawn from the analysis distribution itself therefore work.
+    An independent, space-filling design is a safe default when the
+    correlation is not fixed yet, or when one fit is reused under several
+    correlations. Avoid training data that misses regions the analysis
+    covers.
 
     Args:
         problem: Problem defining the parameters and their marginals.
         X: Inputs in physical units, shape ``(N, D)``.
         Y: Model outputs, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
-        correlation: Gaussian-copula dependency structure. ``None`` (default)
-            reads ``problem.correlation`` and falls back to independent inputs
-            when the problem declares none. A ``(D, D)`` matrix overrides the
-            problem's declaration for this call. To fit a matrix from data,
-            use :func:`jaxgsa.sampling.fit_correlation` and attach it with
-            ``problem.with_correlation(...)``.
         gamma: RBF shape parameter, finite and positive when given. ``None``
             cross-validates over a grid.
         ridge: Kernel regularisation, finite and positive when given. ``None``
@@ -267,7 +248,8 @@ def analyze(
     Raises:
         ValueError: If ``X``/``Y`` violate the output contract, if the problem
             has fewer than two parameters or any categorical parameter, if
-            ``correlation`` is not ``None`` or a valid matrix, if ``gamma`` or
+            the custom sampler returns rows outside a declared bounded
+            support, if ``gamma`` or
             ``ridge`` is not finite and positive, or if a size argument is out
             of range, if ``key`` is ``None``, if ``on_invalid`` is not one of
             the three policies, or
@@ -278,18 +260,15 @@ def analyze(
             solver failure.
 
     Warns:
-        JaxgsaWarning: In any of five cases. An output slice has zero variance.
+        JaxgsaWarning: In any of four cases. An output slice has zero variance.
             JAX is in single precision, where the kernel solve loses accuracy
             for small ``gamma`` (see :mod:`jaxgsa.vkoga`). The cross-validated
             surrogate error is a large fraction of the output standard
             deviation, which makes every index untrustworthy. ``S_U`` had to be
             clipped to ``S_TU`` by a wide margin, which says the additive
             component functions cannot represent the model's interactions.
-            The analysis is correlated but the training ``X`` is itself
-            correlated, so the surrogate extrapolates on the conditional
-            draws; train on an independent design and declare the dependence
-            in ``problem.correlation`` instead.
     """
+    key = as_key(key, "vkoga")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
@@ -303,14 +282,14 @@ def analyze(
         )
     Y = cast(Array, Y)
 
-    from jaxgsa.vkoga import SPEC
+    from jaxgsa.vkoga import _SPEC
 
-    D = problem.num_vars
+    D = problem.n_params
     # Every scalar argument is checked before any expensive work
     # (cross-validation, fitting, index estimation). The preamble runs them
     # first, so that ordering is structural rather than a convention.
     ctx = prepare(
-        SPEC,
+        _SPEC,
         problem,
         Y,
         X=X,
@@ -337,9 +316,7 @@ def analyze(
                 )
             ),
             at_least("batch_size", batch_size, 1),
-            at_least("n_bootstrap", n_bootstrap, 0),
-            one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            in_open_interval("conf_level", conf_level, 0.0, 1.0),
+            *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
             require(
                 D >= 2,
                 f"Correlated sensitivity indices need at least 2 parameters, got {D}",
@@ -347,8 +324,9 @@ def analyze(
         ),
         min_kept=n_folds,
     )
-    # Checked after the preamble so a problem this method refuses outright
-    # (categorical parameters) still reports that, and not a missing key.
+    # The index estimate needs a key even with no bootstrap. This check runs
+    # after the preamble, so with n_bootstrap=0 a problem this method refuses
+    # outright (categorical parameters) still reports that, not a missing key.
     if key is None:
         raise ValueError("key is required for the Monte-Carlo index estimate")
     seed = _seed_from_key(key)
@@ -360,7 +338,7 @@ def analyze(
 
     if max_centers is None:
         max_centers = _DEFAULT_MAX_CENTERS
-    # The latent draws come from Sobol' sequences, which need power-of-two
+    # The uniform noise comes from Sobol' sequences, which need power-of-two
     # sizes to keep their balance guarantees (scipy warns otherwise). The
     # defaults are already powers of two, so they pass through unchanged.
     n_outer = _next_power_of_2(n_outer)
@@ -372,8 +350,10 @@ def analyze(
     Y_flat = Y_canonical.reshape(Y_canonical.shape[0], n_time * n_out)
 
     _warn_single_precision()
-    R = _resolve_correlation(problem, correlation)
-    _warn_correlated_training_design(problem, X, R)
+    # The input draws are built once and shared by the point estimate and every
+    # bootstrap replicate. The dependence comes from the problem alone, so the
+    # result's ``dependence`` always equals ``problem.dependence``.
+    input_draws = draws_for(problem)
 
     # The RBF kernel is isotropic, so every column must share a scale; the
     # marginal CDF map is the same transform HDMR uses for its basis.
@@ -395,14 +375,13 @@ def analyze(
         seed=seed,
     )
     _warn_poor_surrogate(cv_rmse, Y_centered)
-    plan = build_conditional_plan(R)
     state, indices = _fit_and_estimate(
         U,
         Y_flat,
         gamma=gamma_value,
         ridge=ridge_value,
         max_centers=resolved_centers,
-        plan=plan,
+        input_draws=input_draws,
         problem=problem,
         n_outer=n_outer,
         n_inner=n_inner,
@@ -431,7 +410,7 @@ def analyze(
             gamma=gamma_value,
             ridge=ridge_value,
             max_centers=resolved_centers,
-            plan=plan,
+            input_draws=input_draws,
             problem=problem,
             n_outer=n_outer,
             n_inner=n_inner,
@@ -455,6 +434,11 @@ def analyze(
         )
         confs.update(interval_confs)
 
+    # 1 - in-sample MSE / output variance, from the training rows.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        explained = 1.0 - np.asarray(state.rmse) ** 2 / np.asarray(Y_flat).var(axis=0)
+    # A constant slice has no variance to explain; float32 var is ~1e-16, not 0.
+    explained = np.where(np.asarray(_is_constant_slice(Y_flat)), np.nan, explained)
     output_shape = ctx.squeeze(jnp.zeros((n_time, n_out)), n_trailing=0).shape
     result = VKOGAResult(
         S_TC=_shape_index(indices.S_TC),
@@ -463,14 +447,14 @@ def analyze(
         S_C=_shape_index(indices.S_C),
         S_IU=_shape_index(indices.S_IU),
         problem=problem,
-        correlation=R,
         variance=_shape_slice(indices.variance),
         n_centers=int(state.n_centers),
         gamma=float(gamma_value),
         ridge=float(ridge_value),
         invalid=invalid,
         rmse=_shape_slice(np.asarray(state.rmse)),
-        cv_rmse=cv_rmse,
+        cv_rmse=None if cv_rmse is None else _shape_slice(cv_rmse),
+        explained_variance=_shape_slice(explained),
         _fit=state,
         _y_mean=y_mean,
         _output_shape=output_shape,
@@ -493,6 +477,7 @@ def analyze(
         )
         _verbose.analysis_summary(
             method="jaxgsa.vkoga.analyze",
+            dependence=problem.dependence,
             problem=problem,
             n_runs=int(ctx.Y.shape[0]),
             T=n_time,
@@ -519,7 +504,7 @@ def _fit_and_estimate(
     gamma: float,
     ridge: float,
     max_centers: int,
-    plan: _ConditionalPlan,
+    input_draws: Draws,
     problem: Problem,
     n_outer: int,
     n_inner: int,
@@ -539,7 +524,7 @@ def _fit_and_estimate(
         gamma: RBF shape parameter to fit with.
         ridge: Kernel regularisation to fit with.
         max_centers: Maximum kernel centres the greedy may select.
-        plan: Precomputed Gaussian conditionals for the index integration.
+        input_draws: Joint and conditional input draws for the index integration.
         problem: Problem whose declared marginals pick each parameter's
             component-fit basis.
         n_outer: Outer (conditioning) sample size per parameter.
@@ -576,7 +561,7 @@ def _fit_and_estimate(
     )
     indices = estimate_correlated_indices(
         problem=problem,
-        plan=plan,
+        draws=input_draws,
         predict=_make_unit_predictor(state, y_mean, batch_size),
         n_outer=n_outer,
         n_inner=n_inner,
@@ -595,7 +580,7 @@ def _bootstrap_replicates(
     gamma: float,
     ridge: float,
     max_centers: int,
-    plan: _ConditionalPlan,
+    input_draws: Draws,
     problem: Problem,
     n_outer: int,
     n_inner: int,
@@ -626,7 +611,7 @@ def _bootstrap_replicates(
         gamma: RBF shape parameter, held at the cross-validated value.
         ridge: Kernel regularisation, held at the cross-validated value.
         max_centers: Maximum kernel centres the greedy may select.
-        plan: Precomputed Gaussian conditionals for the index integration.
+        input_draws: Joint and conditional input draws for the index integration.
         problem: Problem whose declared marginals pick each parameter's
             component-fit basis.
         n_outer: Outer (conditioning) sample size per parameter.
@@ -653,7 +638,7 @@ def _bootstrap_replicates(
                 gamma=gamma,
                 ridge=ridge,
                 max_centers=max_centers,
-                plan=plan,
+                input_draws=input_draws,
                 problem=problem,
                 n_outer=n_outer,
                 n_inner=n_inner,
@@ -711,105 +696,6 @@ def _warn_single_precision() -> None:
         )
 
 
-def _warn_correlated_training_design(
-    problem: Problem,
-    X: Array,
-    R: np.ndarray,
-) -> None:
-    """Warn when a correlated analysis is fed a correlated training design.
-
-    The estimator requires an independent, space-filling training ``X`` even
-    when the analysis correlation is not the identity. The correlated measure
-    concentrates on a ridge, but ``S_TU`` conditions on the other parameters
-    and then resamples ``X_i`` across its whole marginal, so the surrogate is
-    evaluated far off that ridge. A surrogate trained only on correlated data
-    extrapolates for exactly those draws, and every index quietly inherits
-    the extrapolation error.
-
-    The check fits the training design's own empirical latent correlation
-    (rank-based, so it is invariant to the marginals) and compares its
-    largest off-diagonal entry against ``_TRAINING_CORRELATION_WARN``. It
-    runs only when the analysis correlation is not the identity: an
-    independent analysis never conditions, so a structured training design is
-    then the user's own business. The fit's data-quality warnings are
-    suppressed here — this is a diagnostic on a sample the invalid check has
-    already vetted, not a fit the user asked for.
-
-    Args:
-        problem: Problem the training sample belongs to.
-        X: Training inputs in physical units, shape ``(N, D)``, after the
-            non-finite policy ran.
-        R: Resolved analysis correlation matrix, shape ``(D, D)``.
-
-    Warns:
-        JaxgsaWarning: If the training design's fitted latent correlation has
-            an off-diagonal entry above ``_TRAINING_CORRELATION_WARN``.
-    """
-    if is_independent(R):
-        return
-    with warnings.catch_warnings():
-        # fit_gaussian_copula warns about degenerate columns and material
-        # repairs. Those describe a fit the user asked for; this internal
-        # diagnostic only reads the magnitude.
-        warnings.simplefilter("ignore", JaxgsaWarning)
-        R_fit = fit_gaussian_copula(problem, np.asarray(X))
-    off_diag = np.abs(R_fit - np.diag(np.diag(R_fit)))
-    largest = float(off_diag.max())
-    if largest <= _TRAINING_CORRELATION_WARN:
-        return
-    i, j = np.unravel_index(int(off_diag.argmax()), off_diag.shape)
-    warnings.warn(
-        f"jaxgsa.vkoga: the training X is itself correlated (fitted latent "
-        f"correlation between {problem.names[int(i)]!r} and "
-        f"{problem.names[int(j)]!r} is {largest:.2f}). The estimator needs an "
-        "independent, space-filling training design even for a correlated "
-        "analysis: S_TU conditions on the other parameters and then resamples "
-        "each X_i across its whole marginal, so a surrogate trained only on "
-        "correlated data extrapolates for exactly those conditional draws. "
-        "Train on an independent design; the dependence structure belongs in "
-        "problem.correlation (or the correlation= argument), not in the "
-        "training data.",
-        stacklevel=3,
-        category=JaxgsaWarning,
-    )
-
-
-def _resolve_correlation(
-    problem: Problem,
-    correlation: Array | np.ndarray | None,
-) -> np.ndarray:
-    """Turn the ``correlation`` argument into a validated latent matrix.
-
-    ``None`` reads ``problem.correlation``, and falls back to independent
-    inputs when the problem declares none. A matrix is an explicit per-call
-    override and is canonicalized like a constructor argument. The one
-    workflow for fitting a matrix from data is
-    ``problem.with_correlation(jaxgsa.sampling.fit_correlation(problem, X))``,
-    which states in the call which sample the copula comes from.
-
-    Args:
-        problem: Problem whose declared correlation is the fallback.
-        correlation: Per-call override, shape ``(D, D)``, or ``None``.
-
-    Returns:
-        A canonicalized latent correlation matrix, shape ``(D, D)``.
-
-    Raises:
-        ValueError: If ``correlation`` is not a valid matrix.
-    """
-    if correlation is None:
-        declared = problem.correlation
-        if declared is None:
-            return independent_correlation(problem.num_vars)
-        # Problem construction already canonicalized the declared matrix.
-        return declared
-    # A per-call override is user-declared, so it takes the strict repair
-    # policy: a matrix that has to move materially is rejected, not repaired.
-    return canonicalize_correlation(
-        correlation, problem.num_vars, policy="declared", method="jaxgsa.vkoga.analyze"
-    )
-
-
 def _resolve_hyperparameters(
     U: Array,
     Y: Array,
@@ -819,7 +705,7 @@ def _resolve_hyperparameters(
     max_centers: int,
     n_folds: int,
     seed: int,
-) -> tuple[float, float, float | None]:
+) -> tuple[float, float, np.ndarray | None]:
     """Return ``(gamma, ridge, cv_rmse)``, cross-validating what was not given.
 
     A partially specified pair is handled by searching a one-element grid for
@@ -835,9 +721,12 @@ def _resolve_hyperparameters(
         seed: Seed for the fold assignment.
 
     Returns:
-        The chosen ``gamma`` and ``ridge``, plus the pooled out-of-sample RMSE
-        of the winning grid point. The score is ``None`` when the caller fixed
-        both hyperparameters, because no cross-validation ran.
+        The chosen ``gamma`` and ``ridge``, plus the out-of-sample RMSE of the
+        winning grid point, one value per output slice, shape ``(S,)``. The
+        grid point is chosen on the RMSE pooled over the slices, and the
+        per-slice values come from the same fold residuals. The score is
+        ``None`` when the caller fixed both hyperparameters, because no
+        cross-validation ran.
 
     Raises:
         RuntimeError: If every cross-validation score is non-finite. Argmin
@@ -849,17 +738,18 @@ def _resolve_hyperparameters(
 
     gammas = np.asarray([gamma]) if gamma is not None else _GAMMA_GRID
     ridges = np.asarray([ridge]) if ridge is not None else _RIDGE_GRID
-    scores = np.asarray(
-        _cross_validate(
-            U,
-            Y,
-            gammas=gammas,
-            ridges=ridges,
-            max_centers=max_centers,
-            n_folds=n_folds,
-            seed=seed,
-        )
+    per_slice_jax, pooled_jax = _cross_validate(
+        U,
+        Y,
+        gammas=gammas,
+        ridges=ridges,
+        max_centers=max_centers,
+        n_folds=n_folds,
+        seed=seed,
     )
+    per_slice = np.asarray(per_slice_jax)
+    # The grid choice uses the pooled score computed on device.
+    scores = np.asarray(pooled_jax)
     finite = np.isfinite(scores)
     if not finite.any():
         raise RuntimeError(
@@ -871,10 +761,10 @@ def _resolve_hyperparameters(
     # as the worst possible rather than letting argmin pick a NaN.
     scores = np.where(finite, scores, np.inf)
     best = np.unravel_index(int(np.argmin(scores)), scores.shape)
-    return float(gammas[best[0]]), float(ridges[best[1]]), float(scores[best])
+    return float(gammas[best[0]]), float(ridges[best[1]]), per_slice[best]
 
 
-def _warn_poor_surrogate(cv_rmse: float | None, Y_centered: Array) -> None:
+def _warn_poor_surrogate(cv_rmse: np.ndarray | None, Y_centered: Array) -> None:
     """Warn when the cross-validated fit is too weak to carry the indices.
 
     Every index is measured against the surrogate, not against the model, so a
@@ -884,8 +774,8 @@ def _warn_poor_surrogate(cv_rmse: float | None, Y_centered: Array) -> None:
     for the user to notice.
 
     Args:
-        cv_rmse: Pooled out-of-sample RMSE of the chosen hyperparameters, or
-            ``None`` when the caller fixed both and no cross-validation ran.
+        cv_rmse: Per-slice out-of-sample RMSE of the chosen hyperparameters,
+            shape ``(S,)``, or ``None`` when the caller fixed both and no cross-validation ran.
         Y_centered: Centred training outputs, shape ``(N, S)``. They set the
             scale to compare against.
 
@@ -896,9 +786,10 @@ def _warn_poor_surrogate(cv_rmse: float | None, Y_centered: Array) -> None:
     if cv_rmse is None:
         return
     scale = float(jnp.sqrt(jnp.mean(Y_centered**2)))
-    if scale <= 0.0 or not np.isfinite(cv_rmse):
+    pooled = float(np.sqrt(np.mean(np.asarray(cv_rmse) ** 2)))
+    if scale <= 0.0 or not np.isfinite(pooled):
         return
-    relative = cv_rmse / scale
+    relative = pooled / scale
     if relative <= _CV_RMSE_WARN_FRACTION:
         return
     warnings.warn(
@@ -970,13 +861,10 @@ def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
         A callable mapping ``(n, D)`` unit-cube rows to ``(n, S)`` outputs.
     """
     # The kernel reads centres, coefficients and gamma, and adds ``y_mean``;
-    # those four arrays decide the compiled executable, so the memo key is
-    # their full content plus the (runtime) batch policy.
+    # those four arrays decide the compiled executable, so the memo key is a
+    # digest of their full content plus the (runtime) batch policy.
     key = (
-        np.asarray(state.centers).tobytes(),
-        np.asarray(state.coefficients).tobytes(),
-        np.asarray(state.gamma).tobytes(),
-        np.asarray(y_mean).tobytes(),
+        _content_digest(state.centers, state.coefficients, state.gamma, y_mean),
         batch_size,
     )
     pred = _PREDICTOR_CACHE.get(key)
@@ -989,7 +877,7 @@ def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
     def predict(U: np.ndarray) -> np.ndarray:
         U_device = jnp.asarray(U)
         batch = resolve_batch_size(bytes_per_row, U_device.shape[0], batch_size)
-        return np.asarray(apply_batched(compiled, U_device, batch))
+        return apply_batched(compiled, U_device, batch, to_host=True)
 
     if len(_PREDICTOR_CACHE) >= _PREDICTOR_CACHE_MAX:
         _PREDICTOR_CACHE.pop(next(iter(_PREDICTOR_CACHE)))

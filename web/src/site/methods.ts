@@ -22,7 +22,7 @@ export interface MethodMeta {
   name: string;
   tag: string;
   blurb: string;
-  /** The X layout this estimator is intended to consume in the workbench. */
+  /** The X layout this estimator is intended to consume in the studio. */
   input: { kind: "dedicated"; design: DesignMethod } | { kind: "given" };
 }
 

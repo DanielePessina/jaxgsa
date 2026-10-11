@@ -29,7 +29,7 @@ problem = jaxgsa.Problem.from_dict(
     correlation=[[1.0, 0.8], [0.8, 1.0]],
 )
 
-X = jaxgsa.sampling.monte_carlo(problem, n=8192, seed=42)
+X = jaxgsa.sampling.monte_carlo(problem, n_samples=8192, seed=42)
 Y = X[:, 0]  # the model reads x1 and ignores x2
 
 ot = jaxgsa.optimal_transport.analyze(problem, X, Y)
@@ -39,7 +39,7 @@ ot = jaxgsa.optimal_transport.analyze(problem, X, Y)
 jaxgsa.optimal_transport.analyze
   problem: D=2 (x1, x2)
     marginals: gaussian=2
-    correlation: correlated (Gaussian copula)
+    dependence: gaussian copula
     output: N=8192 runs, T=1 x K=1 output slice
     invalid: none found in 8192 rows (policy 'raise')
   timing:
@@ -80,7 +80,7 @@ Now put the same model through Kucherenko, which runs it on a
 conditional-copula design:
 
 ```python
-ks = jaxgsa.kucherenko.sample(problem, 8192, seed=0)
+ks = jaxgsa.kucherenko.sample(problem, base_n=8192, seed=0)
 result = jaxgsa.kucherenko.analyze(ks, ks.samples[:, 0])
 
 print("S1:", np.round(result.S1, 3))
@@ -92,7 +92,7 @@ jaxgsa.kucherenko.sample: D=2, base_n=8192, n_blocks=5, n_runs=40960, dependence
 jaxgsa.kucherenko.analyze
   problem: D=2 (x1, x2)
     marginals: gaussian=2
-    correlation: correlated (Gaussian copula)
+    dependence: gaussian copula
     output: N=40960 runs, T=1 x K=1 output slice
     invalid: none found in 8192 base points (policy 'raise')
   timing:
@@ -126,7 +126,8 @@ The rest of this page is the mechanics.
 
 ## How jaxgsa models dependence
 
-jaxgsa uses a Gaussian copula. A copula separates two questions: what each
+The built-in path uses a Gaussian copula. Custom joint and conditional samplers
+for Kucherenko and VKOGA can represent other dependence structures. A copula separates two questions: what each
 parameter's own distribution looks like, and how the parameters move together.
 Every parameter keeps its declared marginal (uniform, Gaussian, or truncated
 Gaussian) exactly as written. A `(D, D)` correlation matrix couples the
@@ -151,12 +152,12 @@ problem = jaxgsa.Problem.from_dict(
     correlation=R,
 )
 
-print(problem.has_correlated_inputs)
+print(problem.dependence)
 print(problem.correlation)
 ```
 
 ```
-True
+gaussian
 [[1.  0.8]
  [0.8 1. ]]
 ```
@@ -177,7 +178,7 @@ p_s = jaxgsa.Problem.from_dict(
 )
 
 print("latent:", round(float(p_s.correlation[0, 1]), 4))
-Xs = jaxgsa.sampling.monte_carlo(p_s, n=100_000, seed=7)
+Xs = jaxgsa.sampling.monte_carlo(p_s, n_samples=100_000, seed=7)
 print("achieved spearman:", round(float(stats.spearmanr(Xs).statistic), 4))
 ```
 
@@ -248,7 +249,7 @@ CDF). Problems without a correlation keep the previous pseudo-random path
 bit-for-bit.
 
 ```python
-X = jaxgsa.sampling.monte_carlo(problem, n=4096, seed=42)
+X = jaxgsa.sampling.monte_carlo(problem, n_samples=4096, seed=42)
 ```
 
 Each column follows its declared marginal exactly, and the ranks across
@@ -268,6 +269,10 @@ The fit works on Spearman ranks, so it is invariant to the declared
 marginals. Heavy ties (discrete or heavily rounded columns) bias the rank
 estimate toward zero. A polychoric estimator is future work.
 
+Fitting is explicit: supplied `X, Y` do not automatically trigger a Gaussian
+copula fit. A fitted pairwise rank matrix cannot describe every dependence
+structure.
+
 ## Retrofit correlation onto an existing sample
 
 `correlate` imposes the declared correlation on a sample you already have by
@@ -280,8 +285,8 @@ p = jaxgsa.Problem.from_dict(
     {"x1": (0.0, 1.0), "x2": (0.0, 1.0)},
     correlation=[[1.0, 0.8], [0.8, 1.0]],
 )
-X_independent = jaxgsa.sampling.monte_carlo(p.with_correlation(None), n=4096, seed=1)
-X_correlated = jaxgsa.sampling.correlate(X_independent, p, seed=2)
+X_independent = jaxgsa.sampling.monte_carlo(p.with_correlation(None), n_samples=4096, seed=1)
+X_correlated = jaxgsa.sampling.correlate(p, X_independent, seed=2)
 
 print("spearman before:", round(float(stats.spearmanr(X_independent).statistic), 4))
 print("spearman after :", round(float(stats.spearmanr(X_correlated).statistic), 4))
@@ -322,7 +327,7 @@ problem = jaxgsa.Problem.from_dict(
     },
     correlation=[[1.0, 0.8], [0.8, 1.0]],
 )
-X = jaxgsa.sampling.monte_carlo(problem, n=8192, seed=42)
+X = jaxgsa.sampling.monte_carlo(problem, n_samples=8192, seed=42)
 Y = X[:, 0]  # the model reads x1 and ignores x2
 
 ot = jaxgsa.optimal_transport.analyze(problem, X, Y)
@@ -346,9 +351,9 @@ surrogate error. VKOGA fits a kernel surrogate to `(X, Y)` you already have and
 needs no new model runs, at the cost of the surrogate. VKOGA also splits the
 totals further into `S_U`, `S_C` and `S_IU`.
 
-One trap worth stating twice: VKOGA needs an **independent** training design
-even when the analysis is correlated. See its
-[training-design section](/examples/vkoga#the-training-design-must-be-independent).
+VKOGA training data must cover the analysis distribution accurately. Rows
+drawn from that distribution work, and so does an independent design. See its
+[training-data section](/examples/vkoga#training-data-must-cover-the-analysis-distribution).
 
 ### HDMR: the split per term, not per parameter
 
@@ -421,14 +426,14 @@ jaxgsa.shapley.analyze(problem, X, Y)  # backend="pce" is the default
 
 ```
 ValueError: jaxgsa.shapley.analyze with backend='pce' computes a variance
-allocation that assumes independent inputs, but problem.correlation declares a
-dependence structure. Use backend='hdmr' with include_correlative=True, which
+allocation that assumes independent inputs, but this problem declares dependent
+inputs (problem.correlation or problem.sampler). Use backend='hdmr' with include_correlative=True, which
 allocates the ANCOVA (structural + correlative) decomposition instead — an
 ANCOVA-based attribution, not conditional-variance Shapley effects — or one of
-the correlation-tolerant methods: ...
+the dependence-tolerant methods: ...
 ```
 
-## Methods that refuse correlated problems
+## Methods that refuse dependent problems
 
 Some methods have indices that are only defined for independent inputs. They
 raise `ValueError` rather than return silently wrong numbers. Two groups do
@@ -441,35 +446,32 @@ jaxgsa.pce.analyze(problem, X, Y)
 ```
 
 ```
-ValueError: jaxgsa.pce.analyze computes indices that assume independent inputs,
-and they are invalid — not merely approximate — when problem.correlation
-declares a dependence structure. Use a correlation-tolerant given-data method
-instead: jaxgsa.vkoga (variance-based indices from given data, through a kernel
+ValueError: jaxgsa.pce.analyze computes indices that assume independent inputs.
+They are invalid, not merely approximate, when the problem declares dependent
+inputs (problem.correlation or problem.sampler). Use a dependence-tolerant
+given-data method instead: jaxgsa.vkoga (variance-based indices from given data, through a kernel
 surrogate), jaxgsa.kucherenko (variance-based indices from its own
 conditional-copula design), jaxgsa.optimal_transport, jaxgsa.borgonovo,
 jaxgsa.hdmr (whose ANCOVA Sb term quantifies the correlation-induced
 contribution, and whose result supports shapley(include_correlative=True)),
 jaxgsa.hsic, jaxgsa.pawn, or jaxgsa.shapley with backend="hdmr". To analyze the
-independent problem instead, drop the matrix with problem.with_correlation(None).
+independent problem instead, drop the dependence with problem.with_correlation(None).
 ```
 
 To run one of these on the independent version of the problem, drop the
-matrix explicitly with `problem.with_correlation(None)`.
+dependence explicitly with `problem.with_correlation(None)`, or
+`problem.with_sampler(None)` for a custom sampler. A custom-sampler problem is
+refused in exactly the same way.
 
 ## Practical notes
 
-- A Gaussian copula fixes the whole dependence family, not only the
-  correlation. It has no tail dependence. On the latent scale, the variables
-  are conditionally independent given the rest. Real data may carry
-  asymmetric or tail dependence that this smooths away.
-- **The Gaussian copula is the dependence model jaxgsa implements, and that
-  is a fixed scope rather than a gap waiting to be filled.** Every method
-  that reads `problem.correlation` assumes a Gaussian conditional, so other
-  copula families are not planned. Your declared rank correlation
-  still holds, so the marginals and the pairwise ranks are right, but the
-  joint behaviour in the tails is not what your data does. If tail dependence
-  drives your problem, GlobalSensitivity.jl with Copulas.jl covers Clayton,
-  Frank, Gumbel and t, and is the honest recommendation.
+- A Gaussian copula fixes a dependence family, not only a correlation matrix.
+  For correlations strictly below one in magnitude it has no asymptotic tail
+  dependence. Real data may carry asymmetric or tail dependence it cannot model.
+- `problem.correlation` selects the built-in Gaussian copula. A custom
+  `problem.sampler` (joint and conditional transformations) lets Kucherenko and
+  VKOGA integrate under other copulas or other joint distributions. The package does not infer such a model from
+  observed rows; supply consistent samplers for your target distribution.
 - For non-Gaussian marginals, the Pearson correlation of the physical samples
   usually differs from the latent matrix. This is the NORTA
   correlation-matching problem. The Spearman rank correlation is the
@@ -489,3 +491,155 @@ matrix explicitly with `problem.with_correlation(None)`.
 - [Optimal Transport](/examples/optimal-transport) and
   [Borgonovo Delta](/examples/borgonovo) for the distribution-based indices.
 - [Methods guide](/guide/methods) for which method to pick under correlation.
+
+## Custom dependence without a copula
+
+A custom sampler lets Kucherenko and VKOGA work under dependence beyond a
+Gaussian copula. You attach it to the `Problem`. It must implement joint and
+conditional sampling. Representative correlated rows alone do not determine
+conditional redraws. PAWN, Borgonovo, optimal transport and HSIC still accept
+`X, Y` directly.
+
+Consider independent uniform variables `u` and `v`, and set
+`w = (u + v) % 1`. All three marginals are uniform on `[0, 1]`, and every pair
+is independent, yet knowing any two determines the third. This is higher-order
+dependence, stronger evidence than merely having zero pairwise correlations.
+A Gaussian copula with an identity correlation matrix would instead generate
+three independent variables and lose this constraint.
+
+The sampler receives uniform points. It makes exactly three kinds of call:
+
+- `fixed_indices=()`: return joint draws.
+- `fixed_indices=(i,)`: keep column `i` of `conditioning_rows` and redraw the
+  other columns given it.
+- `fixed_indices` holding every index except `i`: keep those columns and redraw
+  column `i` given the rest.
+
+It must return `(n, D)` finite rows, copy the fixed columns exactly, and be
+deterministic. The package passes copies, so changing the arguments does no
+harm.
+
+```python
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+import jaxgsa
+
+jax.config.update("jax_enable_x64", True)
+
+
+def sample_modular(uniform_points, *, conditioning_rows=None, fixed_indices=()):
+    fixed = frozenset(fixed_indices)
+    if not fixed:
+        u, v = uniform_points[:, 0], uniform_points[:, 1]
+        return np.column_stack((u, v, (u + v) % 1.0))
+    if conditioning_rows is None:
+        raise ValueError("conditioning_rows is required")
+    rows = conditioning_rows.copy()
+    if len(fixed) == 1:
+        free = 1 if 0 in fixed else 0
+        rows[:, free] = uniform_points[:, 0]
+    if 2 not in fixed:
+        rows[:, 2] = (rows[:, 0] + rows[:, 1]) % 1.0
+    elif 1 not in fixed:
+        rows[:, 1] = (rows[:, 2] - rows[:, 0]) % 1.0
+    elif 0 not in fixed:
+        rows[:, 0] = (rows[:, 2] - rows[:, 1]) % 1.0
+    return rows
+
+
+problem = jaxgsa.Problem(
+    names=("u", "v", "w"),
+    bounds=((0.0, 1.0),) * 3,
+    sampler=sample_modular,
+    sampler_dimension=2,
+)
+print(problem.dependence)  # custom
+
+design = jaxgsa.kucherenko.sample(problem, base_n=8192, seed=7)
+Y = jnp.asarray(design.samples[:, 2])  # the model is Y = w
+result = jaxgsa.kucherenko.analyze(design, Y)
+print(result.S1)  # [-0.0018 -0.0044  1.], so [0, 0, 1] within noise
+print(result.ST)  # [0. 0. 0.], up to floating-point noise
+```
+
+`sampler_dimension=2` says the sampler uses two uniform coordinates per row,
+because `u` and `v` are the only free inputs. You can also attach a sampler
+to an existing problem with `problem.with_sampler(sample_modular, sampler_dimension=2)`.
+`problem.with_sampler(None)` drops it. A problem has either a `correlation` or
+a `sampler`, never both.
+
+`u` and `v` each tell us nothing about `Y` individually, while `w` tells us
+everything. However, the conditional total index of `w` is zero: once `u` and
+`v` are known, `w` has no remaining uncertainty. This means redundant
+information under the joint distribution, not that `w` is causally inactive.
+With three independent uniforms instead, `Y = w` has `ST = [0, 0, 1]`.
+These per-input summaries respect the supplied higher-order dependence; they
+do not identify which groups of inputs create it. The sampler must supply
+the full joint law and its conditionals; fitting a pairwise matrix cannot
+recover this constraint.
+
+The package generates scrambled Sobol' points and assembles the analysis
+blocks. Sample sizes round up to the next power of two. The sampler returns
+physical values in `problem.names` order. Its public callable type is
+`jaxgsa.sampling.InputSampler`.
+
+Methods whose indices assume independent inputs refuse this problem, as they
+refuse a correlated one. This covers the Sobol', Morris and eFAST designs, PCE,
+DGSM and the PCE-based Shapley backend. Given-data methods such as PAWN, HSIC,
+Borgonovo, optimal transport and HDMR accept an input matrix drawn with
+`monte_carlo`, which sends pseudo-random uniforms through the joint branch of
+the sampler:
+
+```python
+X = jaxgsa.sampling.monte_carlo(problem, 1024, seed=7)
+Y = jnp.asarray(X[:, 2])
+pawn_result = jaxgsa.pawn.analyze(problem, jnp.asarray(X), Y)
+```
+
+These calls generate joint observations. Kucherenko still needs its own block
+design, and VKOGA also calls the conditional branches during index
+integration.
+
+Use the same problem to integrate a VKOGA surrogate. The training data and the
+analysis distribution are separate inputs. This independent training design
+covers the cube. The integration distribution obeys the modular constraint:
+
+```python
+X_train = jnp.asarray(
+    jaxgsa.sampling.monte_carlo(problem.with_sampler(None), n_samples=512, seed=1)
+)
+Y_train = X_train[:, 2]
+vk = jaxgsa.vkoga.analyze(
+    problem,
+    X_train,
+    Y_train,
+    gamma=1.0,
+    ridge=1e-8,
+    max_centers=100,
+    n_outer=512,
+    n_inner=128,
+    key=jax.random.key(7),
+)
+assert isinstance(vk, jaxgsa.vkoga.VKOGAResult)
+print(vk.dependence)  # custom
+print(vk.S_TC)  # [1.4e-04 1.1e-04 1.0e+00], subject to surrogate error
+print(vk.S_TU)  # about 2e-31 for every input, subject to surrogate error
+```
+
+Note that `monte_carlo(problem, ...)` would draw `w = (u + v) % 1` for the
+training rows. Here the training rows come from the problem without its
+sampler, so `u`, `v` and `w` are independent and cover the cube. Training on
+the modular draws themselves also works, because the analysis uses conditionals
+of the joint distribution. See
+[VKOGA training data](/examples/vkoga#training-data-must-cover-the-analysis-distribution).
+
+VKOGA's declared marginals must match the sampler's marginals, because its
+coordinate transform and component basis still use `Problem`. All three
+uniforms match here. See [VKOGA's API](/api/vkoga#custom-input-dependence) for
+estimator and decomposition limitations.
+
+Save a Kucherenko design and its evaluated outputs to analyze it later. The
+sampled rows and sampling provenance are saved, but Python callbacks are not.
+Retain callback code separately to generate another design.

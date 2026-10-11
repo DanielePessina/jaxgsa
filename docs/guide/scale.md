@@ -82,7 +82,7 @@ Some estimators have additional structural costs:
 
 - HSIC constructs sample-by-sample kernels, so its core storage grows with
   $N^2$ and is repeated across parameters and permutations.
-- HDMR at `maxorder=2` fits pairwise components, whose count grows with $D^2$.
+- HDMR at `order=2` fits pairwise components, whose count grows with $D^2$.
 - PCE basis size grows combinatorially with dimension and polynomial order;
   the implementation reduces the order when the sample budget cannot support
   the requested fit.
@@ -91,7 +91,7 @@ Some estimators have additional structural costs:
   and output slice.
 
 Reducing a setting changes the analysis, not only its runtime. For example,
-lowering HDMR's `maxorder` removes interactions, and lowering HSIC's
+lowering HDMR's `order` removes interactions, and lowering HSIC's
 `n_perms` coarsens the permutation p-values.
 
 ## Measure the workload you will run

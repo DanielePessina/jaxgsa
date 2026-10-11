@@ -1,7 +1,7 @@
 # Golden fixtures for the jaxgsa JavaScript port
 
 Deterministic reference outputs for the six hand-ported methods, produced by
-the Python package `jaxgsa` **1.0.0** in full float64. The TypeScript tests
+the Python package `jaxgsa` **1.1.0** in full float64. The TypeScript tests
 validate the wasm port against these files.
 
 ## Files
@@ -10,7 +10,7 @@ validate the wasm port against these files.
 goldens/
   generate.py            the generator (uv run python goldens/generate.py)
   README.md              this file
-  v1.0.0/
+  v1.1.0/
     sobol.json
     kucherenko.json
     morris.json
@@ -33,10 +33,10 @@ Fixed settings (see `generate.py` for the exact call signatures):
 | method     | design                                            | rows   |
 |------------|---------------------------------------------------|--------|
 | sobol      | scrambled Sobol, `base_n=512`, first/total only   | 2560   |
-| kucherenko | conditional design, `n_samples=512` (7 blocks)    | 3584   |
+| kucherenko | conditional design, `base_n=512`   (7 blocks)    | 3584   |
 | morris     | `n_trajectories=40`, 4-level trajectory design    | 61     |
 | pce        | Sobol A-block cloud (512 rows), `order=9`         | 512    |
-| hdmr       | same 512-row cloud, defaults (`maxorder=2`)       | 512    |
+| hdmr       | same 512-row cloud, defaults (`order=2`)       | 512    |
 | shapley    | same 512-row cloud, `backend="pce"`, `order=9`    | 512    |
 
 All random draws use `seed=42`; no RNG is ever unseeded.
@@ -58,7 +58,7 @@ Flat and explicit; one file per method:
 ```json
 {
   "method": "sobol",
-  "jaxgsa_version": "1.0.0",
+  "jaxgsa_version": "1.1.0",
   "n": 2560,
   "x": [[...], ...],
   "y": [...],
@@ -91,7 +91,7 @@ Flat and explicit; one file per method:
 reads, exactly as `MorrisSamples` stores it: `expanded_to_unique` (map from each
 expanded row to its unique row), `ee_idx_after` / `ee_idx_before` (expanded-row
 indices of the perturbed/reference points, `(r, D)`), `ee_delta` (signed
-unit-cube steps, `(r, D)`), plus `n_expanded`, `n_trajectories`, `num_levels`.
+unit-cube steps, `(r, D)`), plus `n_expanded`, `n_trajectories`, `n_levels`.
 
 All arrays are plain JSON lists of Python `float` (64-bit double precision),
 stored verbatim — no rounding, no truncation.
@@ -131,7 +131,7 @@ Policy:
 
 - Golden files change **only** when the jaxgsa version that defines the
   reference changes. Regenerate, commit all six files together, and bump the
-  directory name (`v0.9.0/` -> `vX.Y.Z/`) for a breaking reference change.
+  directory name (`v1.1.0/` -> `vX.Y.Z/`) for a breaking reference change.
 - If a regeneration diffs unexpectedly, treat it as a bug report: reproduce
   the divergence before committing new goldens.
 - Do not hand-edit golden JSON; edit `generate.py` and regenerate.

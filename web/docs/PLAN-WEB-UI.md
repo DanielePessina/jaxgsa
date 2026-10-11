@@ -1,6 +1,6 @@
 # PLAN-WEB-UI: jaxgsa web workbench — schema, formats, visualization, UX
 
-Local planning doc (untracked, like PLAN-WASM.md). Source of truth for the
+Planning doc for the studio (see PLAN-WASM.md). Source of truth for the
 browser app remains the Python package (`src/jaxgsa`) and the wasm port plan
 (`PLAN-WASM.md`). This doc is the executable spec for the web UI work.
 

@@ -123,8 +123,8 @@ def _run_dgsm() -> Any:
     X, _ = _given_data(CONTINUOUS)
     return jaxgsa.dgsm.analyze(
         CONTINUOUS,
-        _point_model(_series_model),
         X,
+        fn=_point_model(_series_model),
         standardize_outputs=True,
         verbose=False,
     )
@@ -138,7 +138,7 @@ def _run_efast() -> Any:
 
 def _run_hdmr() -> Any:
     X, Y = _given_data(CONTINUOUS, n=300)
-    return jaxgsa.hdmr.analyze(CONTINUOUS, X, Y[:, 0], maxorder=2, maxiter=3, verbose=False)
+    return jaxgsa.hdmr.analyze(CONTINUOUS, X, Y[:, 0], order=2, max_iter=3, verbose=False)
 
 
 def _run_hsic() -> Any:
@@ -154,7 +154,7 @@ def _run_hsic() -> Any:
 
 
 def _run_kucherenko() -> Any:
-    design = jaxgsa.kucherenko.sample(CONTINUOUS, n_samples=16, seed=SEED, verbose=False)
+    design = jaxgsa.kucherenko.sample(CONTINUOUS, base_n=16, seed=SEED, verbose=False)
     Y = _series_model(jnp.asarray(design.samples))
     return jaxgsa.kucherenko.analyze(
         design,
@@ -183,7 +183,7 @@ def _run_ot_categorical() -> Any:
         CATEGORICAL,
         X,
         Y,
-        n_partitions=4,
+        n_classes=4,
         dummy=True,
         n_bootstrap=2,
         key=jax.random.key(SEED),
@@ -198,7 +198,7 @@ def _run_ot_multivariate() -> Any:
         X,
         Y,
         mode="multivariate",
-        n_partitions=4,
+        n_classes=4,
         epsilon=0.05,
         max_iter=100,
         tol=1e-4,
@@ -213,7 +213,7 @@ def _run_ot_trajectory() -> Any:
         X,
         _series_model(X),
         mode="trajectory",
-        n_partitions=4,
+        n_classes=4,
         epsilon=0.05,
         max_iter=100,
         tol=1e-4,
@@ -227,10 +227,15 @@ def _run_pawn() -> Any:
         CATEGORICAL,
         X,
         jnp.stack([Y, Y**2], axis=1),
-        n_bins=3,
+        n_classes=3,
         statistic="median",
         verbose=False,
     )
+
+
+def _run_rank() -> Any:
+    X, Y = _given_data(CONTINUOUS)
+    return jaxgsa.rank.analyze(CONTINUOUS, X, jnp.stack([Y, Y**2], axis=1), verbose=False)
 
 
 def _run_pce() -> Any:
@@ -359,6 +364,13 @@ MATRIX = (
         _run_pce,
     ),
     FeatureCase(
+        "rank-multi-output",
+        "rank",
+        (2, 2, 3),
+        frozenset({"given-data", "time-series", "multi-output"}),
+        _run_rank,
+    ),
+    FeatureCase(
         "shapley-scalar-surrogate",
         "shapley",
         (3,),
@@ -483,14 +495,23 @@ def test_matrix_capability_coverage_is_explicit_and_supported() -> None:
 def test_every_matrix_case_completes_with_a_finite_primary_result(case: FeatureCase) -> None:
     """Every row reaches the public result object on deterministic data."""
     spec = methods()[case.method]
-    with warnings.catch_warnings():
-        # The matrix is not the warning-policy suite. These are expected for
-        # deliberately tiny fixtures (single precision, a small conditional
-        # design, or a last-iterate Sinkhorn solve) and would otherwise bury a
-        # real failure in CI's warning summary.
-        warnings.simplefilter("ignore", jaxgsa.JaxgsaWarning)
+    with warnings.catch_warnings(record=True) as caught:
+        # The matrix is not the warning-policy suite. Warnings are expected
+        # for deliberately tiny fixtures (single precision, a small
+        # conditional design, or a last-iterate Sinkhorn solve), so they are
+        # recorded and only the one that would mean a wrong answer is checked.
+        warnings.simplefilter("always")
         warnings.filterwarnings("ignore", message="Explicitly requested dtype int64")
         result = case.run()
+
+    # Every row has a varying output, so a zero-variance warning on clean data
+    # is a spurious one.
+    zero_variance = [
+        str(w.message)
+        for w in caught
+        if issubclass(w.category, jaxgsa.JaxgsaWarning) and "zero variance" in str(w.message)
+    ]
+    assert zero_variance == []
 
     assert isinstance(result, spec.result)
     assert result.invalid.n_invalid == 0

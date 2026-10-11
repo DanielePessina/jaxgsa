@@ -14,9 +14,12 @@ import {
   generateDesign,
   loadDemoCloud,
   parseCsv,
+  parseDecimal,
   parseXGiven,
+  alignColumnsToXRunIds,
   parseYColumns,
   resultToCsv,
+  validateParameterName,
   type AnalysisResult,
   type YData,
 } from "./engine";
@@ -159,8 +162,7 @@ describe("parseYColumns (Y schema classification)", () => {
   });
 
   it("rejects ragged rows", () => {
-    const parsed = parseCsv("run_id,y\n0,1\n1\n");
-    expect(() => parseYColumns(parsed, ISHIGAMI_PROBLEM)).toThrow(/expected 2 columns/);
+    expect(() => parseCsv("run_id,y\n0,1\n1\n")).toThrow(/line 3: expected 2 columns, found 1/);
   });
 
   it("rejects a duplicate run_id column", () => {
@@ -258,8 +260,9 @@ describe("parseXGiven / parseYColumns (given-data path)", () => {
   const csv = parseCsv("x1,x2,x3\n1,2,3\n4,5,6\n");
 
   it("flattens an X CSV row-major when the header matches the problem", () => {
-    const flat = parseXGiven(csv, ISHIGAMI_PROBLEM);
+    const { flat, runIds } = parseXGiven(csv, ISHIGAMI_PROBLEM);
     expect(Array.from(flat)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(runIds).toBeNull();
   });
 
   it("rejects a header that does not match the problem names", () => {
@@ -269,9 +272,7 @@ describe("parseXGiven / parseYColumns (given-data path)", () => {
   });
 
   it("rejects ragged rows", () => {
-    expect(() =>
-      parseXGiven(parseCsv("x1,x2,x3\n1,2\n"), ISHIGAMI_PROBLEM),
-    ).toThrow(/expected 3 columns, found 2/);
+    expect(() => parseCsv("x1,x2,x3\n1,2\n")).toThrow(/expected 3 columns, found 2/);
   });
 
   it("rejects an empty X CSV", () => {
@@ -342,7 +343,7 @@ describe("buildSessionJson (v2)", () => {
     };
 
     const session = buildSessionJson(ISHIGAMI_PROBLEM, {}, y, []);
-    expect(session.app).toBe("jaxgsa-web");
+    expect(session.app).toBe("jaxgsa-studio");
     expect(session.version).toBe(2);
     expect(session.problem.names).toEqual(["x1", "x2", "x3"]);
     expect(session.y?.columns[0].values).toEqual([7, 8]);
@@ -457,8 +458,8 @@ describe("sampleKucherenkoDesign", () => {
   it("builds base_n * (2D + 1) rows in physical units with the block layout", () => {
     const design = sampleKucherenkoDesign(ISHIGAMI_PROBLEM, 100, 42);
     const D = 3;
-    expect(design.baseN).toBe(128);
-    expect(design.samples.length / D).toBe(128 * (2 * D + 1));
+    expect(design.baseN).toBe(16);
+    expect(design.samples.length / D).toBe(16 * (2 * D + 1));
 
     for (let i = 0; i < design.samples.length; i++) {
       expect(design.samples[i]).toBeGreaterThanOrEqual(-Math.PI);
@@ -528,5 +529,220 @@ describe("new-method engine wiring (borgonovo, pawn, efast)", () => {
     const session = buildSessionJson(demo.problem, { efast: gen }, null, []);
     expect(session.designs.efast).toBeDefined();
     expect(session.designs.efast?.nRuns).toBe(256 * 3);
+  });
+});
+
+describe("parseCsv number strictness", () => {
+  it.each(["Infinity", "-Infinity", "1e999", "-1e999"])("rejects %s as not finite", (v) => {
+    expect(() => parseCsv(`a,b\n1,2\n3,${v}\n`)).toThrow(
+      new RegExp(`line 3, column "b": "${v}" is not a finite number`),
+    );
+  });
+
+  it.each(["0x10", "NaN", "1_000", "1e", "--1"])("rejects %s as not a number", (v) => {
+    expect(() => parseCsv(`a\n${v}\n`)).toThrow(/line 2, column "a": .* is not a number/);
+  });
+
+  it("accepts signs, fractions and exponents", () => {
+    const { rows } = parseCsv("a,b,c,d\n+1,-2.5,.5,1E-3\n");
+    expect(rows).toEqual([[1, -2.5, 0.5, 0.001]]);
+  });
+
+  it("names the line and column of an empty cell", () => {
+    expect(() => parseCsv("a,b\n1,\n")).toThrow(/line 2, column "b": empty cell/);
+  });
+
+  it("parseDecimal reports the reason", () => {
+    expect(parseDecimal(" 3.5 ")).toEqual({ value: 3.5 });
+    expect(parseDecimal("1e999")).toEqual({ reason: "not a finite number" });
+    expect(parseDecimal("0x10")).toEqual({ reason: "not a number" });
+  });
+});
+
+describe("parseCsv dialects", () => {
+  it("detects a semicolon delimiter", () => {
+    const { headers, rows } = parseCsv("a;b\n1;2\n3;4\n");
+    expect(headers).toEqual(["a", "b"]);
+    expect(rows).toEqual([[1, 2], [3, 4]]);
+  });
+
+  it("detects a tab delimiter", () => {
+    const { headers, rows } = parseCsv("a\tb\n1\t2\n");
+    expect(headers).toEqual(["a", "b"]);
+    expect(rows).toEqual([[1, 2]]);
+  });
+
+  it("reads quoted headers and quoted numbers (R write.csv)", () => {
+    const { headers, rows } = parseCsv('"run_id","y"\n0,"1.5"\n1,"2.5"\n');
+    expect(headers).toEqual(["run_id", "y"]);
+    expect(rows).toEqual([[0, 1.5], [1, 2.5]]);
+  });
+
+  it("keeps a delimiter inside a quoted header", () => {
+    const { headers } = parseCsv('"a,b","c"\n1,2\n');
+    expect(headers).toEqual(["a,b", "c"]);
+  });
+
+  it("unescapes doubled quotes", () => {
+    expect(parseCsv('"a""b",c\n1,2\n').headers).toEqual(['a"b', "c"]);
+  });
+
+  it("rejects an unclosed quote", () => {
+    expect(() => parseCsv('a,b\n"1,2\n')).toThrow(/line 2: a quoted field is not closed/);
+  });
+
+  it("strips a UTF-8 BOM", () => {
+    const { headers } = parseCsv("\uFEFFrun_id,y\n0,1\n");
+    expect(headers).toEqual(["run_id", "y"]);
+  });
+
+  it("tolerates CRLF and trailing blank lines", () => {
+    const { headers, rows } = parseCsv("a;b\r\n1;2\r\n3;4\r\n\r\n");
+    expect(headers).toEqual(["a", "b"]);
+    expect(rows).toEqual([[1, 2], [3, 4]]);
+  });
+
+  it("explains decimal commas in a semicolon file", () => {
+    expect(() => parseCsv("a;b\n1,5;2\n")).toThrow(/decimal comma/);
+  });
+
+  it("rejects an oversize file from the line count, before building rows", () => {
+    const text = "a,b,c\n" + "1,2,3\n".repeat(10);
+    expect(() => parseCsv(text, 20)).toThrow(/file is too large: 10 rows x 3 columns/);
+    expect(parseCsv(text, 30).rows).toHaveLength(10);
+  });
+
+  it("rejects before a bad cell is reached", () => {
+    const text = "a,b\n" + "x,y\n".repeat(50);
+    expect(() => parseCsv(text, 10)).toThrow(/too large/);
+  });
+});
+
+describe("parseXGiven with a design CSV", () => {
+  it("returns the run_ids and keeps the file row order", () => {
+    const parsed = parseCsv("run_id,x1,x2,x3\n1,1,2,3\n0,4,5,6\n");
+    const { flat, runIds } = parseXGiven(parsed, ISHIGAMI_PROBLEM);
+    expect(Array.from(flat)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(runIds).toEqual([1, 0]);
+  });
+
+  it("accepts run_id anywhere in the header", () => {
+    const parsed = parseCsv("x1,x2,x3,run_id\n1,2,3,1\n4,5,6,0\n");
+    const { flat, runIds } = parseXGiven(parsed, ISHIGAMI_PROBLEM);
+    expect(Array.from(flat)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(runIds).toEqual([1, 0]);
+  });
+
+  it("rejects duplicate and non-integer X run_ids", () => {
+    expect(() =>
+      parseXGiven(parseCsv("run_id,x1,x2,x3\n0,1,2,3\n0,4,5,6\n"), ISHIGAMI_PROBLEM),
+    ).toThrow(/duplicate run_id 0 in X/);
+
+    expect(() =>
+      parseXGiven(parseCsv("run_id,x1,x2,x3\n0.5,1,2,3\n"), ISHIGAMI_PROBLEM),
+    ).toThrow(/invalid run_id 0.5/);
+  });
+
+  it("still rejects genuinely wrong headers", () => {
+    expect(() =>
+      parseXGiven(parseCsv("run_id,a,b,c\n0,1,2,3\n"), ISHIGAMI_PROBLEM),
+    ).toThrow(/header must be exactly/);
+
+    expect(() =>
+      parseXGiven(parseCsv("run_id,x1,x2\n0,1,2\n"), ISHIGAMI_PROBLEM),
+    ).toThrow(/header must be exactly/);
+  });
+});
+
+describe("alignColumnsToXRunIds", () => {
+  const col = (v: number[]) => [{ output: "y", time: 0, values: new Float64Array(v) }];
+
+  it("puts Y into X row order when Y comes back shuffled", () => {
+    // X order 1,0,2. Y rows carry ids 0,2,1 with values a,b,c.
+    const out = alignColumnsToXRunIds(col([10, 30, 20]), [0, 2, 1], [1, 0, 2]);
+    expect(Array.from(out[0].values)).toEqual([20, 10, 30]);
+  });
+
+  it("keeps order when Y already follows X", () => {
+    const out = alignColumnsToXRunIds(col([1, 2]), [5, 3], [5, 3]);
+    expect(Array.from(out[0].values)).toEqual([1, 2]);
+  });
+
+  it("names a missing id", () => {
+    expect(() => alignColumnsToXRunIds(col([1, 2]), [0, 1], [0, 1, 2])).toThrow(
+      /run_id 2 is in X but missing from Y/,
+    );
+  });
+
+  it("names an extra id", () => {
+    expect(() => alignColumnsToXRunIds(col([1, 2, 3]), [0, 1, 9], [0, 1, 2])).toThrow(
+      /run_id 9 is in Y but not in X/,
+    );
+  });
+
+  it("names a duplicate id", () => {
+    expect(() => alignColumnsToXRunIds(col([1, 2, 3]), [0, 1, 1], [0, 1, 2])).toThrow(
+      /duplicate run_id 1 in Y/,
+    );
+  });
+});
+
+describe("parseCsv row width and messages", () => {
+  it("rejects a wide row as soon as it is read", () => {
+    const text = "a,b\n1,2\n" + "1,2,3,4,5,6,7,8,9\n".repeat(1000);
+    expect(() => parseCsv(text)).toThrow(/line 3: expected 2 columns, found 9/);
+  });
+
+  it("says line breaks in quoted fields are not supported", () => {
+    expect(() => parseCsv('a,b\n"1\n2",3\n')).toThrow(
+      /Line breaks inside quoted fields are not supported/,
+    );
+  });
+
+  it("explains decimal commas in a one-column file", () => {
+    expect(() => parseCsv("y\n1,5\n")).toThrow(/decimal comma/);
+  });
+});
+
+describe("validateParameterName / buildDesignCsv names", () => {
+  it.each([
+    ["a,b", /commas/],
+    ['a"b', /quotes/],
+    ["a\nb", /line breaks/],
+    ["a;b", /semicolons/],
+    ["run_id", /reserved/],
+    ["temp_t2", /_t and a number/],
+    ["temp_t-1.5e2", /_t and a number/],
+    [" x", /spaces/],
+    ["", /empty/],
+  ])("rejects %j", (name, re) => {
+    expect(validateParameterName(name)).toMatch(re);
+  });
+
+  it("accepts ordinary names", () => {
+    for (const n of ["x1", "k_t", "temp_tx", "alpha beta", "t2"]) {
+      expect(validateParameterName(n)).toBeNull();
+    }
+  });
+
+  it("buildDesignCsv throws instead of writing a broken header", () => {
+    const problem = {
+      names: ["a,b"],
+      marginals: [{ kind: "uniform" as const, low: 0, high: 1 }],
+    };
+
+    expect(() => buildDesignCsv(problem, { samples: new Float64Array([1]) })).toThrow(/commas/);
+  });
+
+  it("buildDesignCsv rejects duplicate names", () => {
+    const problem = {
+      names: ["a", "a"],
+      marginals: [
+        { kind: "uniform" as const, low: 0, high: 1 },
+        { kind: "uniform" as const, low: 0, high: 1 },
+      ],
+    };
+
+    expect(() => buildDesignCsv(problem, { samples: new Float64Array([1, 2]) })).toThrow(/twice/);
   });
 });

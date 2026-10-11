@@ -295,7 +295,7 @@ def build_partition_groups(
     N = X.shape[0]
     R = all_idx.shape[0]
     cat_dims = [d for d, _ in dims_levels]
-    cont_dims = [d for d in range(problem.num_vars) if d not in set(cat_dims)]
+    cont_dims = [d for d in range(problem.n_params) if d not in set(cat_dims)]
 
     groups: list[PartitionGroup] = []
     group_levels: list[list[int] | None] = []

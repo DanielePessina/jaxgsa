@@ -14,20 +14,21 @@ Example::
     from jaxgsa import hsic
     from jaxgsa.sampling import monte_carlo
 
-    X = monte_carlo(problem, n=4096, seed=42)
+    X = monte_carlo(problem, n_samples=4096, seed=42)
     Y = model(X)
     result = hsic.analyze(problem, X, Y, key=jax.random.key(0))
 """
 
-from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.hsic._analyze import analyze, indices
+from jaxgsa._core.invalid import InvalidUnit as _InvalidUnit
+from jaxgsa._core.registry import MethodSpec as _MethodSpec
+from jaxgsa._core.registry import register as _register
+from jaxgsa.hsic._analyze import HSICIndices, analyze, indices
 from jaxgsa.hsic._result import HSICResult
 
-__all__ = ["HSICResult", "analyze", "indices"]
+__all__ = ["HSICIndices", "HSICResult", "analyze", "indices"]
 
-SPEC = register(
-    MethodSpec(
+_SPEC = _register(
+    _MethodSpec(
         name="hsic",
         analyze=analyze,
         sample=None,
@@ -37,6 +38,6 @@ SPEC = register(
         # Uncertainty is reported as permutation p_values, not as an
         # interval, so there is no bootstrap keyword.
         bootstrap=None,
-        invalid_unit=InvalidUnit.ROW,
+        invalid_unit=_InvalidUnit.ROW,
     )
 )

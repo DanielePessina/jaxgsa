@@ -18,7 +18,7 @@ A model that fails on some of its runs returns ``NaN`` or ``inf``. Every
     Remove the affected data and analyze what is left. What "affected data"
     means depends on the design; see :class:`InvalidUnit`.
 
-``"none"``
+``"skip"``
     Skip the non-finite check entirely. The analysis runs on the data exactly
     as given, and the constant-slice warning is skipped with it. On a design
     with millions of expanded rows the two scans are most of the fixed cost
@@ -29,7 +29,7 @@ A model that fails on some of its runs returns ``NaN`` or ``inf``. Every
     a block split, and checking the shape costs no data scan.
 
 Whatever the policy, the count and the position of the affected data are
-recorded in an :class:`InvalidReport` — under ``"none"`` the check never
+recorded in an :class:`InvalidReport` — under ``"skip"`` the check never
 ran, so the report always says clean. The report is the part that matters in
 practice: it names the runs to investigate.
 
@@ -45,14 +45,17 @@ import warnings
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import numpy.typing as npt
 from jax import Array
 
+from jaxgsa._core.validation import to_device
 from jaxgsa._core.warning_types import JaxgsaWarning
 
 # Every jaxgsa source file starts with this prefix. A preamble warning raised
@@ -72,9 +75,9 @@ __all__ = [
     "resolve_policy",
 ]
 
-OnInvalid: TypeAlias = Literal["raise", "propagate", "drop", "none"]
+OnInvalid: TypeAlias = Literal["raise", "propagate", "drop", "skip"]
 
-_POLICIES: tuple[str, ...] = ("raise", "propagate", "drop", "none")
+_POLICIES: tuple[str, ...] = ("raise", "propagate", "drop", "skip")
 
 # Below this many surviving units the estimate is not worth reporting without
 # saying so. One floor, applied everywhere a "drop" policy can leave a sample
@@ -152,9 +155,9 @@ class InvalidReport:
 
     Attributes:
         policy: The policy that ran: ``"raise"``, ``"propagate"``,
-            ``"drop"`` or ``"none"``. A report with ``policy="raise"`` only
+            ``"drop"`` or ``"skip"``. A report with ``policy="raise"`` only
             exists when nothing was found, since otherwise the call raised. A
-            report with ``policy="none"`` means the check never ran: it is
+            report with ``policy="skip"`` means the check never ran: it is
             always clean, because nothing was looked at.
         unit: The block of data one bad value invalidates. See
             :class:`InvalidUnit`.
@@ -275,12 +278,43 @@ def resolve_policy(
     return policy
 
 
+@jax.jit
+def _row_finite(array: Array) -> Array:
+    """One boolean per row: True where every element of the row is finite.
+
+    One jitted program instead of reshape, isfinite and all as three eager
+    ops, which would each compile on their first call.
+    """
+    return jnp.isfinite(array.reshape(array.shape[0], -1)).all(axis=1)
+
+
+@jax.jit
+def _rows_finite_many(arrays: tuple[Array, ...]) -> tuple[Array, ...]:
+    """The :func:`_row_finite` verdict of several arrays, from one program.
+
+    The arrays differ in shape, so separate calls would compile once each.
+    """
+    return tuple(_row_finite(array) for array in arrays)
+
+
+@partial(jax.jit, static_argnames=("n_units", "unit_stride"))
+def _unit_finite(array: Array, n_units: int, unit_stride: int) -> Array:
+    """One boolean per unit, for units that are equal contiguous blocks of rows.
+
+    Reduces over the trailing axis first and over the short unit axis second;
+    see the fast path of :func:`_finite_by_unit` for why the order matters.
+    """
+    row_ok = _row_finite(array)
+    return jnp.all(row_ok.reshape(n_units, unit_stride), axis=1)
+
+
 def _finite_by_unit(
     array: Array | None,
     *,
     n_units: int,
     unit_of_row: npt.NDArray[np.intp] | None,
     unit_stride: int | None = None,
+    row_ok_device: Array | None = None,
 ) -> tuple[npt.NDArray[np.bool_], npt.NDArray[np.bool_] | None]:
     """Return per-unit and per-row masks, False where a bad value sits.
 
@@ -295,6 +329,10 @@ def _finite_by_unit(
             unit_stride)``. Enables a device-side collapse that skips the
             per-row host verdicts; see the fast path below. ``None`` (the
             default) always takes the generic weighted-``bincount`` path.
+        row_ok_device: The per-row verdict of ``array`` when the caller
+            already computed it together with other arrays' verdicts, see
+            :func:`_rows_finite_many`. Read only when ``unit_of_row`` is
+            ``None``.
 
     Returns:
         A tuple ``(unit_ok, row_ok)``. ``unit_ok`` has shape ``(n_units,)`` and
@@ -323,7 +361,7 @@ def _finite_by_unit(
     # traces, so computing the row mask before the branch would run the
     # million-row scan twice on designs that take the fast path below.
     if unit_of_row is None:
-        row_ok = np.asarray(jnp.isfinite(array.reshape(array.shape[0], -1)).all(axis=1))
+        row_ok = np.asarray(_row_finite(array) if row_ok_device is None else row_ok_device)
         return row_ok, row_ok
 
     if unit_stride is not None and _is_contiguous_blocks(unit_of_row, n_units, unit_stride):
@@ -342,11 +380,10 @@ def _finite_by_unit(
         # on wide outputs. The per-row verdict is returned as ``None`` on
         # purpose: the caller needs it only for the invalid report, which
         # is the rare path, and re-derives it there.
-        row_ok_dev = jnp.all(jnp.isfinite(array.reshape(array.shape[0], -1)), axis=1)
-        unit_ok = np.asarray(jnp.all(row_ok_dev.reshape(n_units, unit_stride), axis=1))
+        unit_ok = np.asarray(_unit_finite(array, n_units, unit_stride))
         return unit_ok, None
 
-    row_ok = np.asarray(jnp.isfinite(array.reshape(array.shape[0], -1)).all(axis=1))
+    row_ok = np.asarray(_row_finite(array))
     # Scatter the row verdicts onto their units: a unit is clean only when
     # every one of its rows is. `bincount` counts the bad rows per unit in one
     # pass, which beats `np.logical_and.at` by more than a factor of ten, and
@@ -386,7 +423,7 @@ def _unit_of_row_for_policy(
 ) -> npt.NDArray[np.intp] | None:
     """Build the row map only where the non-finite check will read it.
 
-    Under ``on_invalid='none'`` :func:`check_invalid` returns before it ever
+    Under ``on_invalid='skip'`` :func:`check_invalid` returns before it ever
     touches the map (a per-row map over the expanded design is exactly the
     scan the policy skips, and building it on the host costs ~0.3-0.6 ms at
     million-row scales), so the call sites pass ``None`` there instead of
@@ -400,9 +437,9 @@ def _unit_of_row_for_policy(
         build: How to build the map, called only when a check will read it.
 
     Returns:
-        The built map, or ``None`` under ``on_invalid='none'``.
+        The built map, or ``None`` under ``on_invalid='skip'``.
     """
-    if on_invalid == "none":
+    if on_invalid == "skip":
         return None
     return build()
 
@@ -431,7 +468,7 @@ def check_invalid(
 
     Args:
         policy: The validated policy, from :func:`resolve_policy`. Under
-            ``"none"`` the scan does not run at all: the verdict is that every
+            ``"skip"`` the scan does not run at all: the verdict is that every
             unit is clean, the report is the clean report, and the caller
             applies no mask. The shape consistency check on the companion
             arrays still runs, because a misnumbered array would silently
@@ -489,17 +526,28 @@ def check_invalid(
     extra_arrays = tuple(_as_array(array) for array in extras)
     _check_extra_row_counts(y_array, x_array, extra_arrays, unit_of_row=unit_of_row)
 
-    if policy == "none":
+    if policy == "skip":
         # No scan: the caller has asserted the data is clean. The keep mask is
         # all-True and the report is the clean one, so the estimator's book-
         # keeping sees exactly what it sees under "propagate" on a clean
         # sample, without a single pass over the expanded rows. The contract
         # the other policies hold -- keep + report decide the rest -- is
-        # intact, so the callers below need no "none" branches of their own.
+        # intact, so the callers below need no "skip" branches of their own.
         return np.ones(n_units, dtype=bool), _clean_report(unit, n_units, policy)
 
+    # With one row per unit, every array's row scan goes through one compiled
+    # program, so a first call compiles once rather than once per shape.
+    verdicts: dict[int, Array] = {}
+    if unit_of_row is None:
+        scanned = [a for a in (y_array, *extra_arrays, x_array) if a is not None]
+        verdicts = dict(zip((id(a) for a in scanned), _rows_finite_many(tuple(scanned))))
+
     y_ok, y_rows = _finite_by_unit(
-        y_array, n_units=n_units, unit_of_row=unit_of_row, unit_stride=unit_stride
+        y_array,
+        n_units=n_units,
+        unit_of_row=unit_of_row,
+        unit_stride=unit_stride,
+        row_ok_device=verdicts.get(id(y_array)),
     )
     for extra_array in extra_arrays:
         extra_ok, extra_rows = _finite_by_unit(
@@ -507,6 +555,7 @@ def check_invalid(
             n_units=n_units,
             unit_of_row=unit_of_row,
             unit_stride=unit_stride,
+            row_ok_device=verdicts.get(id(extra_array)),
         )
         y_ok = y_ok & extra_ok
         if y_rows is None:
@@ -514,7 +563,11 @@ def check_invalid(
         elif extra_rows is not None:
             y_rows = y_rows & extra_rows
     x_ok, x_rows = _finite_by_unit(
-        x_array, n_units=n_units, unit_of_row=unit_of_row, unit_stride=unit_stride
+        x_array,
+        n_units=n_units,
+        unit_of_row=unit_of_row,
+        unit_stride=unit_stride,
+        row_ok_device=verdicts.get(id(x_array)),
     )
     clean = y_ok & x_ok
 
@@ -595,7 +648,7 @@ def _as_array(array: npt.ArrayLike | None) -> Array | None:
     """
     if array is None:
         return None
-    return jnp.asarray(array)
+    return to_device(array)
 
 
 def _check_extra_row_counts(

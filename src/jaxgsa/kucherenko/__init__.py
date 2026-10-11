@@ -34,12 +34,17 @@ it is the fastest method here, so there is no ``indices()`` that survives
 ``jaxgsa._core.registry.MethodSpec.pure_core``), not a gap: no traceable
 core exists to export.
 
-Gating: ``sample`` conditions on a declared ``problem.correlation``, so it is
-exempt from the correlated-design refusal that ``sobol``, ``morris``, and
-``efast`` apply. It refuses categorical parameters. The copula conditionals
-need a continuous marginal CDF on every coordinate. Use
-:mod:`jaxgsa.optimal_transport` or :mod:`jaxgsa.borgonovo` for categorical
-inputs.
+Gating: ``sample`` conditions on the problem's declared dependence, either a
+``problem.correlation`` or a custom sampler declared with
+``problem.with_sampler(f, sampler_dimension=k)``, so it is exempt from the
+correlated-design refusal that ``sobol``, ``morris``, and ``efast`` apply. It
+refuses categorical parameters. The copula conditionals need a continuous
+marginal CDF on every coordinate. Use :mod:`jaxgsa.optimal_transport` or
+:mod:`jaxgsa.borgonovo` for categorical inputs.
+
+A custom sampler maps uniform points to physical input rows. It receives exactly
+three call shapes: joint draws (``fixed_indices=()``), draws that keep ``x_i``
+(``fixed_indices=(i,)``), and draws that keep every column except ``i``.
 
 Example::
 
@@ -48,26 +53,41 @@ Example::
     problem = jaxgsa.Problem(names=("x1", "x2"), bounds=[(0, 1)] * 2)
     problem = problem.with_correlation(R)      # optional dependence
 
-    ks = jaxgsa.kucherenko.sample(problem, 4096, seed=0)
+    ks = jaxgsa.kucherenko.sample(problem, n_samples=4096, seed=0)
     Y = model(ks.samples)                      # (n_runs,) evaluations
     result = jaxgsa.kucherenko.analyze(ks, Y)
     result.S1   # correlation-inclusive first-order indices
     result.ST   # correlation-exclusive total indices
 
+Exact Shapley effects and proportional marginal effects: draw the design with
+``subsets="all"`` (``N * 2^D`` runs, ``D <= 12``). It adds one block for every
+proper subset of the inputs. The result then holds the closed index ``closed``
+and the total index ``subset_total`` of every subset, ordered by bitmask::
+
+    ks = jaxgsa.kucherenko.sample(problem, 4096, subsets="all", seed=0)
+    result = jaxgsa.kucherenko.analyze(ks, model(ks.samples))
+    result.shapley().Sh   # Owen (2014); sums to 1
+    result.pme().Sh       # Herin et al. (2024); 0 for an exogenous input
+
 References:
     Kucherenko, Tarantola & Annoni (2012). Comput. Phys. Commun. 183:937-946.
+    Owen (2014). SIAM/ASA J. Uncertain. Quantif. 2:245-251.
+    Song, Nelson & Staum (2016). SIAM/ASA J. Uncertain. Quantif. 4:1060-1083.
+    Herin, Il Idrissi, Chabridon & Iooss (2024). SIAM/ASA J. Uncertain.
+    Quantif. 12(2):667-692.
 """
 
-from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa._core.registry import MethodSpec, register
+from jaxgsa._core.invalid import InvalidUnit as _InvalidUnit
+from jaxgsa._core.registry import MethodSpec as _MethodSpec
+from jaxgsa._core.registry import register as _register
 from jaxgsa.kucherenko._analyze import analyze
 from jaxgsa.kucherenko._result import KucherenkoResult
 from jaxgsa.kucherenko._sampling import KucherenkoSamples, sample
 
 __all__ = ["KucherenkoResult", "KucherenkoSamples", "analyze", "sample"]
 
-SPEC = register(
-    MethodSpec(
+_SPEC = _register(
+    _MethodSpec(
         name="kucherenko",
         analyze=analyze,
         sample=sample,
@@ -86,6 +106,6 @@ SPEC = register(
         # instead of treating the missing core as a defect.
         pure_core=False,
         # One base point carries the 2D+1 conditional rows drawn around it.
-        invalid_unit=InvalidUnit.BASE_POINT,
+        invalid_unit=_InvalidUnit.BASE_POINT,
     )
 )

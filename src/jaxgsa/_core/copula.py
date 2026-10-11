@@ -24,7 +24,7 @@ from typing import Literal, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
-from scipy.stats import norm, qmc, rankdata
+from scipy.stats import norm, rankdata
 
 from jaxgsa._core.sampling import _transform_samples
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -349,13 +349,13 @@ def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
         positive definite if the rank estimate was not.
 
     Raises:
-        ValueError: If ``X`` is not ``(N, D)`` with ``D == problem.num_vars``,
+        ValueError: If ``X`` is not ``(N, D)`` with ``D == problem.n_params``,
             or holds fewer than three rows.
     """
     from jaxgsa.problem import _categorical_dims
 
     X = np.asarray(X, dtype=np.float64)
-    D = problem.num_vars
+    D = problem.n_params
     if X.ndim != 2 or X.shape[1] != D:
         raise ValueError(f"X must be (N, {D}) to fit a copula for this problem, got {X.shape}")
     if X.shape[0] < 3:
@@ -786,6 +786,89 @@ def draw_self_given_rest(
     return z_rest @ plan.beta_self[index] + plan.std_self[index] * eps_self
 
 
+class _SubsetPlan(NamedTuple):
+    """Gaussian conditional of the free columns given a fixed subset.
+
+    Everything lives in the latent standard-normal space. With ``F`` the free
+    columns and ``K`` the fixed ones, the conditional is
+    ``Z_F | Z_K = z ~ N(R[F,K] R[K,K]^-1 z, R[F,F] - R[F,K] R[K,K]^-1 R[K,F])``.
+
+    Attributes:
+        free: ``(f,)`` ascending indices of the redrawn columns.
+        fixed: ``(k,)`` ascending indices of the kept columns.
+        beta: ``(f, k)`` regression ``R[F,K] R[K,K]^-1`` of ``Z_F`` on ``Z_K``.
+        chol: ``(f, f)`` Cholesky factor of the conditional covariance.
+    """
+
+    free: np.ndarray
+    fixed: np.ndarray
+    beta: np.ndarray
+    chol: np.ndarray
+
+
+def build_subset_plan(R: np.ndarray, fixed: tuple[int, ...]) -> _SubsetPlan:
+    """Build the Gaussian conditional of the free columns given ``fixed``.
+
+    This is the standard Gaussian conditioning (Schur complement) formula.
+    Callers validate ``fixed`` (sorted, unique, in range) first.
+
+    Args:
+        R: ``(D, D)`` positive-definite correlation matrix with unit diagonal.
+        fixed: Ascending indices of the columns that stay fixed. May be empty
+            (joint draw) or hold every column (nothing to draw).
+
+    Returns:
+        A :class:`_SubsetPlan`.
+
+    Warns:
+        JaxgsaWarning: When the conditional covariance needed a numerical
+            repair, or its smallest eigenvalue falls below
+            ``_NEAR_SINGULAR_CONDITIONAL``. The policy is the one of
+            :func:`build_conditional_plan`. Call this function directly from
+            the public draw method so the warning points at the user.
+    """
+    D = R.shape[0]
+    fixed_idx = np.asarray(fixed, dtype=np.int64)
+    fixed_set = set(fixed)
+    free_idx = np.array([j for j in range(D) if j not in fixed_set], dtype=np.int64)
+    f, k = free_idx.shape[0], fixed_idx.shape[0]
+    if f == 0:
+        return _SubsetPlan(free_idx, fixed_idx, np.empty((0, k)), np.empty((0, 0)))
+
+    R_ff = R[np.ix_(free_idx, free_idx)]
+    if k == 0:
+        beta = np.empty((f, 0), dtype=np.float64)
+        cov = R_ff
+    else:
+        R_fk = R[np.ix_(free_idx, fixed_idx)]
+        R_kk = R[np.ix_(fixed_idx, fixed_idx)]
+        beta = np.linalg.solve(R_kk, R_fk.T).T
+        cov = R_ff - beta @ R_fk.T
+        cov = 0.5 * (cov + cov.T)
+    lifts: list[float] = []
+    chol = _safe_cholesky(cov, lifts)
+    # The smallest eigenvalue of the conditional covariance is the smallest
+    # conditional variance of any direction in the free block. For one free
+    # column it equals Var(Z_i | Z_K).
+    min_cond_var = float(np.linalg.eigvalsh(cov).min())
+    _warn_degenerate_conditionals(lifts, 0, min_cond_var)
+    return _SubsetPlan(free_idx, fixed_idx, beta, chol)
+
+
+def draw_free_given_fixed(plan: _SubsetPlan, z_fixed: np.ndarray, eps: np.ndarray) -> np.ndarray:
+    """Draw ``Z_F | Z_K = z_fixed`` from pre-drawn standard-normal noise.
+
+    Args:
+        plan: Conditional from :func:`build_subset_plan`.
+        z_fixed: ``(n, k)`` latent values of the fixed columns.
+        eps: ``(n, f)`` standard-normal noise.
+
+    Returns:
+        ``(n, f)`` latent values of the free columns.
+    """
+    return z_fixed @ plan.beta.T + eps @ plan.chol.T
+
+
 def assemble_latent(
     index: int,
     others: np.ndarray,
@@ -839,45 +922,6 @@ def _safe_cholesky(cov: np.ndarray, lifts: list[float] | None = None) -> np.ndar
             lifts.append(float(_MIN_EIGENVALUE - eigenvalues.min()))
         lifted = eigenvectors @ np.diag(np.maximum(eigenvalues, _MIN_EIGENVALUE)) @ eigenvectors.T
         return np.linalg.cholesky(lifted)
-
-
-def latent_normal_sample(
-    n: int,
-    dim: int,
-    *,
-    seed: int | np.random.Generator | None,
-    scramble: bool = True,
-) -> np.ndarray:
-    """Draw ``(n, dim)`` standard normal variates from a scrambled Sobol' set.
-
-    Every integrand here runs on a cheap surrogate, so memory rather than
-    model cost limits the sample size. The better equidistribution of a
-    quasi-random set is therefore free, and this module uses one throughout.
-
-    Args:
-        n: Number of points. Pass a power of two: the Sobol' engine loses its
-            balance guarantees (and scipy warns) otherwise. jaxgsa callers
-            round their sample sizes up before calling; the value is used
-            as-is here.
-        dim: Dimension of each point.
-        seed: Random seed or generator for the scrambling.
-        scramble: Whether to scramble the sequence. With ``scramble=False``
-            the sequence's first point (the origin) is skipped: the probit
-            would map it to the clipped extreme deviate, a point no normal
-            sample should contain. The scrambled path is unaffected.
-
-    Returns:
-        ``(n, dim)`` array of standard normal variates.
-    """
-    engine = qmc.Sobol(d=dim, scramble=scramble, seed=seed)
-    if not scramble:
-        # Skip the all-zeros origin point instead of clipping it to -7 sigma
-        # in every coordinate.
-        engine.fast_forward(1)
-    unit = engine.random(n)
-    # Sobol' points can land on exactly 0 or 1 when unscrambled; clip before the
-    # probit so the deviates stay finite.
-    return norm.ppf(np.clip(unit, 1e-12, 1.0 - 1e-12))
 
 
 def latent_to_physical(problem: Problem, Z: np.ndarray) -> np.ndarray:

@@ -22,7 +22,7 @@ def test_from_dict_tuple_shorthand_still_produces_uniform_bounds():
     p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (-1.0, 1.0)})
     assert p.names == ("x1", "x2")
     assert p.bounds == ((0.0, 1.0), (-1.0, 1.0))
-    assert p.num_vars == 2
+    assert p.n_params == 2
     assert p.has_non_uniform_inputs is False
 
 
@@ -43,7 +43,7 @@ def test_from_dict_accepts_uniform_and_gaussian_typed_dict_specs():
 
     assert p.names == ("x1", "x2", "x3")
     assert p.bounds is None
-    assert p.num_vars == 3
+    assert p.n_params == 3
     assert p.has_non_uniform_inputs is True
 
 
@@ -234,7 +234,7 @@ def test_mildly_indefinite_correlation_warns_at_construction():
 def test_identity_correlation_is_stored_but_not_correlated():
     p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=np.eye(2))
     assert p.correlation is not None
-    assert p.has_correlated_inputs is False
+    assert p.dependence == "independent"
 
 
 def test_with_correlation_returns_new_problem_and_preserves_marginals():
@@ -263,7 +263,7 @@ def test_with_correlation_none_drops_the_matrix():
     p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=R)
     dropped = p.with_correlation(None)
     assert dropped.correlation is None
-    assert dropped.has_correlated_inputs is False
+    assert dropped.dependence == "independent"
 
 
 def test_correlation_property_returns_defensive_copy():
@@ -308,3 +308,86 @@ class TestNameValidation:
     def test_valid_names_still_construct(self):
         p = Problem(names=("a", "b"), bounds=((0.0, 1.0), (0.0, 2.0)))
         assert p.names == ("a", "b")
+
+
+def _copy_sampler(u, *, conditioning_rows=None, fixed_indices=()):
+    """Return the uniform points, keeping the requested fixed columns."""
+    result = np.array(u, copy=True)
+    if conditioning_rows is not None:
+        result[:, fixed_indices] = conditioning_rows[:, fixed_indices]
+    return result
+
+
+_SAMPLER_SPECS: dict[str, InputSpecValue] = {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}
+_SAMPLER_R = [[1.0, 0.5], [0.5, 1.0]]
+
+
+def test_dependence_values_for_the_three_cases():
+    independent = Problem.from_dict(_SAMPLER_SPECS)
+    identity = Problem.from_dict(_SAMPLER_SPECS, correlation=np.eye(2))
+    gaussian = Problem.from_dict(_SAMPLER_SPECS, correlation=_SAMPLER_R)
+    custom = Problem.from_dict(_SAMPLER_SPECS, sampler=_copy_sampler)
+    assert independent.dependence == "independent"
+    assert identity.dependence == "independent"
+    assert gaussian.dependence == "gaussian"
+    assert custom.dependence == "custom"
+
+
+def test_sampler_round_trip_through_constructor_from_dict_and_with_sampler():
+    via_dict = Problem.from_dict(_SAMPLER_SPECS, sampler=_copy_sampler, sampler_dimension=3)
+    via_ctor = Problem(
+        names=("x1", "x2"),
+        bounds=((0.0, 1.0), (0.0, 1.0)),
+        sampler=_copy_sampler,
+        sampler_dimension=3,
+    )
+    via_with = Problem.from_dict(_SAMPLER_SPECS).with_sampler(_copy_sampler, sampler_dimension=3)
+    for p in (via_dict, via_ctor, via_with):
+        assert p.sampler is _copy_sampler
+        assert p.sampler_dimension == 3
+    default = Problem.from_dict(_SAMPLER_SPECS, sampler=_copy_sampler)
+    assert default.sampler_dimension == 2
+
+
+def test_a_sampler_and_a_correlation_exclude_each_other():
+    """Every route to a problem with both raises, in either order."""
+    routes = [
+        lambda: Problem.from_dict(_SAMPLER_SPECS, sampler=_copy_sampler).with_correlation(
+            _SAMPLER_R
+        ),
+        lambda: Problem.from_dict(_SAMPLER_SPECS, correlation=_SAMPLER_R).with_sampler(
+            _copy_sampler
+        ),
+        lambda: Problem.from_dict(_SAMPLER_SPECS, correlation=_SAMPLER_R, sampler=_copy_sampler),
+    ]
+    for route in routes:
+        with pytest.raises(ValueError, match="correlation or a custom"):
+            route()
+
+
+def test_sampler_dimension_without_sampler_raises():
+    with pytest.raises(ValueError, match="requires a sampler"):
+        Problem.from_dict(_SAMPLER_SPECS, sampler_dimension=2)
+
+
+@pytest.mark.parametrize("dimension", [0, -1, True, 1.5])
+def test_bad_sampler_dimension_raises(dimension):
+    with pytest.raises(ValueError, match="positive integer"):
+        Problem.from_dict(_SAMPLER_SPECS, sampler=_copy_sampler, sampler_dimension=dimension)
+
+
+def test_with_output_names_keeps_the_sampler():
+    p = Problem.from_dict(_SAMPLER_SPECS, sampler=_copy_sampler, sampler_dimension=3)
+    renamed = p.with_output_names(("y",))
+    assert renamed.sampler is _copy_sampler
+    assert renamed.sampler_dimension == 3
+    assert renamed.dependence == "custom"
+
+
+def test_with_sampler_none_drops_the_sampler():
+    p = Problem.from_dict(_SAMPLER_SPECS, sampler=_copy_sampler)
+    dropped = p.with_sampler(None)
+    assert dropped.sampler is None
+    assert dropped.sampler_dimension is None
+    assert dropped.dependence == "independent"
+    assert p.dependence == "custom"

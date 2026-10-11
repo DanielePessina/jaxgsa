@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import functools
 import warnings
-from typing import Literal, cast
+from typing import Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -63,9 +63,8 @@ from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import (
     at_least,
+    bootstrap_checks,
     check_scalars,
-    in_open_interval,
-    one_of,
     prepare,
     require,
     validate_inputs,
@@ -90,6 +89,7 @@ from jaxgsa._core.validation import (
     _prepare_Y,
     _standardize_outputs,
     _validate_output,
+    as_key,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.optimal_transport._result import OTResult
@@ -101,7 +101,7 @@ from jaxgsa.problem import Problem, _categorical_dims
 # the engine owns it.
 _IRREGULAR_KWARGS = (
     "mode",
-    "n_partitions",
+    "n_classes",
     "standardize_outputs",
     "epsilon",
     "max_iter",
@@ -124,6 +124,9 @@ _IRREGULAR_KWARGS = (
 # transient-memory budget at any dtype. Counting elements instead would be
 # wrong by the item size, and wrong by a further factor of two under x64.
 _CHUNK_LIVE_TENSORS = 2
+# Live copies of the continuous group's (D, M, P) tensors; see
+# ``_ot_1d_chunked``. Each is of size about ``D * N``.
+_CONT_LIVE_TENSORS = 6
 
 _MODES = ("univariate", "multivariate", "trajectory")
 
@@ -245,6 +248,85 @@ def _quantile_rank_split(counts: Array, N: int) -> tuple[Array, Array, Array]:
     return j_left, j_right, frac_left
 
 
+class _SlotTables(NamedTuple):
+    """Device copies of :func:`_slot_tables` for one continuous group."""
+
+    idx: Array  # (U, Cmax, L) sorted-sample positions
+    w: Array  # (U, Cmax, L) overlap weights
+    cmap: Array  # (M,) class -> distinct-size row
+    a_m: Array  # (M, P) slot weights per class, zero on padding
+
+
+def _make_slots(cls_idx: Array, N: int, dtype) -> _SlotTables:
+    """Build the closed-form W2 tables for a continuous group.
+
+    Args:
+        cls_idx: Group class indices ``(Dg, M, P)``; only ``M`` and ``P`` are read.
+        N: Number of samples.
+        dtype: Working float dtype.
+
+    Returns:
+        The tables as device arrays at ``dtype``.
+    """
+    M, P = cls_idx.shape[-2:]
+    _, sizes = _class_layout(N, M)
+    idx, w, a, cmap = _slot_tables(sizes, N)
+    a_m = np.zeros((M, P))
+    a_m[:, : a.shape[-1]] = a[cmap][:, :P]
+    a_m = np.where(np.arange(P)[None, :] < sizes[:, None], a_m, 0.0)
+    return _SlotTables(
+        jnp.asarray(idx),
+        jnp.asarray(w, dtype=dtype),
+        jnp.asarray(cmap),
+        jnp.asarray(a_m, dtype=dtype),
+    )
+
+
+def _slot_tables(sizes: np.ndarray, N: int) -> tuple[np.ndarray, ...]:
+    """Static overlap tables for the closed-form continuous-group W2.
+
+    The sample's quantile function is constant on ``N`` intervals of width
+    ``1/N``, and a class of size ``c`` has a constant value on each of its
+    ``c`` slots of width ``1/c``. Slot ``k`` therefore overlaps a few
+    consecutive intervals, with integer overlap lengths in units of
+    ``1 / (N * c)``. Equal-frequency class sizes take at most two distinct
+    values, so the tables are tiny and depend only on ``(sizes, N)``.
+
+    Args:
+        sizes: Static class sizes, shape ``(M,)``.
+        N: Number of samples.
+
+    Returns:
+        ``(idx, w, a, cmap)``. ``idx (U, Cmax, L)`` holds the sorted-sample
+        positions each slot overlaps, ``w`` the matching overlap weights
+        (they sum to ``1/c`` per slot, zero on padding), ``a (U, Cmax)`` the
+        slot weights ``1/c`` (zero on padding), and ``cmap (M,)`` maps each
+        class to its distinct-size row ``U``. Empty classes map to row 0.
+    """
+    uniq = sorted({int(c) for c in sizes if c > 0})
+    c_max = max(uniq)
+    tabs = []
+    for c in uniq:
+        k = np.arange(c, dtype=np.int64)[:, None]
+        i_lo = (k * N) // c
+        n_i = -(-((k + 1) * N) // c) - i_lo
+        length = int(n_i.max())
+        i = i_lo + np.arange(length, dtype=np.int64)[None, :]
+        ov = np.minimum((i + 1) * c, (k + 1) * N) - np.maximum(i * c, k * N)
+        ov = np.maximum(ov, 0)
+        tabs.append((np.minimum(i, N - 1), ov / float(N * c), c))
+    length = max(t[0].shape[1] for t in tabs)
+    idx = np.zeros((len(uniq), c_max, length), dtype=np.int32)
+    w = np.zeros((len(uniq), c_max, length), dtype=np.float64)
+    a = np.zeros((len(uniq), c_max), dtype=np.float64)
+    for u, (ti, tw, c) in enumerate(tabs):
+        idx[u, :c, : ti.shape[1]] = ti
+        w[u, :c, : tw.shape[1]] = tw
+        a[u, :c] = 1.0 / c
+    cmap = np.array([uniq.index(int(c)) if c > 0 else 0 for c in sizes], dtype=np.int32)
+    return idx, w, a, cmap
+
+
 @functools.partial(jax.jit, static_argnames=("group_levels",))
 def _ot_1d_kernel(
     Y_cols: Array,
@@ -309,7 +391,15 @@ def _ot_1d_kernel(
     # the pre-sorted column back at those ranks yields the same order
     # statistics to the last bit.
     Y_sorted = jax.lax.sort(Y_cols, dimension=0, is_stable=False)  # (N, C)
-    pos2rank = jnp.argsort(jnp.argsort(Y_cols, axis=0), axis=0).astype(jnp.int32)  # (N, C)
+    order = jnp.argsort(Y_cols, axis=0).astype(jnp.int32)  # (N, C)
+    # Inverting the permutation by scatter replaces a second argsort.
+    pos2rank = jnp.put_along_axis(
+        jnp.zeros_like(order),
+        order,
+        jnp.broadcast_to(jnp.arange(N, dtype=jnp.int32)[:, None], order.shape),
+        axis=0,
+        inplace=False,
+    )  # (N, C)
 
     def _group_stats(
         y, y_sorted, mean_r, V, cls_idx, mask_b, counts_b, j_b, y_sorted_col, pos2rank_col
@@ -343,20 +433,41 @@ def _ot_1d_kernel(
                 N - 1,
             )
         ]
-        j_left_b, j_right_b, frac_left_b = j_b
-        shape = (y_cls.shape[0],) + j_left_b.shape[-2:]
-        j_left_full = jnp.broadcast_to(j_left_b, shape)
-        j_right_full = jnp.broadcast_to(j_right_b, shape)
-        frac_left_full = jnp.broadcast_to(frac_left_b, shape)
-        q_left = jnp.take_along_axis(y_cls_sorted, j_left_full, axis=-1)  # (Dg, M, N)
-        q_right = jnp.take_along_axis(y_cls_sorted, j_right_full, axis=-1)  # (Dg, M, N)
-        # Exact 1-D W2^2: every one of the N mass intervals couples to at
-        # most two class members (see _quantile_rank_split), so this is the
-        # exact integral, not the midpoint-rule approximation.
-        y_b = y_sorted[None, None, :]
-        w2 = (
-            frac_left_full * (y_b - q_left) ** 2 + (1.0 - frac_left_full) * (y_b - q_right) ** 2
-        ).mean(axis=-1)  # (Dg, M)
+        if isinstance(j_b, _SlotTables):
+            # Closed form for the continuous group. Class sizes are the same
+            # for every parameter, so slot ``k`` of a size-``c`` class sees
+            # the same run of sorted-sample values for all of them. Write the
+            # weighted squared gap on slot ``k`` as ``S_k + A_k (ybar_k -
+            # q_k)^2``, the weighted variance of that run plus the squared gap
+            # of its mean to the class quantile. Both terms are non-negative.
+            # Only ``q_k`` depends on the parameter, so the work is
+            # ``O(D * M * P)`` instead of ``O(D * M * N)``.
+            yk = y_sorted[j_b.idx]  # (U, Cmax, L)
+            a_w = j_b.w.sum(axis=-1)  # (U, Cmax)
+            a_safe = jnp.where(a_w > 0, a_w, 1.0)
+            ybar = (j_b.w * yk).sum(axis=-1) / a_safe  # (U, Cmax)
+            s_tot = (j_b.w * (yk - ybar[..., None]) ** 2).sum(axis=(-2, -1))  # (U,)
+            P = y_cls_sorted.shape[-1]
+            ybar_m = jnp.pad(ybar, ((0, 0), (0, P - ybar.shape[-1])))[j_b.cmap]  # (M, P)
+            a_m = j_b.a_m  # (M, P)
+            gap = jnp.where(a_m > 0, y_cls_sorted - ybar_m[None], 0.0)
+            w2 = s_tot[j_b.cmap][None] + (a_m[None] * gap**2).sum(axis=-1)  # (Dg, M)
+        else:
+            j_left_b, j_right_b, frac_left_b = j_b
+            shape = (y_cls.shape[0],) + j_left_b.shape[-2:]
+            j_left_full = jnp.broadcast_to(j_left_b, shape)
+            j_right_full = jnp.broadcast_to(j_right_b, shape)
+            frac_left_full = jnp.broadcast_to(frac_left_b, shape)
+            q_left = jnp.take_along_axis(y_cls_sorted, j_left_full, axis=-1)  # (Dg, M, N)
+            q_right = jnp.take_along_axis(y_cls_sorted, j_right_full, axis=-1)  # (Dg, M, N)
+            # Exact 1-D W2^2: every one of the N mass intervals couples to at
+            # most two class members (see _quantile_rank_split), so this is
+            # the exact integral, not the midpoint-rule approximation.
+            y_b = y_sorted[None, None, :]
+            w2 = (
+                frac_left_full * (y_b - q_left) ** 2
+                + (1.0 - frac_left_full) * (y_b - q_right) ** 2
+            ).mean(axis=-1)  # (Dg, M)
 
         cls_mean = (y_cls * mask_b.astype(dtype)).sum(axis=-1) / safe_counts  # (Dg, M)
         adv = (cls_mean - mean_r) ** 2
@@ -377,8 +488,9 @@ def _ot_1d_kernel(
     def _col_stats(y: Array, y_sorted_col: Array, pos2rank_col: Array, r: Array, layouts):
         """OT/advective/diffusive indices for one column and replicate."""
         y_r = y[r]  # resampled column
-        # Order statistics only, so an unstable sort is both equivalent
-        # and cheaper; see the class sort in _group_stats.
+        # Order statistics only, so sorting the int32 ranks and gathering
+        # from the pre-sorted column is bitwise equal to a float sort; see
+        # the class sort in _group_stats.
         y_sorted = jax.lax.sort(y_r, dimension=-1, is_stable=False)
         mean_r = y_r.mean()
         V = 2.0 * jnp.var(y_r, ddof=1)
@@ -398,10 +510,12 @@ def _ot_1d_kernel(
     # A continuous group's equal-frequency class sizes are the same in
     # every replicate (only the categorical group's class sizes vary with
     # the resample), so its quantile lookup is the same table every time.
-    # Build it once here rather than R times inside the scan.
+    # Build it once here rather than R times inside the scan. For a
+    # continuous group it is the static slot-overlap table of the closed-form
+    # W2, see _SlotTables.
     shared_j = tuple(
-        _quantile_rank_split(counts_g[0], N) if is_shared else None
-        for counts_g, is_shared in zip(counts_list, group_is_shared, strict=True)
+        _make_slots(cls_g, N, dtype) if is_shared else None
+        for cls_g, is_shared in zip(cls_list, group_is_shared, strict=True)
     )
 
     def _one_replicate(carry, xs):
@@ -639,9 +753,21 @@ def _run_univariate(
     D_run = sum(g[0].shape[1] for g in groups)
     # Peak memory scales with the summed per-group D_g * M_g
     # conditional-quantile tensors, in bytes at the kernel's working dtype.
-    layout_elems = sum(g[0].shape[1] * g[0].shape[2] for g in groups)
+    # The categorical groups still build (D, M, N) tensors. The continuous
+    # group works on (D, M, P) tensors only, where M * P is about N, and keeps
+    # a few of them live (class members, their ranks, sorted members, gaps).
+    layout_elems = sum(
+        g[0].shape[1] * g[0].shape[2] for g, lv in zip(groups, group_levels) if lv is not None
+    )
+    cont_elems = sum(
+        g[0].shape[1] * g[0].shape[2] * g[0].shape[3]
+        for g, lv in zip(groups, group_levels)
+        if lv is None
+    )
     itemsize = jnp.dtype(jnp.result_type(Y_cols.dtype, jnp.float32)).itemsize
-    bytes_per_column = _CHUNK_LIVE_TENSORS * layout_elems * N * itemsize
+    bytes_per_column = (
+        _CHUNK_LIVE_TENSORS * layout_elems * N + _CONT_LIVE_TENSORS * cont_elems
+    ) * itemsize
     cs = resolve_batch_size(bytes_per_column, total, slice_chunk_size)
     levels_static = tuple(tuple(lv) if lv is not None else None for lv in group_levels)
     parts: tuple[list[Array], list[Array], list[Array], list[Array]] = ([], [], [], [])
@@ -768,11 +894,56 @@ def _resolve_tol(tol: float | None, dtype: jnp.dtype) -> float:
     return 1e-9 if dtype == jnp.float64 else 1e-6
 
 
-def _resolve_n_classes(n_partitions: int | None, N: int, *, needs_M: bool) -> int:
-    """Resolve ``M``, the equal-frequency class count, from ``n_partitions``.
+class OTIndices(NamedTuple):
+    """Plain-array optimal-transport indices, as returned by :func:`indices`.
+
+    Fields are named like the matching :class:`OTResult` fields. Plain tuple
+    unpacking of the first three fields keeps working; ``S1`` comes last.
+
+    Attributes:
+        ot: Total optimal-transport index per parameter.
+        advective: Advective part of ``ot``.
+        diffusive: Diffusive part of ``ot``.
+        S1: Given-data first-order Sobol index, ``2 N / (N - 1)`` times
+            ``advective``.
+    """
+
+    ot: Array
+    advective: Array
+    diffusive: Array
+    S1: Array
+
+
+def _s1_scale(N: int) -> float:
+    """Return the factor that turns ``advective`` into the given-data ``S1``.
+
+    Args:
+        N: Number of samples.
+
+    Returns:
+        ``2 N / (N - 1)``, which moves the OT normalizer from ddof=1 to ddof=0.
+    """
+    return 2.0 * N / (N - 1)
+
+
+def _s1_from_advective(advective: Array, N: int) -> Array:
+    """Return the given-data ``S1`` from the advective index.
+
+    Args:
+        advective: Advective index, any shape.
+        N: Number of samples.
+
+    Returns:
+        ``advective`` rescaled by :func:`_s1_scale`.
+    """
+    return _s1_scale(N) * advective
+
+
+def _resolve_n_classes(n_classes: int | None, N: int, *, needs_M: bool) -> int:
+    """Resolve ``M``, the equal-frequency class count, from ``n_classes``.
 
     Shared between :func:`analyze` and :func:`indices`: both default
-    ``n_partitions`` to ``min(25, N // 2)`` and validate an explicit value
+    ``n_classes`` to ``min(25, N // 2)`` and validate an explicit value
     against ``[2, N // 2]``. Only the default path can skip the too-small
     floor check, and only when nothing in this call actually consumes
     ``M`` -- an all-categorical problem, whose parameters and whose dummy
@@ -780,29 +951,34 @@ def _resolve_n_classes(n_partitions: int | None, N: int, *, needs_M: bool) -> in
     ``M``, since it refuses categorical parameters outright.
 
     Args:
-        n_partitions: The caller's ``n_partitions`` argument.
+        n_classes: The caller's ``n_classes`` argument.
         N: Sample size.
         needs_M: Whether anything in this call consumes ``M``. Only
-            relevant when ``n_partitions is None``.
+            relevant when ``n_classes is None``.
 
     Returns:
         ``M``, resolved and validated.
 
     Raises:
-        ValueError: If ``n_partitions`` is outside ``[2, N // 2]``, or the
+        ValueError: If ``n_classes`` is outside ``[2, N // 2]``, or the
             default is used, ``needs_M`` is true, and ``N`` is too small to
             build two classes.
     """
-    if n_partitions is None:
+    if n_classes is None:
         # The customary 25 classes, clamped so small samples do not raise
         # over a default the user never passed.
         M = min(25, N // 2)
         if needs_M and M < 2:
-            raise ValueError(f"building conditioning classes needs N >= 4 samples, got N={N}")
+            raise ValueError(
+                "jaxgsa.optimal_transport: building conditioning classes needs N >= 4 "
+                f"samples, got N={N}"
+            )
         return M
-    M = int(n_partitions)
+    M = int(n_classes)
     if not 2 <= M <= N // 2:
-        raise ValueError(f"n_partitions must be in [2, N//2={N // 2}], got {n_partitions}")
+        raise ValueError(
+            f"jaxgsa.optimal_transport: n_classes must be in [2, N//2={N // 2}], got {n_classes}"
+        )
     return M
 
 
@@ -834,6 +1010,7 @@ def _matched_dummy_group(key: Array, N: int, sizes: np.ndarray) -> PartitionGrou
     return cls_idx, jnp.asarray(sizes)[None, None, :]
 
 
+@jax.jit
 def _boot_replicates(vals_all: Array, hat: Array, degen_all: Array) -> Array:
     """The bootstrap draws the interval is taken from.
 
@@ -861,7 +1038,7 @@ def analyze(
     Y: Array | IrregularY,
     *,
     mode: Literal["univariate", "multivariate", "trajectory"] = "univariate",
-    n_partitions: int | None = None,
+    n_classes: int | None = None,
     standardize_outputs: bool = True,
     epsilon: float = 0.03,
     max_iter: int = 2000,
@@ -870,7 +1047,7 @@ def analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int | None = None,
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
@@ -924,7 +1101,7 @@ def analyze(
             entropic Sinkhorn transport. ``"trajectory"`` does the same
             per output, with each output's time course as the cloud, shape
             ``(K, D)``. It requires a 3-D ``Y``.
-        n_partitions: Number of equal-frequency conditioning classes per
+        n_classes: Number of equal-frequency conditioning classes per
             continuous parameter. More classes localize the conditioning
             and lower the discretization bias, but they leave fewer
             samples per class and raise the estimation noise. About 25 is
@@ -982,7 +1159,7 @@ def analyze(
         n_bootstrap: Number of bootstrap resamples for confidence
             intervals. ``0`` (default) skips them, and the ``*_conf``
             fields are ``None``. Joint modes solve
-            ``n_bootstrap * D * n_partitions`` transport problems, so keep
+            ``n_bootstrap * D * n_classes`` transport problems, so keep
             the value modest there.
         conf_level: Confidence level for the bootstrap intervals.
         ci_method: How the interval endpoints are formed. ``"quantile"``
@@ -1034,7 +1211,7 @@ def analyze(
         ValueError: If X is not 2-D, its column count does not match the
             problem, Y is not 1-D/2-D/3-D, X and Y have differing row
             counts, ``mode`` is unknown, ``mode="trajectory"`` is
-            used with a non-3-D Y, a passed ``n_partitions`` is not in
+            used with a non-3-D Y, a passed ``n_classes`` is not in
             ``[2, N // 2]``, a categorical column of X holds
             values other than its integer level codes, ``epsilon <= 0``,
             ``max_iter < 1``,
@@ -1049,6 +1226,7 @@ def analyze(
             conditional distribution then equals the unconditional one, so
             the corresponding indices are an exact 0 rather than an answer.
     """
+    key = as_key(key, "optimal_transport")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
@@ -1062,13 +1240,13 @@ def analyze(
         )
     Y = cast(Array, Y)
 
-    from jaxgsa.optimal_transport import SPEC
+    from jaxgsa.optimal_transport import _SPEC
 
     # The check runs on the user's own sample, before any partition layout is
     # built and before the dummy column exists. The dummy is synthetic and
     # finite by construction, so it is not part of what is checked here.
     ctx = prepare(
-        SPEC,
+        _SPEC,
         problem,
         Y,
         X=X,
@@ -1083,13 +1261,10 @@ def analyze(
             require(epsilon > 0, f"epsilon must be > 0, got {epsilon}"),
             at_least("max_iter", max_iter, 1),
             require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
-            at_least("n_bootstrap", n_bootstrap, 0),
-            one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            in_open_interval("conf_level", conf_level, 0.0, 1.0),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
             # The bootstrap and the dummy baseline are the two consumers of
             # ``key``, so it fires before the data is touched, not after.
-            require(key is not None or n_bootstrap == 0, "key is required when n_bootstrap > 0"),
+            *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
+            at_least("slice_chunk_size", slice_chunk_size, 1),
             require(key is not None or not dummy, "key is required when dummy=True"),
         ),
         min_kept=_MIN_KEPT,
@@ -1102,7 +1277,10 @@ def analyze(
     X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
 
     if mode == "trajectory" and Y.ndim != 3:
-        raise ValueError(f"mode='trajectory' requires a 3-D (N, T, K) Y, got ndim={Y.ndim}")
+        raise ValueError(
+            "jaxgsa.optimal_transport: mode='trajectory' requires a 3-D (N, T, K) Y, "
+            f"got ndim={Y.ndim}"
+        )
     if mode in _POINT_CLOUD_MODES and not dummy:
         # The univariate mode reads a closed-form 1-D transport cost, but the
         # point-cloud modes solve an entropic problem, and that regularization
@@ -1121,17 +1299,17 @@ def analyze(
             category=JaxgsaWarning,
         )
     N = X.shape[0]
-    # n_partitions applies to the continuous columns only. Categorical
+    # n_classes applies to the continuous columns only. Categorical
     # columns always get one class per level, and so does the matched dummy
     # each of them is measured against (M4), so an all-categorical problem
     # has no consumer for the value even when it asks for a dummy floor.
     dims_levels = _categorical_dims(problem)
     cat_dims = [d for d, _ in dims_levels]
-    cont_dims = [d for d in range(problem.num_vars) if d not in set(cat_dims)]
-    M = _resolve_n_classes(n_partitions, N, needs_M=bool(cont_dims))
-    if n_partitions is not None and not cont_dims:
+    cont_dims = [d for d in range(problem.n_params) if d not in set(cat_dims)]
+    M = _resolve_n_classes(n_classes, N, needs_M=bool(cont_dims))
+    if n_classes is not None and not cont_dims:
         warnings.warn(
-            "jaxgsa.optimal_transport: n_partitions is ignored because every parameter is "
+            "jaxgsa.optimal_transport: n_classes is ignored because every parameter is "
             "categorical (one conditioning class per level, and each dummy floor "
             "matches its own parameter's level sizes)",
             stacklevel=2,
@@ -1233,9 +1411,15 @@ def analyze(
         assert key_dummy is not None  # a missing key was refused above
         dummy_keys = jax.random.split(key_dummy, 1 + len(cat_dims))
 
-        def _dummy_value(group: PartitionGroup) -> Array:
-            """Point-estimate OT of one synthetic parameter, slice-shaped."""
-            ot, _, _, _, n_bad, solves = _run(identity, [group], [None], None)
+        def _dummy_value(group: PartitionGroup, levels: list[int] | None) -> Array:
+            """Point-estimate OT of one synthetic parameter, slice-shaped.
+
+            ``levels`` is ``None`` for the continuous floor, whose classes
+            follow the equal-frequency layout. A categorical floor passes
+            its level count, so the estimator uses the group's own class
+            sizes instead of the equal-frequency ones.
+            """
+            ot, _, _, _, n_bad, solves = _run(identity, [group], [levels], None)
             n_bad_parts.append(n_bad)
             n_solves_parts.append(solves)
             return ot[0][..., 0]
@@ -1246,7 +1430,7 @@ def analyze(
             dummy_col = jax.random.permutation(dummy_keys[0], N)[:, None]
             dummy_cls_idx = _build_class_indices(dummy_col, identity, jnp.asarray(take_np))
             cont_group = (dummy_cls_idx, jnp.asarray(sizes_np)[None, None, :])  # (1, 1, M, P)
-            cont_dummy = _dummy_value(cont_group)
+            cont_dummy = _dummy_value(cont_group, None)
             dummy_vals.extend([cont_dummy] * len(cont_dims))
         if cat_dims:
             # The categorical group is always last (build_partition_groups'
@@ -1256,7 +1440,8 @@ def analyze(
             for j, key_j in enumerate(dummy_keys[1:]):
                 sizes_j = cat_counts0[j]
                 sizes_j = sizes_j[sizes_j > 0]
-                dummy_vals.append(_dummy_value(_matched_dummy_group(key_j, N, sizes_j)))
+                dummy_group = _matched_dummy_group(key_j, N, sizes_j)
+                dummy_vals.append(_dummy_value(dummy_group, [len(sizes_j)]))
         ot_dummy_grouped = jnp.stack(dummy_vals, axis=-1)  # (..., D) in group order
         ot_dummy = ot_dummy_grouped if col_order is None else ot_dummy_grouped[..., col_order]
 
@@ -1319,7 +1504,7 @@ def analyze(
     # the identity "advective = S1 / 2" holds with no ddof caveat. Every
     # bootstrap resample also has N rows, so the same constant rescales the
     # interval exactly.
-    ddof_scale = 2.0 * N / (N - 1)
+    ddof_scale = _s1_scale(N)
     S1 = ddof_scale * hats["advective"]
     S1_conf = None if confs["advective"] is None else ddof_scale * confs["advective"]
 
@@ -1379,13 +1564,13 @@ def indices(
     Y: Array,
     *,
     mode: Literal["univariate", "multivariate", "trajectory"] = "univariate",
-    n_partitions: int | None = None,
+    n_classes: int | None = None,
     standardize_outputs: bool = True,
     epsilon: float = 0.03,
     max_iter: int = 2000,
     tol: float | None = None,
     slice_chunk_size: int | None = None,
-) -> tuple[Array, Array, Array]:
+) -> OTIndices:
     """Compute optimal-transport indices as plain arrays, with no diagnostics.
 
     This is the transformable core of :func:`analyze`. It runs the same
@@ -1430,7 +1615,7 @@ def indices(
         X: Parameter sample matrix, shape ``(N, D)``.
         Y: Model output, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
         mode: Output treatment, as in :func:`analyze`.
-        n_partitions: Number of equal-frequency conditioning classes.
+        n_classes: Number of equal-frequency conditioning classes.
             ``None`` selects ``min(25, N // 2)``, which reads ``N`` only, so
             it stays static under a trace.
         standardize_outputs: Joint modes only. Divide each output column by its
@@ -1449,7 +1634,8 @@ def indices(
             kernel call, as in :func:`analyze`.
 
     Returns:
-        ``(ot, advective, diffusive)``. In ``"univariate"`` mode the shapes
+        An :class:`OTIndices` named tuple ``(ot, advective, diffusive, S1)``,
+        so unpacking the first three fields still works. In ``"univariate"`` mode the shapes
         are those of the caller's ``Y``: ``(D,)`` for a 1-D ``Y``,
         ``(K, D)`` for 2-D, ``(T, K, D)`` for 3-D. ``"multivariate"``
         returns ``(D,)`` and ``"trajectory"`` returns ``(K, D)``. The shapes
@@ -1459,7 +1645,7 @@ def indices(
         ValueError: If ``X`` is not ``(N, D)`` for the problem's ``D``; if
             ``Y`` is not 1-D, 2-D or 3-D, or its row count does not match
             ``X``; if ``mode`` is unknown; if ``mode="trajectory"`` is used
-            with a non-3-D ``Y``; if ``n_partitions`` is not in
+            with a non-3-D ``Y``; if ``n_classes`` is not in
             ``[2, N // 2]``; if ``epsilon <= 0``, ``max_iter < 1`` or
             ``tol <= 0``; if ``slice_chunk_size`` is below 1; or if any
             parameter is categorical.
@@ -1476,17 +1662,21 @@ def indices(
             at_least("max_iter", max_iter, 1),
             require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
             at_least("slice_chunk_size", slice_chunk_size, 1),
-        )
+        ),
+        method="jaxgsa.optimal_transport.indices",
     )
     X = validate_inputs(problem, X)
     Y = _validate_output(Y, int(X.shape[0]), problem)
     if mode == "trajectory" and Y.ndim != 3:
-        raise ValueError(f"mode='trajectory' requires a 3-D (N, T, K) Y, got ndim={Y.ndim}")
+        raise ValueError(
+            "jaxgsa.optimal_transport: mode='trajectory' requires a 3-D (N, T, K) Y, "
+            f"got ndim={Y.ndim}"
+        )
     dims_levels = _categorical_dims(problem)
     if dims_levels:
         names = ", ".join(repr(problem.names[d]) for d, _ in dims_levels)
         raise ValueError(
-            "jaxgsa.optimal_transport.indices supports continuous parameters "
+            "jaxgsa.optimal_transport: indices supports continuous parameters "
             f"only, but {names} is categorical. A categorical parameter "
             "conditions on one class per observed level, and both the class "
             "count and the padded class width are read off the sample on the "
@@ -1496,7 +1686,7 @@ def indices(
         )
 
     N = X.shape[0]
-    M = _resolve_n_classes(n_partitions, N, needs_M=True)
+    M = _resolve_n_classes(n_classes, N, needs_M=True)
 
     Y_3d, layout = _prepare_Y(Y)
     _, T, K = Y_3d.shape
@@ -1522,7 +1712,12 @@ def indices(
             col_order,
             slice_chunk_size,
         )
-        return layout.squeeze(ot[0]), layout.squeeze(adv[0]), layout.squeeze(diff[0])
+        return OTIndices(
+            ot=layout.squeeze(ot[0]),
+            advective=layout.squeeze(adv[0]),
+            diffusive=layout.squeeze(diff[0]),
+            S1=layout.squeeze(_s1_from_advective(adv[0], N)),
+        )
 
     tol_v = _resolve_tol(tol, dtype)
     ot, adv, diff, _, _, _ = _run_joint(
@@ -1536,4 +1731,6 @@ def indices(
         jnp.asarray(max_iter, jnp.int32),
         jnp.asarray(tol_v, dtype),
     )
-    return ot[0], adv[0], diff[0]
+    return OTIndices(
+        ot=ot[0], advective=adv[0], diffusive=diff[0], S1=_s1_from_advective(adv[0], N)
+    )

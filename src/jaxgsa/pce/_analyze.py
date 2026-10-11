@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Literal, NamedTuple, cast
 
 import jax
@@ -13,18 +13,17 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
+from jaxgsa._core.batching import get_memory_budget, pad_rows, resolve_batch_size
 from jaxgsa._core.bootstrap import bootstrap_draws, interval
 from jaxgsa._core.entry import (
     at_least,
+    bootstrap_checks,
     check_scalars,
     gates,
-    in_open_interval,
-    one_of,
     prepare,
     require,
 )
-from jaxgsa._core.fit_quality import warn_loo_overfit, warn_variance_fit
+from jaxgsa._core.fit_quality import warn_cv_overfit, warn_variance_fit
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -41,6 +40,7 @@ from jaxgsa._core.transforms import _truncnorm_cdf
 from jaxgsa._core.validation import (
     _is_constant_slice,
     _prepare_Y,
+    as_key,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.pce._engine import (
@@ -153,7 +153,7 @@ def _map_to_reference(X: Array, problem: Problem, order: int) -> tuple[Array, tu
         ``build_design_matrix`` which 1-D polynomial family each dimension
         needs.
     """
-    D = problem.num_vars
+    D = problem.n_params
     cols = []
     input_types: list[str] = []
     hermite_safe_order = order <= _MAX_HERMITE_ORDER_UNDER_TRUNCATION
@@ -232,7 +232,7 @@ def effective_order(
     the sample size, so it answers before the model has been run.
 
     Args:
-        problem: Parameter names and distributions. Only ``num_vars`` is
+        problem: Parameter names and distributions. Only ``n_params`` is
             read.
         n_samples: Number of rows the fit will run on, after any invalid
             rows have been dropped.
@@ -243,7 +243,25 @@ def effective_order(
         The degree a fit with these settings would use. Equal to ``order``
         when the sample budget allows it, and lower otherwise, never below 1.
     """
-    return _auto_order(problem.num_vars, n_samples, order, fit_ratio)
+    return _auto_order(problem.n_params, n_samples, order, fit_ratio)
+
+
+class PCEIndices(NamedTuple):
+    """PCE Sobol indices as plain arrays, as :func:`indices` returns them.
+
+    Tuple unpacking works: ``S1, ST, S2 = indices(...)``.
+
+    Attributes:
+        S1: First-order Sobol indices, shape ``(D,)`` / ``(K, D)`` /
+            ``(T, K, D)``.
+        ST: Total-order Sobol indices, same shape as ``S1``.
+        S2: Second-order interaction indices, shape ``(D, D)`` /
+            ``(K, D, D)`` / ``(T, K, D, D)``, NaN on the diagonal.
+    """
+
+    S1: Array
+    ST: Array
+    S2: Array
 
 
 class _PCEFit(NamedTuple):
@@ -261,7 +279,7 @@ class _PCEFit(NamedTuple):
     multi_index: np.ndarray  # (n_terms, D)
     order: int  # effective order after _auto_order
     loo_flat: Array | None  # (T*K,) per-slice LOO RMSE, or None (diagnostics=False)
-    fitted_var: Array | None  # (T*K,) fitted-value variance, or None (diagnostics=False)
+    rmse_flat: Array | None  # (T*K,) per-slice in-sample RMSE, or None (diagnostics=False)
     streamed: bool  # True when the row-streamed fit path ran
 
 
@@ -297,8 +315,8 @@ def _get_streamed_steps(input_types: tuple[str, ...], order: int):
     Returns:
         ``(acc_normal, acc_loo)``. ``acc_normal(X_b, Y_b, w, G, B)`` folds
         one batch into the running normal equations; ``acc_loo(X_b, Y_b, w,
-        coeffs_flat, gram_chol, sse)`` folds one batch into the running LOO
-        sum of squares.
+        coeffs_flat, gram_chol, sse)`` folds one batch into the running
+        ``(LOO, in-sample)`` sums of squares.
     """
     multi_index = build_multi_index(len(input_types), order)
 
@@ -314,57 +332,15 @@ def _get_streamed_steps(input_types: tuple[str, ...], order: int):
         w: Array,
         coeffs_flat: Array,
         gram_chol: Array,
-        sse: Array,
-    ) -> Array:
+        sse: tuple[Array, Array],
+    ) -> tuple[Array, Array]:
         Phi_b = build_design_matrix(X_b, multi_index, input_types, order) * w[:, None]
         residuals = Y_b - Phi_b @ coeffs_flat  # (b, M); zero on padded rows
         loo_residuals = residuals / (1.0 - hat_diagonal(Phi_b, gram_chol))[:, None]
-        return sse + jnp.sum(loo_residuals**2, axis=0)
+        sse_loo, sse_fit = sse
+        return sse_loo + jnp.sum(loo_residuals**2, axis=0), sse_fit + jnp.sum(residuals**2, axis=0)
 
     return acc_normal, acc_loo
-
-
-def _pad_rows(A: Array, n_pad: int) -> Array:
-    """Pad ``A`` with ``n_pad`` zero rows on the sample axis."""
-    if n_pad == 0:
-        return A
-    return jnp.concatenate([A, jnp.zeros((n_pad, *A.shape[1:]), dtype=A.dtype)], axis=0)
-
-
-def _fitted_variance(gram_raw: Array, coeffs_flat: Array, n_rows: int) -> Array:
-    """Sample variance of the fitted values, per output slice.
-
-    The fitted values are ``Yhat = Phi @ coeffs_flat``. Their sample mean and
-    mean square are both read off the *unregularized* Gram matrix
-    ``G = Phi^T Phi``, so neither path has to hold an ``(N, T*K)`` array of
-    predictions, and the streamed path gets the same number as the single-pass
-    one without a third sweep over the rows:
-
-    - ``mean(Yhat) = (G[0, :] @ c) / N``, because the first basis function of
-      an orthonormal Wiener-Askey family is the constant 1, which makes
-      ``G[0, :]`` the column sums of ``Phi``.
-    - ``mean(Yhat^2) = diag(c^T G c) / N``.
-
-    This is the *sample* variance of the surrogate on the fitted rows, not the
-    surrogate's variance under the input measure. The two differ whenever the
-    empirical Gram is not the identity, which is the usual case at finite
-    ``N``. :func:`analyze` needs the sample one, because it divides by the
-    sample variance of ``Y``.
-
-    Args:
-        gram_raw: ``Phi^T Phi`` without the ridge term, shape
-            ``(n_terms, n_terms)``.
-        coeffs_flat: Fitted coefficients, shape ``(n_terms, T*K)``.
-        n_rows: Number of rows the Gram was accumulated over.
-
-    Returns:
-        Per-slice sample variance of the fitted values, shape ``(T*K,)``.
-    """
-    mean_hat = (gram_raw[0, :] @ coeffs_flat) / n_rows  # (T*K,)
-    mean_sq = jnp.einsum("jk,ji,ik->k", coeffs_flat, gram_raw, coeffs_flat) / n_rows
-    # A variance is never negative; rounding on a near-constant slice can put
-    # this difference a step below zero.
-    return jnp.maximum(mean_sq - mean_hat**2, 0.0)
 
 
 def _fit_pce_streamed(
@@ -376,11 +352,12 @@ def _fit_pce_streamed(
     ridge: float,
     batch_size: int | None,
     diagnostics: bool,
-) -> tuple[Array, Array | None, Array]:
+) -> tuple[Array, Array | None, Array | None]:
     """Fit the PCE by streaming row batches.
 
-    The normal-equation pass always runs. A second pass computes LOO only when
-    ``diagnostics`` is true. Neither pass holds more than one
+    The normal-equation pass always runs. A second pass computes LOO and the
+    in-sample RMSE (from the same residuals) only when ``diagnostics`` is true.
+    Neither pass holds more than one
     ``(batch, n_terms)`` design block:
 
     1. Accumulate ``G = Phi^T Phi`` (n_terms, n_terms) and ``B = Phi^T Y``
@@ -413,11 +390,8 @@ def _fit_pce_streamed(
 
     Returns:
         Tuple of ``coeffs_flat``, shape ``(n_terms, T*K)``, the per-slice LOO
-        RMSE, shape ``(T*K,)`` or ``None`` when diagnostics are disabled, and
-        the unregularized Gram matrix ``G = Phi^T Phi``, shape
-        ``(n_terms, n_terms)``. ``G`` is
-        ``n_terms``-square, so returning it carries nothing that scales with
-        ``N``; :func:`_fitted_variance` reads the fitted-value moments off it.
+        RMSE, shape ``(T*K,)``, and the per-slice in-sample RMSE, same shape.
+        Both are ``None`` when diagnostics are disabled.
     """
     N = X_ref.shape[0]
     n_terms = multi_index.shape[0]
@@ -434,8 +408,8 @@ def _fit_pce_streamed(
     # nothing to either pass.
     n_batches = math.ceil(N / b)
     n_pad = n_batches * b - N
-    X_p = _pad_rows(X_ref, n_pad)
-    Y_p = _pad_rows(Y_flat, n_pad)
+    X_p = pad_rows(X_ref, n_pad)
+    Y_p = pad_rows(Y_flat, n_pad)
     w = jnp.concatenate([jnp.ones((N,), dtype=dtype), jnp.zeros((n_pad,), dtype=dtype)])
     rows = [(i * b, i * b + b) for i in range(n_batches)]
 
@@ -456,14 +430,16 @@ def _fit_pce_streamed(
         # nothing that scales with N and applies the same clip as the
         # single-pass path.
         gram_chol = jnp.linalg.cholesky(gram)
-        sse = jnp.zeros((M,), dtype=dtype)
+        sse = (jnp.zeros((M,), dtype=dtype), jnp.zeros((M,), dtype=dtype))
         for lo, hi in rows:
             sse = acc_loo(X_p[lo:hi], Y_p[lo:hi], w[lo:hi], coeffs_flat, gram_chol, sse)
-        loo_flat = jnp.sqrt(sse / N)  # == sqrt(mean(loo_residuals^2, axis=0))
+        loo_flat = jnp.sqrt(sse[0] / N)  # == sqrt(mean(loo_residuals^2, axis=0))
+        rmse_flat = jnp.sqrt(sse[1] / N)  # in-sample, from the same residuals
     else:
         loo_flat = None
+        rmse_flat = None
 
-    return coeffs_flat, loo_flat, G
+    return coeffs_flat, loo_flat, rmse_flat
 
 
 def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
@@ -505,6 +481,133 @@ def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
     return itemsize * N * (2 * n_terms + 2 * M)
 
 
+@partial(jax.jit, static_argnames=("problem", "order"))
+def _single_pass_coefficients(
+    problem: Problem, X: Array, Y_3d: Array, ridge: float, *, order: int
+) -> tuple[Array, Array, Array]:
+    """Fit the expansion in one pass, as a single compiled computation.
+
+    Run eagerly, every op in this body compiles on its own on the first call
+    (dozens of tiny XLA programs). Jitted, they compile once together. The
+    problem and the effective order are static, so the multi-index and the
+    basis family per dimension are trace-time constants.
+
+    The coefficients come from this one program whether or not the caller
+    wants diagnostics, so :func:`analyze` and :func:`indices` fit bit for bit
+    the same expansion. The diagnostics run in :func:`_single_pass_loo`.
+
+    Args:
+        problem: Parameter names and distributions (static).
+        X: Inputs in physical units, shape ``(N, D)``.
+        Y_3d: Outputs in canonical layout, shape ``(N, T, K)``.
+        ridge: Tikhonov parameter added to the Gram matrix.
+        order: Effective (post-``_auto_order``) polynomial order.
+
+    Returns:
+        ``(coefficients, Phi, gram)``: coefficients in terms-last layout, shape
+        ``(T, K, n_terms)``, the design matrix and the regularized Gram
+        matrix. A caller that skips the diagnostics drops the last two.
+    """
+    N = X.shape[0]
+    _, T, K = Y_3d.shape
+    mi = build_multi_index(problem.n_params, order)
+    X_ref, input_types = _map_to_reference(X, problem, order)
+    Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
+    Phi = build_design_matrix(X_ref, mi, input_types, order)
+    gram = Phi.T @ Phi + ridge * jnp.eye(Phi.shape[1])
+    # The basis is identical for every output slice (the effective order
+    # depends only on N and D), so fitting all T*K slices is ONE shared
+    # solve with multiple right-hand sides. Solving against
+    # ``Phi.T @ Y_flat`` (an (n_terms, M) product) rather than building
+    # ``solve(gram, Phi.T)`` (an (n_terms, N) product held across the LOO
+    # step) matches the streamed path and drops a third N-sized array.
+    coeffs_flat = jnp.linalg.solve(gram, Phi.T @ Y_flat)  # (n_terms, T*K)
+    # Terms-last layout, matching HDMR's Sa convention (slices lead).
+    return coeffs_flat.T.reshape(T, K, mi.shape[0]), Phi, gram
+
+
+@jax.jit
+def _single_pass_loo(
+    Phi: Array, gram: Array, Y_3d: Array, coefficients: Array
+) -> tuple[Array, Array]:
+    """Per-slice LOO and in-sample RMSE of a single-pass fit.
+
+    Args:
+        Phi: Design matrix, shape ``(N, n_terms)``.
+        gram: Regularized Gram matrix, shape ``(n_terms, n_terms)``.
+        Y_3d: Outputs in canonical layout, shape ``(N, T, K)``.
+        coefficients: Fitted coefficients, shape ``(T, K, n_terms)``.
+
+    Returns:
+        ``(loo_flat, rmse_flat)``, each of shape ``(T*K,)``.
+    """
+    N = Phi.shape[0]
+    Y_flat = Y_3d.reshape(N, -1)
+    coeffs_flat = coefficients.reshape(-1, coefficients.shape[-1]).T  # (n_terms, T*K)
+    # Pass the small Cholesky factor of the Gram matrix, so loo_error reuses
+    # the factorization without carrying anything that scales with N.
+    loo_flat = loo_error(Phi, Y_flat, coeffs_flat, gram_chol=jnp.linalg.cholesky(gram))
+    rmse_flat = jnp.sqrt(jnp.mean((Y_flat - Phi @ coeffs_flat) ** 2, axis=0))
+    return loo_flat, rmse_flat
+
+
+@partial(jax.jit, static_argnames=("D", "order", "budget"))
+def _sobol_from_fit(
+    coefficients: Array, Y_3d: Array, *, D: int, order: int, budget: int
+) -> tuple[Array, Array, Array]:
+    """Read the Sobol indices off a fitted expansion, as one compiled call.
+
+    ``budget`` is the memory budget in bytes. It is static only so that a
+    changed budget retraces :func:`sobol_from_coefficients`, which sizes its
+    pair chunks from it at trace time.
+
+    Args:
+        coefficients: Fitted coefficients, shape ``(T, K, n_terms)``.
+        Y_3d: Outputs in canonical layout, shape ``(N, T, K)``.
+        D: Number of parameters.
+        order: Effective polynomial order that built the multi-index.
+        budget: Active memory budget in bytes.
+
+    Returns:
+        ``(S1, ST, S2)`` in canonical ``(T, K, ...)`` layout.
+    """
+    _ = budget
+    N = Y_3d.shape[0]
+    # is_constant reads the raw Y column, not the fit: a constant slice's
+    # fitted non-constant coefficients are rarely bit-exact zero in float32
+    # (M1), so the fit-only guard inside sobol_from_coefficients would miss
+    # most of them.
+    is_constant = _is_constant_slice(Y_3d.reshape(N, -1)).reshape(Y_3d.shape[1:])
+    return sobol_from_coefficients(coefficients, build_multi_index(D, order), is_constant)
+
+
+@jax.jit
+def _fit_summary(
+    loo_flat: Array, rmse_flat: Array, Y_3d: Array
+) -> tuple[Array, Array, Array, Array]:
+    """Shape the fit diagnostics and derive the explained variance.
+
+    Args:
+        loo_flat: Per-slice LOO RMSE, shape ``(T*K,)``.
+        rmse_flat: Per-slice in-sample RMSE, shape ``(T*K,)``.
+        Y_3d: Outputs in canonical layout, shape ``(N, T, K)``.
+
+    Returns:
+        ``(loo, rmse, explained_variance, std)``, each of shape ``(T, K)``,
+        where ``std`` is ``sqrt(Var(Y))`` per slice.
+    """
+    T, K = Y_3d.shape[1:]
+    total_var = jnp.var(Y_3d, axis=0)  # (T, K)
+    is_constant = _is_constant_slice(Y_3d.reshape(Y_3d.shape[0], -1)).reshape(T, K)
+    loo = loo_flat.reshape(T, K)
+    rmse = rmse_flat.reshape(T, K)
+    # 1 - in-sample MSE / sample variance of Y, on the same rows. The residual
+    # comes straight from the fit, so a good fit cannot be pushed above 1 by
+    # a mismatch between numerator and denominator.
+    explained_variance = jnp.where(is_constant, jnp.nan, 1.0 - rmse**2 / total_var)
+    return loo, rmse, explained_variance, jnp.sqrt(total_var)
+
+
 def _fit_pce_core(
     problem: Problem,
     X: Array,
@@ -543,12 +646,12 @@ def _fit_pce_core(
     from :func:`effective_order` without running a fit at all.
 
     Args:
-        diagnostics: Compute ``loo_flat`` and ``fitted_var``. Off for
+        diagnostics: Compute ``loo_flat`` and ``rmse_flat``. Off for
             :func:`indices` and every bootstrap replicate, neither of which
             reads them: on the single-pass path this skips a Cholesky
             factor, an ``(n_terms, N)`` triangular solve and an ``(N, T*K)``
             residual array that the Sobol-index extraction never touches.
-            ``fitted_var`` is then ``None``. So is ``loo_flat`` on either fit
+            ``rmse_flat`` is then ``None``. So is ``loo_flat`` on either fit
             path.
     """
     Y_3d, _ = _prepare_Y(Y_canonical)
@@ -560,64 +663,46 @@ def _fit_pce_core(
     mi = build_multi_index(D, effective_order)
     n_terms = mi.shape[0]
 
-    # Map inputs to reference domain; (N, D) is small next to (N, n_terms).
-    X_ref, input_types = _map_to_reference(X, problem, effective_order)
-    Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
-
     # Streamed iff the caller's explicit batch width actually splits the
     # sample, or no width was given and the single-pass residents exceed the
     # budget. An explicit ``batch_size`` always wins over the budget, so
     # ``batch_size >= N`` runs the single-pass path even on an over-budget
     # problem — the library-wide semantics: ``batch_size`` sizes row blocks,
     # clamped to N, and never selects a different algorithm.
-    single_pass_bytes = _single_pass_fit_bytes(N, n_terms, T * K, X_ref.dtype.itemsize)
+    itemsize = jnp.dtype(jnp.result_type(X.dtype, float)).itemsize
+    single_pass_bytes = _single_pass_fit_bytes(N, n_terms, T * K, itemsize)
     if batch_size is not None:
         streamed = batch_size < N
     else:
         streamed = single_pass_bytes > get_memory_budget()
     if not streamed:
-        # Single-pass path: build the full design matrix and compute the Gram
-        # factorization once, reused for both fitting and LOO.
-        Phi = build_design_matrix(X_ref, mi, input_types, effective_order)
-        gram_raw = Phi.T @ Phi
-        gram = gram_raw + ridge * jnp.eye(Phi.shape[1])
-        # The basis is identical for every output slice (the effective order
-        # depends only on N and D), so fitting all T*K slices is ONE shared
-        # solve with multiple right-hand sides. Solving against
-        # ``Phi.T @ Y_flat`` (an (n_terms, M) product) rather than building
-        # ``solve(gram, Phi.T)`` (an (n_terms, N) product held across the LOO
-        # step) matches the streamed path and drops a third N-sized array.
-        coeffs_flat = jnp.linalg.solve(gram, Phi.T @ Y_flat)  # (n_terms, T*K)
+        # Single-pass path: one jitted call maps the inputs, builds the design
+        # matrix, solves the normal equations and (optionally) the exact LOO.
+        coeffs, Phi, gram = _single_pass_coefficients(
+            problem, X, Y_3d, ridge, order=effective_order
+        )
+        loo_flat = None
+        rmse_flat = None
         if diagnostics:
-            # Per-slice LOO RMSE from the shared hat-matrix leverage. Pass
-            # the small Cholesky factor of the Gram matrix already built
-            # above, so loo_error reuses the factorization without carrying
-            # anything that scales with N.
-            loo_flat = loo_error(Phi, Y_flat, coeffs_flat, gram_chol=jnp.linalg.cholesky(gram))
-        else:
-            loo_flat = None
+            loo_flat, rmse_flat = _single_pass_loo(Phi, gram, Y_3d, coeffs)
     else:
         # Streamed path: same normal equations and exact LOO, accumulated
         # over row batches so peak memory stays within the budget.
-        coeffs_flat, loo_flat, gram_raw = _fit_pce_streamed(
-            X_ref,
-            Y_flat,
-            mi,
-            input_types,
-            effective_order,
-            ridge,
-            batch_size,
-            diagnostics,
+        # Map inputs to reference domain; (N, D) is small next to (N, n_terms).
+        X_ref, input_types = _map_to_reference(X, problem, effective_order)
+        Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
+        coeffs_flat, loo_flat, rmse_flat = _fit_pce_streamed(
+            X_ref, Y_flat, mi, input_types, effective_order, ridge, batch_size, diagnostics
         )
-    # Terms-last layout, matching HDMR's Sa convention (slices lead).
-    coeffs = coeffs_flat.T.reshape(T, K, n_terms)
+        # Terms-last layout, matching HDMR's Sa convention (slices lead).
+        coeffs = coeffs_flat.T.reshape(T, K, n_terms)
 
     return _PCEFit(
         coefficients=coeffs,
         multi_index=mi,
         order=effective_order,
         loo_flat=loo_flat,
-        fitted_var=_fitted_variance(gram_raw, coeffs_flat, N) if diagnostics else None,
+        rmse_flat=rmse_flat,
         streamed=streamed,
     )
 
@@ -637,7 +722,7 @@ def _indices_3d(
     The shared body of :func:`indices` and of one bootstrap replicate. It
     takes ``Y`` already promoted to ``(N, T, K)`` and returns ``(T, K, ...)``
     arrays, so neither caller squeezes twice. Neither caller reads
-    ``loo_flat`` or ``fitted_var``, so the fit skips them
+    ``loo_flat`` or ``rmse_flat``, so the fit skips them
     (``diagnostics=False``); a bootstrap run is ``n_bootstrap`` of these.
     """
     fit = _fit_pce_core(
@@ -650,9 +735,13 @@ def _indices_3d(
         batch_size=batch_size,
         diagnostics=False,
     )
-    N = Y_3d.shape[0]
-    is_constant = _is_constant_slice(Y_3d.reshape(N, -1)).reshape(Y_3d.shape[1:])
-    return sobol_from_coefficients(fit.coefficients, fit.multi_index, is_constant)
+    return _sobol_from_fit(
+        fit.coefficients,
+        Y_3d,
+        D=problem.n_params,
+        order=fit.order,
+        budget=get_memory_budget(),
+    )
 
 
 def _bootstrap_indices(
@@ -719,7 +808,7 @@ def indices(
     ridge: float = 1e-8,
     fit_ratio: float = 0.5,
     batch_size: int | None = None,
-) -> tuple[Array, ...]:
+) -> PCEIndices:
     """Compute PCE Sobol indices as plain arrays, with no diagnostics.
 
     This is the transformable core of :func:`analyze`. It fits the same
@@ -734,7 +823,7 @@ def indices(
     Use :func:`analyze` for ordinary analysis. Nothing here checks the
     inputs, so a single NaN reaches the normal equations and turns every
     index into NaN without a word. Nothing here reports the fit quality
-    either: ``loo_rmse`` and ``explained_variance`` are what tell you whether
+    either: ``cv_rmse`` and ``explained_variance`` are what tell you whether
     a PCE index means anything, and only :func:`analyze` computes them.
 
     The polynomial degree may still be reduced to fit the sample budget, as
@@ -762,7 +851,8 @@ def indices(
             summation order.
 
     Returns:
-        ``(S1, ST, S2)``, at the shapes ``analyze`` reports for this ``Y``.
+        A :class:`PCEIndices` ``(S1, ST, S2)``, at the shapes ``analyze``
+        reports for this ``Y``.
 
     Raises:
         ValueError: If ``order``, ``ridge``, ``fit_ratio`` or ``batch_size``
@@ -775,9 +865,9 @@ def indices(
             :func:`analyze`), or ``problem`` has a categorical parameter,
             which no orthogonal polynomial family covers.
     """
-    from jaxgsa.pce import SPEC
+    from jaxgsa.pce import _SPEC
 
-    D = problem.num_vars
+    D = problem.n_params
     N = X.shape[0]
     min_terms = D + 1  # term count of the order-1 expansion
     check_scalars(
@@ -793,12 +883,13 @@ def indices(
                 f"order-1 expansion ({min_terms} terms for D={D} parameters); "
                 "raise fit_ratio or provide more rows",
             ),
-        )
+        ),
+        method="jaxgsa.pce.indices",
     )
     # The same capability gate analyze applies through prepare().
-    # problem.has_correlated_inputs is static host-side metadata, so the check
+    # problem.dependence is static host-side metadata, so the check
     # runs at trace time and the core still composes with jit/vmap/grad.
-    gates(SPEC, problem, method="jaxgsa.pce.indices")
+    gates(_SPEC, problem, method="jaxgsa.pce.indices")
     Y_3d, layout = _prepare_Y(Y)
     S1, ST, S2 = _indices_3d(
         problem,
@@ -809,7 +900,9 @@ def indices(
         fit_ratio=fit_ratio,
         batch_size=batch_size,
     )
-    return layout.squeeze(S1), layout.squeeze(ST), layout.squeeze(S2, n_trailing=2)
+    return PCEIndices(
+        S1=layout.squeeze(S1), ST=layout.squeeze(ST), S2=layout.squeeze(S2, n_trailing=2)
+    )
 
 
 def analyze(
@@ -824,7 +917,7 @@ def analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
@@ -837,7 +930,7 @@ def analyze(
     (Sudret, 2008), with no extra model evaluations. Compared with Monte
     Carlo Sobol estimators, PCE needs far fewer samples when the model
     response is smooth. It only captures effects the polynomial can
-    represent, so check ``PCEResult.loo_rmse`` before trusting the indices.
+    represent, so check ``PCEResult.cv_rmse`` before trusting the indices.
 
     Args:
         problem: Parameter names and distributions.
@@ -888,7 +981,7 @@ def analyze(
             propagated through the fit. It does not measure truncation
             error: an expansion too coarse to represent the model gives a
             biased index, and every replicate inherits the same bias, so the
-            interval stays narrow and wrong. ``loo_rmse`` and
+            interval stays narrow and wrong. ``cv_rmse`` and
             ``explained_variance`` are what report that.
         conf_level: Two-sided confidence level for the intervals.
         ci_method: How the interval endpoints are formed. ``"quantile"``
@@ -936,6 +1029,7 @@ def analyze(
             (``D + 1 > int(fit_ratio * N)``, which would make the fit
             underdetermined).
     """
+    key = as_key(key, "pce")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
@@ -949,14 +1043,14 @@ def analyze(
         )
     Y = cast(Array, Y)
 
-    from jaxgsa.pce import SPEC
+    from jaxgsa.pce import _SPEC
 
     # The non-finite check runs here, in the public entry point only.
     # Everything downstream (`_fit_pce_core`, and Shapley routing through
     # `PCEResult.shapley`) then works on data the policy has already passed,
     # so the policy is applied exactly once per user call.
     ctx = prepare(
-        SPEC,
+        _SPEC,
         problem,
         Y,
         X=X,
@@ -967,15 +1061,7 @@ def analyze(
             at_least("fit_ratio", fit_ratio, 0.0),
             require(fit_ratio <= 1.0, f"fit_ratio must be <= 1, got {fit_ratio}"),
             at_least("batch_size", batch_size, 1),
-            at_least("n_bootstrap", n_bootstrap, 0),
-            one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            in_open_interval("conf_level", conf_level, 0.0, 1.0),
-            # Checked here, with the other cheap argument checks, so a
-            # missing key is reported before the point estimate is paid for.
-            require(
-                not (n_bootstrap > 0 and key is None),
-                "key is required when n_bootstrap > 0",
-            ),
+            *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
         ),
         min_kept=_MIN_ROWS,
     )
@@ -986,7 +1072,7 @@ def analyze(
     # has terms) used to pass silently and hand back a plausible-looking but
     # meaningless index. N is the row count after `on_invalid` has run, so
     # this reads the fit's real sample budget.
-    _D = problem.num_vars
+    _D = problem.n_params
     _N = X.shape[0]
     _min_terms = _D + 1
     if _min_terms > int(fit_ratio * _N):
@@ -995,9 +1081,6 @@ def analyze(
             f"cannot fit even the order-1 expansion ({_min_terms} terms for "
             f"D={_D} parameters); raise fit_ratio or provide more rows"
         )
-
-    # Per-slice output variance for the explained-variance diagnostic below.
-    total_var = jnp.var(ctx.Y3, axis=0)  # (T, K)
 
     t0 = _verbose.tic()
     fit = _fit_pce_core(
@@ -1019,28 +1102,22 @@ def analyze(
 
     # Sobol indices are extracted analytically from the coefficients
     # (Sudret 2008), batched over all slices: no extra sampling, no loops.
-    # is_constant reads the raw Y column, not the fit: a constant slice's
-    # fitted non-constant coefficients are rarely bit-exact zero in float32
-    # (M1), so the fit-only guard inside sobol_from_coefficients would miss
-    # most of them.
-    is_constant = _is_constant_slice(ctx.Y3.reshape(ctx.Y3.shape[0], -1)).reshape(T, K)
-    S1, ST, S2 = sobol_from_coefficients(
-        fit.coefficients, fit.multi_index, is_constant
-    )  # (T,K,D), (T,K,D,D)
-
-    # Per-slice LOO RMSE as a cheap goodness-of-fit diagnostic, computed by
-    # the fit path (single-pass hat-matrix diagonal, or the streamed
-    # equivalent); the leverage is shared by every slice. _fit_pce_core ran
-    # with its default diagnostics=True here, so both fields are populated.
+    # Per-slice LOO RMSE (cv_rmse) and in-sample RMSE are goodness-of-fit
+    # diagnostics, computed by the fit path (single-pass hat-matrix diagonal,
+    # or the streamed equivalent); the leverage is shared by every slice.
+    # _fit_pce_core ran with its default diagnostics=True here, so both
+    # fields are populated. The extraction is two jitted calls; the warnings
+    # below then read their outputs on the host.
     assert fit.loo_flat is not None
-    assert fit.fitted_var is not None
-    loo = fit.loo_flat.reshape(T, K)
-    # Numerator and denominator are both sample quantities on the same rows:
-    # the sample variance of the fitted values over the sample variance of Y.
-    # Summing the squared non-constant coefficients instead would measure the
-    # surrogate under the *input measure* while the denominator measures the
-    # data, and that mismatch is what used to push a good fit above 1.
-    explained_variance = jnp.where(is_constant, jnp.nan, fit.fitted_var.reshape(T, K) / total_var)
+    assert fit.rmse_flat is not None
+    S1, ST, S2 = _sobol_from_fit(
+        fit.coefficients,
+        ctx.Y3,
+        D=problem.n_params,
+        order=fit.order,
+        budget=get_memory_budget(),
+    )  # S1/ST (T,K,D), S2 (T,K,D,D)
+    loo, rmse, explained_variance, y_std = _fit_summary(fit.loo_flat, fit.rmse_flat, ctx.Y3)
 
     # Both fit-quality checks run here, in the public entry point only, so
     # that `indices` stays free of host-side side effects and one analyze call
@@ -1053,17 +1130,17 @@ def analyze(
         explained_variance,
         quantity="explained_variance",
         advice_low=(
-            "Raise order until loo_rmse stops falling, or use jaxgsa.hdmr for a "
+            "Raise order until cv_rmse stops falling, or use jaxgsa.hdmr for a "
             "response with kinks a polynomial cannot follow."
         ),
         # Unreachable for PCE, whose diagnostic is a true in-sample R-squared
         # and so cannot pass 1. Passed for the shared signature.
         advice_high="Check the output for a near-constant slice.",
     )
-    warn_loo_overfit(
+    warn_cv_overfit(
         "jaxgsa.pce",
         loo,
-        jnp.sqrt(total_var),
+        y_std,
         explained_variance,
         advice="Refit with a lower order or more samples.",
     )
@@ -1117,6 +1194,7 @@ def analyze(
     coeffs = ctx.squeeze(fit.coefficients)
     S2 = ctx.squeeze(S2, n_trailing=2)
     loo = ctx.squeeze(loo, n_trailing=0)
+    rmse = ctx.squeeze(rmse, n_trailing=0)
     explained_variance = ctx.squeeze(explained_variance, n_trailing=0)
 
     result = PCEResult(
@@ -1127,7 +1205,8 @@ def analyze(
         coefficients=coeffs,
         multi_index=fit.multi_index,
         order=fit.order,
-        loo_rmse=loo,
+        rmse=rmse,
+        cv_rmse=loo,
         explained_variance=explained_variance,
         streamed=fit.streamed,
         invalid=invalid,

@@ -66,6 +66,20 @@ def data_4d_ntk(data_4d):
     return X, Y3
 
 
+@pytest.fixture(scope="module")
+def single_4d(problem_4d, data_4d):
+    """The single-pass order-3 fit on ``data_4d``, shared by the comparison tests."""
+    X, Y = data_4d
+    return pce.analyze(problem_4d, X, Y, order=3)
+
+
+@pytest.fixture(scope="module")
+def single_4d_ntk(problem_4d, data_4d_ntk):
+    """The single-pass order-3 fit on ``data_4d_ntk``."""
+    X, Y3 = data_4d_ntk
+    return pce.analyze(problem_4d, X, Y3, order=3)
+
+
 def _assert_results_match(a, b, *, rtol=RTOL, atol=ATOL):
     """Assert every public PCEResult field matches between two runs."""
     np.testing.assert_allclose(np.asarray(a.coefficients), np.asarray(b.coefficients), rtol, atol)
@@ -76,8 +90,10 @@ def _assert_results_match(a, b, *, rtol=RTOL, atol=ATOL):
     np.testing.assert_allclose(
         np.asarray(a.explained_variance), np.asarray(b.explained_variance), rtol, atol
     )
-    assert a.loo_rmse is not None and b.loo_rmse is not None
-    np.testing.assert_allclose(np.asarray(a.loo_rmse), np.asarray(b.loo_rmse), rtol, atol)
+    assert a.rmse is not None and b.rmse is not None
+    np.testing.assert_allclose(np.asarray(a.rmse), np.asarray(b.rmse), rtol, atol)
+    assert a.cv_rmse is not None and b.cv_rmse is not None
+    np.testing.assert_allclose(np.asarray(a.cv_rmse), np.asarray(b.cv_rmse), rtol, atol)
     assert a.order == b.order
     np.testing.assert_array_equal(a.multi_index, b.multi_index)
 
@@ -85,21 +101,16 @@ def _assert_results_match(a, b, *, rtol=RTOL, atol=ATOL):
 class TestForcedStreaming:
     """batch_size=int forces the streamed fit; results match single-pass."""
 
-    def test_scalar_output_matches(self, problem_4d, data_4d):
-        X, Y = data_4d
-        single = pce.analyze(problem_4d, X, Y, order=3)
-        streamed = pce.analyze(problem_4d, X, Y, order=3, batch_size=300)
-        _assert_results_match(streamed, single)
-
-    def test_ntk_output_matches(self, problem_4d, data_4d_ntk):
+    def test_ntk_output_matches(self, problem_4d, data_4d_ntk, single_4d_ntk):
         X, Y3 = data_4d_ntk
-        single = pce.analyze(problem_4d, X, Y3, order=3)
         streamed = pce.analyze(problem_4d, X, Y3, order=3, batch_size=257)
         assert streamed.S1.shape == (2, 2, 4)
-        assert streamed.loo_rmse is not None and streamed.loo_rmse.shape == (2, 2)
-        _assert_results_match(streamed, single)
+        assert streamed.cv_rmse is not None and streamed.cv_rmse.shape == (2, 2)
+        _assert_results_match(streamed, single_4d_ntk)
 
-    def test_batch_size_at_least_n_degenerates_to_single_pass(self, problem_4d, data_4d):
+    def test_batch_size_at_least_n_degenerates_to_single_pass(
+        self, problem_4d, data_4d, single_4d
+    ):
         """Tier T4 (internal consistency): batch_size >= N is the single pass.
 
         The library-wide ``batch_size`` contract: it sizes row blocks, clamped
@@ -110,7 +121,7 @@ class TestForcedStreaming:
         as HDMR's is.
         """
         X, Y = data_4d
-        single = pce.analyze(problem_4d, X, Y, order=3)
+        single = single_4d
         assert single.streamed is False
 
         full_block = pce.analyze(problem_4d, X, Y, order=3, batch_size=10**6)
@@ -126,22 +137,6 @@ class TestForcedStreaming:
         assert split.streamed is True
         _assert_results_match(split, single)
 
-    def test_explicit_batch_size_wins_over_the_budget(self, problem_4d, data_4d):
-        """Tier T4 (internal consistency): explicit widths beat the budget.
-
-        The budget only decides when ``batch_size`` is ``None``. On a problem
-        whose single-pass residents exceed the budget, an explicit
-        ``batch_size >= N`` must still run the single pass — the caller chose
-        one full block, and explicit chunk widths always win.
-        """
-        X, Y = data_4d
-        jaxgsa.config.set_memory_budget(1, unit="b")
-        auto = pce.analyze(problem_4d, X, Y, order=3)
-        assert auto.streamed is True
-
-        forced_full = pce.analyze(problem_4d, X, Y, order=3, batch_size=X.shape[0])
-        assert forced_full.streamed is False
-
     def test_invalid_batch_size_raises(self, problem_4d, data_4d):
         X, Y = data_4d
         with pytest.raises(ValueError, match="batch_size"):
@@ -151,7 +146,7 @@ class TestForcedStreaming:
 class TestPairMaskChunking:
     """The S2 pair mask streams over pair chunks without moving a bit."""
 
-    def test_s2_survives_a_chunked_pair_axis(self, problem_4d, data_4d):
+    def test_s2_survives_a_chunked_pair_axis(self, single_4d):
         """Tier T4 (internal consistency): pair-axis chunking is honest.
 
         ``sobol_from_coefficients`` builds an ``(n_terms, n_pairs)`` float
@@ -167,8 +162,7 @@ class TestPairMaskChunking:
         """
         from jaxgsa.pce._engine import build_multi_index, sobol_from_coefficients
 
-        X, Y = data_4d
-        result = pce.analyze(problem_4d, X, Y, order=3)
+        result = single_4d
         coeffs = jnp.asarray(result.coefficients)
         mi = build_multi_index(4, result.order)
 
@@ -198,24 +192,33 @@ class TestPairMaskChunking:
 class TestAutoEngage:
     """A small global budget flips the default path to streaming."""
 
-    def test_tiny_budget_streams_and_matches(self, problem_4d, data_4d):
+    def test_tiny_budget_streams_and_matches(self, problem_4d, data_4d, single_4d):
         """Tier T4 (internal consistency): a small budget engages streaming.
 
         This is the structural guard for the whole file. Every other test here
         compares the two paths, and they agree by design, so a change to the
         memory estimate that stopped the streamed path engaging at all would
         leave those tests green. Asserting the reported path fails instead.
+
+        An explicit ``batch_size`` still wins over the budget. The budget only
+        decides when ``batch_size`` is ``None``. On a problem whose
+        single-pass residents exceed the budget, an explicit
+        ``batch_size >= N`` must still run the single pass: the caller chose
+        one full block, and explicit chunk widths always win.
         """
         X, Y = data_4d
-        single = pce.analyze(problem_4d, X, Y, order=3)
+        single = single_4d
         assert single.streamed is False
 
-        saved = jaxgsa.config.get_memory_budget()
+        saved = jaxgsa.config.get_memory_budget(unit="b")
         try:
             jaxgsa.config.set_memory_budget(64 * 1024, unit="b")  # 64 KiB: forces streaming
             streamed = pce.analyze(problem_4d, X, Y, order=3)
+            jaxgsa.config.set_memory_budget(1, unit="b")
+            forced_full = pce.analyze(problem_4d, X, Y, order=3, batch_size=X.shape[0])
         finally:
             jaxgsa.config.set_memory_budget(saved, unit="b")
-        assert jaxgsa.config.get_memory_budget() == saved
+        assert jaxgsa.config.get_memory_budget(unit="b") == saved
+        assert forced_full.streamed is False
         assert streamed.streamed is True
         _assert_results_match(streamed, single)

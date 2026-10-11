@@ -72,6 +72,16 @@ def case(request):
     return CASES[request.param]()
 
 
+@pytest.fixture(params=sorted(CASES), ids=sorted(CASES))
+def small_case(request):
+    """A 128-row ``(problem, X, Y)`` triple, for the finite-difference check.
+
+    At order 2 the expansion has 10 terms, so 128 rows still oversample it
+    by more than a factor of twelve.
+    """
+    return CASES[request.param](n=128)
+
+
 # ---------------------------------------------------------------------------
 # 1. The core returns what analyze reports
 # ---------------------------------------------------------------------------
@@ -81,40 +91,31 @@ def test_indices_matches_analyze(case):
     """Tier T4: ``indices`` returns exactly what ``analyze`` reports.
 
     ``analyze`` fits through the same core, so this guards the wiring rather
-    than the estimator maths.
+    than the estimator maths. The core returns a named tuple of three arrays,
+    with no result object to unwrap, and the ``(N, T, K)`` layout comes back
+    at the same shapes.
     """
     problem, X, Y = case
     result = pce.analyze(problem, X, Y, order=3)
-    S1, ST, S2 = pce.indices(problem, X, Y, order=3)
+    out = pce.indices(problem, X, Y, order=3)
 
+    assert isinstance(out, tuple)
+    assert len(out) == 3
+    assert all(isinstance(a, jax.Array) for a in out)
+    S1, ST, S2 = out
     np.testing.assert_array_equal(np.asarray(S1), np.asarray(result.S1))
     np.testing.assert_array_equal(np.asarray(ST), np.asarray(result.ST))
     np.testing.assert_array_equal(np.asarray(S2), np.asarray(result.S2))
 
-
-def test_indices_matches_analyze_for_a_time_series(case):
-    """Tier T4: the ``(N, T, K)`` layout comes back at the same shapes."""
-    problem, X, Y = case
     Y3 = jnp.stack([jnp.stack([Y, 2.0 * Y], axis=-1), jnp.stack([Y**2, -Y], axis=-1)], axis=1)
     assert Y3.shape == (X.shape[0], 2, 2)
-
-    result = pce.analyze(problem, X, Y3, order=2)
+    result3 = pce.analyze(problem, X, Y3, order=2)
     S1, ST, S2 = pce.indices(problem, X, Y3, order=2)
 
-    assert S1.shape == result.S1.shape == (2, 2, 3)
-    assert S2.shape == result.S2.shape == (2, 2, 3, 3)
-    np.testing.assert_array_equal(np.asarray(S1), np.asarray(result.S1))
-    np.testing.assert_array_equal(np.asarray(ST), np.asarray(result.ST))
-
-
-def test_indices_returns_a_bare_tuple(case):
-    """Tier T4: three arrays, no result object, nothing to unwrap."""
-    problem, X, Y = case
-    out = pce.indices(problem, X, Y, order=2)
-
-    assert type(out) is tuple
-    assert len(out) == 3
-    assert all(isinstance(a, jax.Array) for a in out)
+    assert S1.shape == result3.S1.shape == (2, 2, 3)
+    assert S2.shape == result3.S2.shape == (2, 2, 3, 3)
+    np.testing.assert_array_equal(np.asarray(S1), np.asarray(result3.S1))
+    np.testing.assert_array_equal(np.asarray(ST), np.asarray(result3.ST))
 
 
 # ---------------------------------------------------------------------------
@@ -122,11 +123,12 @@ def test_indices_returns_a_bare_tuple(case):
 # ---------------------------------------------------------------------------
 
 
-def test_indices_is_jittable(case):
-    """Tier T4: ``jit`` traces ``indices`` and returns the eager values.
+def test_indices_is_jittable_and_vmappable(case):
+    """Tier T4: ``jit`` and ``vmap`` trace ``indices`` and return the eager values.
 
     The tolerance is float32 reassociation only: XLA fuses the Gram solve
-    differently under ``jit`` than the eager path does.
+    differently under ``jit`` than the eager path does. ``vmap`` maps the core
+    over a batch of output vectors.
     """
     problem, X, Y = case
     jitted = jax.jit(lambda outputs: pce.indices(problem, X, outputs, order=3))
@@ -137,69 +139,64 @@ def test_indices_is_jittable(case):
     np.testing.assert_allclose(np.asarray(S1_jit), np.asarray(S1), rtol=1e-5, atol=1e-6)
     np.testing.assert_allclose(np.asarray(ST_jit), np.asarray(ST), rtol=1e-5, atol=1e-6)
 
-
-def test_indices_is_vmappable(case):
-    """Tier T4: ``vmap`` maps ``indices`` over a batch of output vectors."""
-    problem, X, Y = case
     batch = jnp.stack([Y, 2.0 * Y + 1.0, Y**2])
 
     S1_batch, _, _ = jax.vmap(lambda outputs: pce.indices(problem, X, outputs, order=2))(batch)
 
-    assert S1_batch.shape == (3, problem.num_vars)
+    assert S1_batch.shape == (3, problem.n_params)
     for row, outputs in enumerate(batch):
         S1, _, _ = pce.indices(problem, X, outputs, order=2)
         np.testing.assert_allclose(np.asarray(S1_batch[row]), np.asarray(S1), rtol=1e-4, atol=1e-6)
 
 
-def test_jit_of_jacrev_of_the_inputs(case):
+def test_jit_of_jacrev_of_the_inputs(small_case):
     """Tier T4: ``jit(jacrev(...))`` differentiates an index w.r.t. ``X``.
 
     Differentiating through the sample is the harder direction: it runs the
     marginal transform, the design matrix and the Gram solve in reverse. A
     finite Jacobian with a non-zero entry is what says the chain closed.
     """
-    problem, X, Y = case
+    problem, X, Y = small_case
 
     def total_s1(inputs):
         return pce.indices(problem, inputs, Y, order=2)[0].sum()
 
     with jax.enable_x64():
-        jac = jax.jit(jax.jacrev(total_s1))(jnp.asarray(X, dtype=jnp.float64))
-
-    assert jac.shape == X.shape
-    assert np.isfinite(np.asarray(jac)).all()
-    assert np.abs(np.asarray(jac)).max() > 0.0
-
-    # A finite, non-zero Jacobian is not evidence it is the *right* Jacobian:
-    # a constant offset or a wrong sign would pass both checks above. Spot
-    # check a handful of entries against a central finite difference, which
-    # re-runs the whole chain (design matrix, Gram solve, index) at X +/- h
-    # and so exercises none of the autodiff path. Full-size X makes checking
-    # every entry too slow; a fixed, seeded sample of entries is cheap and
-    # deterministic. Measured worst-case agreement on this chain is 3e-9.
-    step = 1e-5
-    rng = np.random.default_rng(0)
-    n_rows, n_cols = X.shape
-    sample_rows = rng.choice(n_rows, size=min(6, n_rows), replace=False)
-    with jax.enable_x64():
         X64 = jnp.asarray(X, dtype=jnp.float64)
-        jac64 = np.asarray(jax.jacrev(total_s1)(X64))
+        jac = np.asarray(jax.jit(jax.jacrev(total_s1))(X64))
+
+        assert jac.shape == X.shape
+        assert np.isfinite(jac).all()
+        assert np.abs(jac).max() > 0.0
+
+        # A finite, non-zero Jacobian is not evidence it is the *right*
+        # Jacobian: a constant offset or a wrong sign would pass both checks
+        # above. Spot check a handful of entries against a central finite
+        # difference, which re-runs the whole chain (design matrix, Gram
+        # solve, index) at X +/- h and so exercises none of the autodiff
+        # path. A fixed, seeded sample of rows is cheap and deterministic.
+        # Measured worst-case agreement on this chain is 3e-9.
+        step = 1e-5
+        rng = np.random.default_rng(0)
+        n_rows, n_cols = X.shape
+        sample_rows = rng.choice(n_rows, size=3, replace=False)
+        total_s1_jit = jax.jit(total_s1)
         for row in sample_rows:
             for col in range(n_cols):
                 delta = jnp.zeros_like(X64).at[row, col].set(step)
-                plus = float(total_s1(X64 + delta))
-                minus = float(total_s1(X64 - delta))
+                plus = float(total_s1_jit(X64 + delta))
+                minus = float(total_s1_jit(X64 - delta))
                 fd = (plus - minus) / (2.0 * step)
-                np.testing.assert_allclose(jac64[row, col], fd, rtol=0, atol=3e-9)
+                np.testing.assert_allclose(jac[row, col], fd, rtol=0, atol=3e-9)
 
 
-def test_analyze_is_not_jittable(case):
+def test_analyze_is_not_jittable():
     """Tier T4: the split is real -- ``analyze`` cannot be traced.
 
     If this ever passes, ``analyze`` has stopped reading its data on the host
     and the two functions no longer differ in the way the docstrings claim.
     """
-    problem, X, Y = case
+    problem, X, Y = _uniform_case()
 
     with pytest.raises(Exception, match="[Tt]racer"):
         jax.jit(lambda outputs: pce.analyze(problem, X, outputs).S1)(Y)

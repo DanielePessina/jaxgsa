@@ -37,7 +37,7 @@ D = 3
 @pytest.fixture(scope="module")
 def derived():
     """Second-order Saltelli design on Ishigami, plus its derived Morris design."""
-    s = sobol.sample(ishigami.PROBLEM, 0, base_n=BASE_N, seed=0, verbose=False)
+    s = sobol.sample(ishigami.PROBLEM, base_n=BASE_N, seed=0, verbose=False)
     Y = ishigami.evaluate(jnp.asarray(s.samples))
     return s, Y, s.to_morris(verbose=False)
 
@@ -56,7 +56,7 @@ class TestDesignStructure:
     def test_block_count_independent_of_second_order(self):
         """The B-based block is deliberately unused, whatever the design variant."""
         s = sobol.sample(
-            ishigami.PROBLEM, 0, base_n=BASE_N, calc_second_order=False, seed=0, verbose=False
+            ishigami.PROBLEM, base_n=BASE_N, calc_second_order=False, seed=0, verbose=False
         )
         m = s.to_morris(verbose=False)
         assert m.n_trajectories == BASE_N
@@ -98,31 +98,25 @@ class TestOrientation:
 
     @staticmethod
     def _signed_mu(problem, model, *, swap: bool) -> np.ndarray:
-        s = sobol.sample(problem, 0, base_n=BASE_N, seed=0, verbose=False)
+        s = sobol.sample(problem, base_n=BASE_N, seed=0, verbose=False)
         Y = model(jnp.asarray(s.samples))
         m = s.to_morris(verbose=False)
         if swap:
             m = dataclasses.replace(m, ee_idx_before=m.ee_idx_after, ee_idx_after=m.ee_idx_before)
         return np.asarray(morris.analyze(m, Y).mu)
 
-    def test_monotone_model_gives_positive_mu(self):
+    def test_monotone_model_gives_signed_mu_and_a_swap_flips_it(self):
         problem = Problem(names=("x1", "x2"), bounds=((0.0, 1.0), (0.0, 1.0)))
 
         def model(X):
             return 4.0 * X[:, 0] + 2.0 * X[:, 1]
 
-        mu = self._signed_mu(problem, model, swap=False)
         # The derived design must report the true slopes, sign included.
+        mu = self._signed_mu(problem, model, swap=False)
         np.testing.assert_allclose(mu, [4.0, 2.0], rtol=1e-4)
-
-    def test_swapping_before_and_after_flips_the_sign(self):
-        problem = Problem(names=("x1", "x2"), bounds=((0.0, 1.0), (0.0, 1.0)))
-
-        def model(X):
-            return 4.0 * X[:, 0] + 2.0 * X[:, 1]
-
-        mu = self._signed_mu(problem, model, swap=True)
-        np.testing.assert_allclose(mu, [-4.0, -2.0], rtol=1e-4)
+        # Swapping before and after flips the sign.
+        mu_swapped = self._signed_mu(problem, model, swap=True)
+        np.testing.assert_allclose(mu_swapped, [-4.0, -2.0], rtol=1e-4)
 
 
 class TestJansenIdentity:
@@ -150,7 +144,7 @@ class TestAccuracy:
         """On a unit-cube linear model every EE equals the coefficient exactly."""
         coeffs = np.array([1.0, 2.0, 3.0])
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0.0, 1.0),) * 3)
-        s = sobol.sample(problem, 0, base_n=64, seed=1, verbose=False)
+        s = sobol.sample(problem, base_n=64, seed=1, verbose=False)
         Y = jnp.asarray(np.asarray(s.samples) @ coeffs)
         result = morris.analyze(s.to_morris(verbose=False), Y)
         np.testing.assert_allclose(np.asarray(result.mu_star), coeffs, atol=1e-4)
@@ -183,7 +177,7 @@ class TestGaussianInputs:
     )
 
     def test_delta_matches_unit_design_for_gaussians(self):
-        s = sobol.sample(self.PROBLEM, 0, base_n=256, seed=1, verbose=False)
+        s = sobol.sample(self.PROBLEM, base_n=256, seed=1, verbose=False)
         with pytest.warns(UserWarning, match="unbounded gaussian"):
             m = s.to_morris(verbose=False)
         assert s.unit is not None and s.expanded_to_unit is not None
@@ -198,27 +192,32 @@ class TestGaussianInputs:
         # source Sobol design, including when its physical rows are Gaussian.
         np.testing.assert_allclose(m.ee_delta, delta, atol=1e-12)
 
-    def test_warning_names_only_unbounded_params(self):
-        s = sobol.sample(self.PROBLEM, 0, base_n=64, seed=1, verbose=False)
-        with pytest.warns(UserWarning, match=r"\['unbounded'\]"):
-            s.to_morris(verbose=False)
-
-    def test_one_sided_truncation_still_warns(self):
-        """GaussianInputSpec takes low and/or high; one bound leaves a tail open."""
-        for spec in (
-            GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, low=-2.0),
-            GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, high=2.0),
-        ):
+    @pytest.mark.parametrize(
+        "spec,named",
+        [
+            (None, "unbounded"),
+            # GaussianInputSpec takes low and/or high; one bound leaves a tail open.
+            (GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, low=-2.0), "half"),
+            (GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, high=2.0), "half"),
+            ("bounded", None),
+        ],
+        ids=["unbounded", "low-only", "high-only", "bounded-is-silent"],
+    )
+    def test_warning_names_only_the_open_tailed_params(self, spec, named):
+        if spec is None:
+            problem = self.PROBLEM
+        elif spec == "bounded":
+            problem = ishigami.PROBLEM
+        else:
             problem = Problem.from_dict({"half": spec, "uni": (0.0, 1.0)})
-            s = sobol.sample(problem, 0, base_n=64, seed=1, verbose=False)
-            with pytest.warns(UserWarning, match=r"\['half'\]"):
+        s = sobol.sample(problem, base_n=64, seed=1, verbose=False)
+        if named is None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
                 s.to_morris(verbose=False)
-
-    def test_bounded_problem_is_silent(self):
-        s = sobol.sample(ishigami.PROBLEM, 0, base_n=64, seed=1, verbose=False)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            s.to_morris(verbose=False)
+        else:
+            with pytest.warns(UserWarning, match=rf"\['{named}'\]"):
+                s.to_morris(verbose=False)
 
 
 class TestDegenerateBlocks:
@@ -228,7 +227,7 @@ class TestDegenerateBlocks:
         A and B come from the same row of the same sequence, so ``A_j == B_j``
         happens often (always for the all-zeros first row), giving a zero step.
         """
-        s = sobol.sample(ishigami.PROBLEM, 0, base_n=64, scramble=False, seed=0, verbose=False)
+        s = sobol.sample(ishigami.PROBLEM, base_n=64, scramble=False, verbose=False)
         with pytest.warns(UserWarning, match="radial blocks whose step is below"):
             m = s.to_morris(verbose=False)
         assert m.n_trajectories < 64
@@ -251,7 +250,7 @@ class TestDegenerateBlocks:
         with warnings.catch_warnings():
             # The degenerate-design warning for base_n=8 is not this test's subject.
             warnings.simplefilter("ignore")
-            s = sobol.sample(problem, 0, base_n=8, scramble=False, seed=0, verbose=False)
+            s = sobol.sample(problem, base_n=8, scramble=False, verbose=False)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             m = s.to_morris(verbose=False)
@@ -265,6 +264,6 @@ class TestDegenerateBlocks:
         with warnings.catch_warnings():
             # The degenerate-design warning for base_n=2 is not this test's subject.
             warnings.simplefilter("ignore")
-            s = sobol.sample(problem, 0, base_n=2, scramble=False, seed=0, verbose=False)
+            s = sobol.sample(problem, base_n=2, scramble=False, verbose=False)
         with pytest.warns(UserWarning), pytest.raises(ValueError, match="at least 2"):
             s.to_morris(verbose=False)

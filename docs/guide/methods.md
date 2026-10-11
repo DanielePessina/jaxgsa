@@ -3,7 +3,7 @@
 Start with the question you want answered, then check whether you can run your
 model at new input points. If this is your first analysis with independent
 inputs, [run the Sobol' quickstart](/guide/getting-started) before comparing all
-thirteen methods. [GSA concepts](/guide/concepts) explains what the results mean.
+fourteen methods. [GSA concepts](/guide/concepts) explains what the results mean.
 
 ## Decide in three questions
 
@@ -68,21 +68,23 @@ those sources alongside the software. For Sobol', use the
 | [Sobol'](/api/sobol) | How much variance comes from each independent input alone and with interactions? $S_1$, $S_T$, optional $S_2$ | Own design | Requires independent inputs. |
 | [eFAST](/api/efast) | How much variance is due to each independent input? $S_1$, $S_T$ | Own design | Design size grows quickly with input count. |
 | [Morris](/api/morris) | Which inputs are worth a closer look? $\mu^*$, $\sigma$ | Own design | Screening statistics are not variance fractions. |
-| [Kucherenko](/api/kucherenko) | What are conditional variance effects with dependent inputs? $S_1$, $S_T$ | Own design | Interpretation differs from independent-input Sobol'. |
+| [Kucherenko](/api/kucherenko) | What are conditional variance effects with dependent inputs? $S_1$, $S_T$, and with `subsets="all"` exact Shapley effects and PME | Own design | Interpretation differs from independent-input Sobol'. The `"all"` design costs $N\,2^D$ runs and needs $D \le 12$. |
 | [PCE](/api/pce) | Can a polynomial model provide variance indices? $S_1$, $S_T$, $S_2$ | Existing `X`, `Y` | Check fit; basis size grows with dimension and order. |
 | [HDMR](/api/hdmr) | Which fitted component contributes, including under dependence? ANCOVA terms | Existing `X`, `Y` | Check fit; interaction order increases cost. |
 | [VKOGA](/api/vkoga) | How do correlated and uncorrelated effects differ? Several variance quantities | Existing `X`, `Y` | Results depend on a kernel surrogate. |
 | [Shapley](/api/shapley) | How can variance be allocated to one share per input? Shapley effects | Existing `X`, `Y` | Interactions are shared, not reported separately; check surrogate fit. |
 | [DGSM](/api/dgsm) | Are derivative-based bounds useful for screening? Bounds on $S_T$ | Existing `X` and JAX model | Bounds can be loose; Jacobians can be costly. |
 | [PAWN](/api/pawn) | Does an input change the output CDF? KS distance | Existing `X`, `Y` | Conditional binning needs a tuning choice. |
+| [Rank](/api/rank) | How much variance does each input explain alone? $S_1$ from one sample, by rank statistics | Existing `X`, `Y` | First order only; many tied inputs bias it. |
 | [Borgonovo delta](/api/borgonovo) | Does an input change the output density? $\delta$ | Existing `X`, `Y` | Density estimates need enough data. |
 | [Optimal transport](/api/optimal-transport) | How far does the output distribution move? Transport distance | Existing `X`, `Y` | Transport calculations cost more than simple univariate statistics. |
 | [HSIC](/api/hsic) | Are input and output statistically dependent? Kernel dependence and p-values | Existing `X`, `Y` | Kernel and permutation cost grow with sample size. |
 
 ### Special cases
 
-- **Dependent inputs:** Kucherenko, VKOGA, HDMR, and the HDMR-backed Shapley
-  route answer different questions. Distribution-based methods include
+- **Dependent inputs:** Kucherenko (including its exact Shapley and PME
+  output), VKOGA, HDMR, and the HDMR-backed Shapley route answer different
+  questions. Distribution-based methods include
   correlation-borne influence. Use the [dependent-input guide](/guide/dependent-inputs)
   to choose a definition before comparing results.
 - **Categorical inputs:** Sobol', PAWN, Borgonovo, and optimal transport accept
@@ -106,11 +108,12 @@ A cross means the method refuses that input type.
 | [`efast`](/api/efast) | $S_1$, $S_T$ | ✓ | ✗ | ✗ | — |
 | [`hdmr`](/api/hdmr) | $S_a$ / $S_b$ / $S$ per term, surrogate | ✗ | ✓ † | ✗ | `n_bootstrap` |
 | [`hsic`](/api/hsic) | dependence measure | ✗ | ✓ § | ✗ | — |
-| [`kucherenko`](/api/kucherenko) | $S_1$, $S_T$ under dependence | ✓ | ✓ | ✗ | `n_bootstrap` |
+| [`kucherenko`](/api/kucherenko) | $S_1$, $S_T$ under dependence; Shapley and PME with `subsets="all"` | ✓ | ✓ | ✗ | `n_bootstrap` |
 | [`morris`](/api/morris) | $\mu^*$, $\sigma$ | ✓ | ✗ | ✗ | `n_bootstrap` |
 | [`optimal_transport`](/api/optimal-transport) | $W_2^2$ index, advective + diffusive | ✗ | ✓ § | ✓ | `n_bootstrap` |
 | [`pawn`](/api/pawn) | KS distance | ✗ | ✓ § | ✓ | `n_bootstrap` |
 | [`pce`](/api/pce) | $S_1$, $S_2$, $S_T$, surrogate | ✗ | ✗ | ✗ | `n_bootstrap` |
+| [`rank`](/api/rank) | $S_1$ by rank statistics | ✗ | ✓ § | ✗ | `n_bootstrap` |
 | [`shapley`](/api/shapley) | allocation summing to 1 | ✗ | ✗ ‡ | ✗ | `n_bootstrap` |
 | [`sobol`](/api/sobol) | $S_1$, $S_2$, $S_T$ | ✓ | ✗ | ✓ | `n_bootstrap` |
 | [`vkoga`](/api/vkoga) | $S_{TC}$, $S_{TU}$, $S_U$, $S_C$, $S_{IU}$, surrogate | ✗ | ✓ | ✗ | `n_bootstrap` |
@@ -125,7 +128,7 @@ correlative contribution in the allocation.
 § These measures include correlation-borne influence. A parameter may score
 above zero because it is correlated with a parameter used by the model.
 
-All methods support scalar, multi-output, and time-series outputs. Eleven
+All methods support scalar, multi-output, and time-series outputs. Twelve
 methods offer bootstrap confidence intervals through `n_bootstrap`; eFAST has
 no row-bootstrap interval, while HSIC reports permutation p-values. The
 [API overview](/api/#confidence-intervals) documents the shared result shape.
@@ -133,3 +136,17 @@ no row-bootstrap interval, while HSIC reports permutation p-values. The
 For a complete run and interpretation, continue with the
 [basic example](/examples/basic). The [API overview](/api/) describes shared
 inputs and results.
+
+## Supplying your own input distribution
+
+Kucherenko and VKOGA accept a custom sampler for dependence beyond Gaussian
+copulas. Declare it on the problem with
+`problem.with_sampler(f, sampler_dimension=k)`. The sampler maps uniform points to
+joint and conditional rows. Kucherenko assembles the design. VKOGA integrates
+its fitted surrogate under the supplied distribution. A joint sampler alone is
+not enough. For `subsets="all"` the sampler must accept any subset of fixed
+inputs. It must be a deterministic inverse Rosenblatt (conditional-quantile)
+map. See [the sampler contract](/guide/dependent-inputs#what-a-custom-sampler-must-do). Draw `X` for given-data methods with `jaxgsa.sampling.monte_carlo`.
+See the
+[custom-dependence example](/examples/correlated-inputs#custom-dependence-without-a-copula).
+PAWN, Borgonovo, optimal transport and HSIC retain their direct `X, Y` APIs.

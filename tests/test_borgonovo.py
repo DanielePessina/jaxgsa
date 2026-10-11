@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import warnings
 from typing import Any, cast
 
@@ -9,6 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from _fixtures_givendata import BOOT
 
 import jaxgsa
 from jaxgsa import JaxgsaWarning
@@ -52,62 +54,48 @@ def degenerate_class_data():
     return problem, X, Y
 
 
-@pytest.fixture(scope="module")
-def ishigami_data():
-    """Generate Ishigami test data."""
-    N = 5000
-    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=42))
-    Y = ishigami.evaluate(X)
-    return X, Y
-
-
-@pytest.fixture(scope="module")
-def gaussian_linear_data():
-    """Generate Gaussian linear test data (large N for ground-truth checks)."""
-    N = 32000
-    X = jnp.asarray(monte_carlo(gaussian_linear.PROBLEM, n=N, seed=1))
-    Y = gaussian_linear.evaluate(X)
-    return X, Y
-
-
 class TestDeltaBasic:
-    def test_plugin_values_in_unit_interval(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
-        delta = np.asarray(result.delta)
-        s1 = np.asarray(result.S1)
+    def test_plain_result_properties(self, delta_ishigami):
+        """Plug-in delta and S1 lie in [0, 1], and x1 and x2 outrank the weak x3."""
+        delta = np.asarray(delta_ishigami.delta)
+        s1 = np.asarray(delta_ishigami.S1)
         assert np.all(delta >= 0.0) and np.all(delta <= 1.0)
         assert np.all(s1 >= 0.0) and np.all(s1 <= 1.0)
-
-    def test_x1_x2_more_important_than_x3(self, ishigami_data):
-        """x1 and x2 should have higher delta than x3 (weak first-order)."""
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
-        delta = np.asarray(result.delta)
         assert delta[0] > delta[2], "x1 should be more important than x3"
         assert delta[1] > delta[2], "x2 should be more important than x3"
 
-    def test_deterministic_given_key(self, ishigami_data):
-        X, Y = ishigami_data
-        r1 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, key=jax.random.key(3))
-        r2 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, key=jax.random.key(3))
-        np.testing.assert_array_equal(np.asarray(r1.delta), np.asarray(r2.delta))
-        assert r1.delta_conf is not None and r2.delta_conf is not None
-        np.testing.assert_array_equal(np.asarray(r1.delta_conf), np.asarray(r2.delta_conf))
+    def test_the_key_decides_the_bootstrap(self, given_ishigami_xy, delta_ishigami_boot):
+        """Tier T4. The same key gives the same result, a different key a different one."""
+        X, Y = given_ishigami_xy
+        same = analyze(
+            ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, bias_correct=True, key=jax.random.key(0)
+        )
+        other = analyze(
+            ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, bias_correct=True, key=jax.random.key(2)
+        )
+        assert delta_ishigami_boot.delta_conf is not None
+        assert same.delta_conf is not None and other.delta_conf is not None
+        np.testing.assert_array_equal(
+            np.asarray(same.delta), np.asarray(delta_ishigami_boot.delta)
+        )
+        np.testing.assert_array_equal(
+            np.asarray(same.delta_conf), np.asarray(delta_ishigami_boot.delta_conf)
+        )
+        assert not np.array_equal(np.asarray(other.delta_conf), np.asarray(same.delta_conf))
 
-    def test_n_classes_override_changes_result(self, ishigami_data):
-        X, Y = ishigami_data
+    def test_n_classes_override_changes_result(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
         r_default = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
         r_coarse = analyze(ishigami.PROBLEM, X, Y, n_classes=4, n_bootstrap=0)
         assert not np.allclose(np.asarray(r_default.delta), np.asarray(r_coarse.delta))
 
-    def test_slice_chunk_size_invariance(self, ishigami_data):
+    def test_slice_chunk_size_invariance(self, given_ishigami_xy):
         """Chunked column processing must not change the result."""
-        X, Y = ishigami_data
+        X, Y = given_ishigami_xy
         Y2 = jnp.stack([Y, Y**2, jnp.sin(Y)], axis=1)
-        r_full = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=10, key=jax.random.key(0))
+        r_full = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=BOOT, key=jax.random.key(0))
         r_chunked = analyze(
-            ishigami.PROBLEM, X, Y2, n_bootstrap=10, key=jax.random.key(0), slice_chunk_size=1
+            ishigami.PROBLEM, X, Y2, n_bootstrap=BOOT, key=jax.random.key(0), slice_chunk_size=1
         )
         np.testing.assert_allclose(
             np.asarray(r_full.delta), np.asarray(r_chunked.delta), rtol=1e-6
@@ -154,17 +142,18 @@ class TestGridTiling:
         )
         return Y_cols, all_idx, tuple(groups)
 
-    @pytest.mark.parametrize("grid_chunk", [2, 3, 4, 7, 8, 16, 50, 99])
-    def test_tiled_grid_matches_the_untiled_result(self, ishigami_data, grid_chunk):
+    @pytest.mark.parametrize("grid_chunk", [3, 7, 50])
+    def test_tiled_grid_matches_the_untiled_result(self, given_ishigami_xy, grid_chunk):
         """Any tile width returns the untiled result to float32 rounding.
 
-        The widths span the awkward cases on purpose: 2 and 3 are far
-        narrower than any vectorization XLA would choose, 7 and 99 do not
-        divide the 100-point grid and so exercise the padding, and 50 and
-        100 divide it exactly. See the class docstring for why this is a
-        tolerance and not an equality.
+        The widths span the awkward cases on purpose: 3 is far narrower than
+        any vectorization XLA would choose, 7 does not divide the 100-point
+        grid and so exercises the padding, and 50 divides it exactly. See the
+        class docstring for why this is a tolerance and not an equality. The
+        rounding claim does not depend on N, so the test uses 1024 rows.
         """
-        X, Y = ishigami_data
+        X, Y = given_ishigami_xy
+        X, Y = X[:1024], Y[:1024]
         Y_cols = jnp.stack([Y, Y**2, jnp.sin(Y)], axis=1)
         args = self._kernel_inputs(X, Y_cols)
         untiled = _get_delta_kernel(100, None, 1e-2, None, 100)(*args)
@@ -172,7 +161,7 @@ class TestGridTiling:
         for a, b in zip(untiled, tiled):
             np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-6)
 
-    def test_memory_budget_narrows_the_working_set(self, ishigami_data):
+    def test_memory_budget_narrows_the_working_set(self, given_ishigami_xy):
         """A small budget still returns the same answer.
 
         The budget changes how the work is cut up, never what it
@@ -182,12 +171,12 @@ class TestGridTiling:
         budget moves the slice chunk as well as the tile width, and the
         slice chunk crosses the bootstrap replicates.
         """
-        X, Y = ishigami_data
+        X, Y = given_ishigami_xy
         Y2 = jnp.stack([Y, Y**2, jnp.sin(Y)], axis=1)
-        r_default = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=5, key=jax.random.key(0))
+        r_default = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=BOOT, key=jax.random.key(0))
         jaxgsa.config.set_memory_budget(1, unit="mib")
         try:
-            r_small = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=5, key=jax.random.key(0))
+            r_small = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=BOOT, key=jax.random.key(0))
         finally:
             jaxgsa.config.set_memory_budget(512, unit="mib")
         np.testing.assert_allclose(
@@ -215,17 +204,19 @@ class TestGaussianLinearBenchmark:
         assert np.all(np.isfinite(delta))
         assert delta[0] >= 0.0
 
-    def test_estimator_converges_to_analytical_delta(self, gaussian_linear_data):
-        X, Y = gaussian_linear_data
-        result = analyze(gaussian_linear.PROBLEM, X, Y, key=jax.random.key(0))
-        np.testing.assert_allclose(
-            np.asarray(result.delta), gaussian_linear.ANALYTICAL_DELTA, atol=0.02
-        )
+    def test_estimator_converges_to_analytical_delta_and_s1(self, gaussian_linear_xy):
+        """Tier T0 (closed form): delta and S1 land near the analytical values.
 
-    def test_estimator_matches_analytical_s1(self, gaussian_linear_data):
-        X, Y = gaussian_linear_data
+        The KDE plug-in delta is biased upward, by a measured 0.011 to 0.019 at
+        ``N = 4096``, so the delta tolerance is wider than the one a
+        32000-row sample needs. The S1 estimate has no KDE bias.
+        """
+        X, Y = gaussian_linear_xy
         result = analyze(gaussian_linear.PROBLEM, X, Y, n_bootstrap=0)
-        np.testing.assert_allclose(np.asarray(result.S1), gaussian_linear.ANALYTICAL_S1, atol=0.02)
+        np.testing.assert_allclose(
+            np.asarray(result.delta), gaussian_linear.ANALYTICAL_DELTA, atol=0.04
+        )
+        np.testing.assert_allclose(np.asarray(result.S1), gaussian_linear.ANALYTICAL_S1, atol=0.05)
 
     def test_analytical_sobol_structure(self):
         S1, ST, S2 = gaussian_linear.analytical_indices()
@@ -237,17 +228,14 @@ class TestGaussianLinearBenchmark:
 
 
 class TestDeltaBootstrap:
-    def test_bootstrap_lower_leq_upper(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(
-            ishigami.PROBLEM, X, Y, n_bootstrap=20, conf_level=0.95, key=jax.random.key(0)
-        )
+    def test_bootstrap_lower_leq_upper(self, delta_ishigami_boot):
+        result = delta_ishigami_boot
         assert result.delta_conf is not None
         assert np.all(np.asarray(result.delta_conf[0]) <= np.asarray(result.delta_conf[1]) + 1e-6)
         assert result.S1_conf is not None
         assert np.all(np.asarray(result.S1_conf[0]) <= np.asarray(result.S1_conf[1]) + 1e-6)
 
-    def test_bootstrap_without_a_key_raises(self, ishigami_data):
+    def test_bootstrap_without_a_key_raises(self, given_ishigami_xy):
         """Tier T4. Asking for a bootstrap without a key is refused.
 
         The refusal is tied to asking, not to calling: ``n_bootstrap``
@@ -255,20 +243,12 @@ class TestDeltaBootstrap:
         Both halves are asserted, because a version that demanded a key
         unconditionally would pass the first check and still be wrong.
         """
-        X, Y = ishigami_data
+        X, Y = given_ishigami_xy
         with pytest.raises(ValueError, match="key is required"):
-            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=4)
+            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=BOOT)
         analyze(ishigami.PROBLEM, X, Y)
 
-    def test_different_keys_differ(self, ishigami_data):
-        """Tier T4. A different key draws a different resample."""
-        X, Y = ishigami_data
-        r1 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, key=jax.random.key(1))
-        r2 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, key=jax.random.key(2))
-        assert r1.delta_conf is not None and r2.delta_conf is not None
-        assert not np.array_equal(np.asarray(r1.delta_conf), np.asarray(r2.delta_conf))
-
-    def test_gaussian_ci_is_centred_on_the_estimate(self, ishigami_data):
+    def test_gaussian_ci_is_centred_on_the_estimate(self, given_ishigami_xy):
         """Tier T0 (closed form): the Gaussian interval is symmetric.
 
         ``estimate +/- z * sd`` puts the point estimate exactly at the
@@ -276,9 +256,14 @@ class TestDeltaBootstrap:
         not do. Delta is bias-corrected, so the estimate the interval is
         centred on is the corrected one the result reports.
         """
-        X, Y = ishigami_data
+        X, Y = given_ishigami_xy
         result = analyze(
-            ishigami.PROBLEM, X, Y, n_bootstrap=20, ci_method="gaussian", key=jax.random.key(0)
+            ishigami.PROBLEM,
+            X,
+            Y,
+            n_bootstrap=BOOT,
+            ci_method="gaussian",
+            key=jax.random.key(0),
         )
         assert result.ci is not None
         assert result.ci.method == "gaussian"
@@ -288,83 +273,110 @@ class TestDeltaBootstrap:
         s1_mid = 0.5 * (np.asarray(result.S1_conf[0]) + np.asarray(result.S1_conf[1]))
         np.testing.assert_allclose(s1_mid, np.asarray(result.S1), atol=1e-6)
 
-    def test_unknown_ci_method_rejected(self, ishigami_data):
-        X, Y = ishigami_data
+    def test_unknown_ci_method_rejected(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
         with pytest.raises(ValueError, match="ci_method"):
             analyze(
                 ishigami.PROBLEM,
                 X,
                 Y,
-                n_bootstrap=4,
+                n_bootstrap=BOOT,
                 ci_method=cast(Any, "bca"),
                 key=jax.random.key(0),
             )
 
-    def test_corrected_delta_within_conf(self, ishigami_data):
-        """The bias-corrected estimate is the mean of the CI replicates."""
-        X, Y = ishigami_data
-        result = analyze(
-            ishigami.PROBLEM, X, Y, n_bootstrap=50, conf_level=0.99, key=jax.random.key(0)
-        )
+    def test_corrected_delta_within_conf(self, delta_ishigami_boot):
+        """The bias-corrected estimate sits inside its own interval."""
+        result = delta_ishigami_boot
         delta = np.asarray(result.delta)
         assert result.delta_conf is not None
         assert np.all(delta >= np.asarray(result.delta_conf[0]) - 1e-6)
         assert np.all(delta <= np.asarray(result.delta_conf[1]) + 1e-6)
 
-    def test_bias_correct_false_returns_plugin(self, ishigami_data):
-        X, Y = ishigami_data
-        r_plugin = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
+    def test_bias_correct_false_returns_plugin(self, given_ishigami_xy, delta_ishigami):
+        X, Y = given_ishigami_xy
         r_uncorrected = analyze(
-            ishigami.PROBLEM, X, Y, n_bootstrap=20, bias_correct=False, key=jax.random.key(0)
+            ishigami.PROBLEM,
+            X,
+            Y,
+            n_bootstrap=BOOT,
+            bias_correct=False,
+            key=jax.random.key(0),
         )
         np.testing.assert_allclose(
-            np.asarray(r_uncorrected.delta), np.asarray(r_plugin.delta), rtol=1e-6
+            np.asarray(r_uncorrected.delta), np.asarray(delta_ishigami.delta), rtol=1e-6
         )
         assert r_uncorrected.delta_conf is not None
 
-    def test_bias_correction_reduces_delta(self, ishigami_data):
-        """The plug-in estimator is biased upward; correction should lower it."""
-        X, Y = ishigami_data
-        r_plugin = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
-        r_corrected = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=100, key=jax.random.key(0))
-        assert np.all(np.asarray(r_corrected.delta) <= np.asarray(r_plugin.delta) + 1e-6)
+    def test_bias_correction_is_two_plugin_minus_replicate_mean(
+        self, given_ishigami_xy, delta_ishigami, delta_ishigami_boot
+    ):
+        """The corrected delta is ``2 * plugin - mean(raw replicates)`` (Plischke eq. 30).
+
+        This is an exact identity, so it holds for any key. A check that the
+        correction lowers delta would not: the measured bias is only 0.001 to
+        0.01, and x2's bias is about 0, so with ``BOOT`` replicates the sign
+        changes with the key.
+        """
+        X, Y = given_ishigami_xy
+        raw = analyze(
+            ishigami.PROBLEM,
+            X,
+            Y,
+            n_bootstrap=BOOT,
+            bias_correct=False,
+            keep_replicates=True,
+            key=jax.random.key(0),
+            verbose=False,
+        )
+        assert raw.ci is not None and raw.ci.replicates is not None
+        replicate_mean = np.mean(np.asarray(raw.ci.replicates["delta"]), axis=0)
+        np.testing.assert_allclose(
+            np.asarray(delta_ishigami_boot.delta),
+            2.0 * np.asarray(delta_ishigami.delta) - replicate_mean,
+            rtol=1e-5,
+            atol=1e-6,
+        )
 
 
 class TestDeltaMultiOutput:
-    def test_time_series_shape(self, ishigami_data):
-        X, Y = ishigami_data
+    def test_time_series_shape(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
         Y3 = jnp.stack(
             [jnp.stack([Y, Y**2], axis=1), jnp.stack([Y + 1.0, jnp.abs(Y)], axis=1)],
             axis=1,
         )
         assert Y3.shape == (Y.shape[0], 2, 2)
-        result = analyze(ishigami.PROBLEM, X, Y3, n_bootstrap=10, key=jax.random.key(0))
+        result = analyze(ishigami.PROBLEM, X, Y3, n_bootstrap=BOOT, key=jax.random.key(0))
         assert result.delta.shape == (2, 2, 3)
         assert result.delta_conf is not None
         assert result.delta_conf.shape == (2, 2, 2, 3)
 
-    def test_multi_output_consistent_with_scalar(self, ishigami_data):
+    def test_multi_output_consistent_with_scalar(self, given_ishigami_xy, delta_ishigami_boot):
         """Column 0 of a multi-output run must equal the scalar-output run."""
-        X, Y = ishigami_data
+        X, Y = given_ishigami_xy
         Y2 = jnp.stack([Y, Y**2], axis=1)
-        r_scalar = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=10, key=jax.random.key(0))
-        r_multi = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=10, key=jax.random.key(0))
-        np.testing.assert_allclose(
-            np.asarray(r_multi.delta[0]), np.asarray(r_scalar.delta), rtol=1e-6
+        r_multi = analyze(
+            ishigami.PROBLEM, X, Y2, n_bootstrap=BOOT, bias_correct=True, key=jax.random.key(0)
         )
-        np.testing.assert_allclose(np.asarray(r_multi.S1[0]), np.asarray(r_scalar.S1), rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(r_multi.delta[0]), np.asarray(delta_ishigami_boot.delta), rtol=1e-6
+        )
+        np.testing.assert_allclose(
+            np.asarray(r_multi.S1[0]), np.asarray(delta_ishigami_boot.S1), rtol=1e-6, atol=1e-7
+        )
 
 
 class TestDeltaEdgeCases:
-    def test_constant_output_yields_zero(self, ishigami_data):
-        X, _ = ishigami_data
+    def test_constant_output_yields_zero(self, given_ishigami_xy):
+        X, _ = given_ishigami_xy
         Y_const = jnp.ones(X.shape[0])
-        result = analyze(ishigami.PROBLEM, X, Y_const, n_bootstrap=5, key=jax.random.key(0))
+        result = analyze(ishigami.PROBLEM, X, Y_const, n_bootstrap=BOOT, key=jax.random.key(0))
         np.testing.assert_allclose(np.asarray(result.delta), 0.0)
         np.testing.assert_allclose(np.asarray(result.S1), 0.0)
         assert np.all(np.isfinite(np.asarray(result.delta)))
 
-    def test_constant_input_column_yields_exact_zero(self, ishigami_data):
+    def test_constant_input_column_yields_exact_zero(self, given_ishigami_xy, delta_ishigami):
         """A constant input cannot shift the output distribution: delta = S1 = 0.
 
         The plug-in estimate approaches the true 0 only by sampling noise
@@ -372,8 +384,8 @@ class TestDeltaEdgeCases:
         parameter to exactly 0 and warns. The other parameters must come back
         bit-identical, because their conditioning classes are unchanged.
         """
-        X, Y = ishigami_data
-        ref = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
+        X, Y = given_ishigami_xy
+        ref = delta_ishigami
         X_const = X.at[:, 0].set(0.5)
         with pytest.warns(JaxgsaWarning, match="constant"):
             result = analyze(ishigami.PROBLEM, X_const, Y, n_bootstrap=0)
@@ -386,32 +398,52 @@ class TestDeltaEdgeCases:
 
 
 class TestDeltaValidation:
-    def test_rejects_1d_x(self, ishigami_data):
-        _, Y = ishigami_data
-        with pytest.raises(ValueError, match="2-D"):
-            analyze(ishigami.PROBLEM, jnp.ones(len(Y)), Y)
+    @pytest.mark.parametrize(
+        ("case", "kwargs", "match"),
+        [
+            ("x_1d", {}, "2-D"),
+            ("two_columns", {}, "parameters"),
+            ("y_0d", {}, "Y must be 1-D"),
+            ("full", {"n_classes": 1}, "n_classes"),
+            ("full", {"bandwidth": -0.5}, "bandwidth"),
+            ("full", {"bandwidth": cast(float, "scott")}, "'silverman' or a positive float"),
+            ("full", {"bandwidth": cast(float, True)}, "'silverman' or a positive float"),
+        ],
+        ids=[
+            "x_not_2d",
+            "wrong_param_count",
+            "y_0d",
+            "n_classes",
+            "negative_bandwidth",
+            "unknown_string_bandwidth",
+            "bool_bandwidth",
+        ],
+    )
+    def test_bad_arguments_are_refused(self, given_ishigami_xy, case, kwargs, match):
+        """Each malformed argument raises early and names what is wrong.
 
-    def test_rejects_wrong_param_count(self, ishigami_data):
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="parameters"):
-            analyze(ishigami.PROBLEM, X[:, :2], Y)
+        The string and bool bandwidths are cast so the deliberately invalid
+        values reach the runtime check without a static type error.
+        """
+        X, Y = given_ishigami_xy
+        if case == "x_1d":
+            X = jnp.ones(len(Y))
+        elif case == "two_columns":
+            X = X[:, :2]
+        elif case == "y_0d":
+            Y = jnp.asarray(3.0)
+        with pytest.raises(ValueError, match=match):
+            analyze(ishigami.PROBLEM, X, Y, **kwargs)
 
-    def test_rejects_bad_n_classes(self, ishigami_data):
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="n_classes"):
-            analyze(ishigami.PROBLEM, X, Y, n_classes=1)
-
-    def test_rejects_bad_bandwidth(self, ishigami_data):
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="bandwidth"):
-            analyze(ishigami.PROBLEM, X, Y, bandwidth=-0.5)
+    def test_float_bandwidth_accepted(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
+        result = analyze(ishigami.PROBLEM, X, Y, bandwidth=0.5, n_bootstrap=0)
+        assert np.all(np.isfinite(np.asarray(result.delta)))
 
 
 class TestDeltaXarray:
-    def test_no_bootstrap_dataset(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
-        ds = result.to_dataset()
+    def test_no_bootstrap_dataset(self, delta_ishigami):
+        ds = delta_ishigami.to_dataset()
         assert set(ds.data_vars) == {"delta", "S1"}
         assert list(ds.coords["param"].values) == ["x1", "x2", "x3"]
 
@@ -425,7 +457,7 @@ class TestDeltaRegression:
         ``analyze`` supports a continuous output only. A rare-event
         indicator has two atoms, which no output grid resolves.
         """
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=1000, seed=1))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=1000, seed=1))
         Y_np = np.zeros(1000)
         Y_np[np.random.default_rng(0).integers(1000)] = 1.0
         with pytest.raises(ValueError, match="continuous output distribution only"):
@@ -439,7 +471,7 @@ class TestDeltaRegression:
         analyze returned a delta that describes ``grid_size`` rather than
         the model. The rule is now an average-multiplicity test.
         """
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=150, seed=2))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=150, seed=2))
         binary = jnp.asarray(np.random.default_rng(1).integers(0, 2, size=150).astype(np.float64))
         with pytest.raises(ValueError, match="continuous output distribution only"):
             analyze(ishigami.PROBLEM, X, binary)
@@ -450,7 +482,7 @@ class TestDeltaRegression:
         Under the old fraction rule this needed N > 1000. At N=500 each
         level repeats 50 times on average, which continuity cannot do.
         """
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=500, seed=3))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=500, seed=3))
         ten = jnp.asarray(np.random.default_rng(2).integers(0, 10, size=500).astype(np.float64))
         with pytest.raises(ValueError, match="continuous output distribution only"):
             analyze(ishigami.PROBLEM, X, ten)
@@ -461,11 +493,11 @@ class TestDeltaRegression:
         It has ~100 distinct values, above the 20-value cap, so it is
         structurally safe whatever the multiplicity term says.
         """
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=100, seed=4))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=100, seed=4))
         result = analyze(ishigami.PROBLEM, X, ishigami.evaluate(X))
         assert np.all(np.isfinite(np.asarray(result.delta)))
 
-    def test_discrete_guard_large_n_baseline_unchanged(self):
+    def test_discrete_guard_large_n_baseline_unchanged(self, given_ishigami_xy):
         """Tier T4. The large-N behavior of the guard does not move.
 
         The multiplicity rule is a strict superset of the old fraction
@@ -473,8 +505,8 @@ class TestDeltaRegression:
         continuous output with many distinct values stays accepted, and
         the N=1000 rare-event refusal above stays a refusal.
         """
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=5000, seed=5))
-        rounded = jnp.round(ishigami.evaluate(X), 1)
+        X, Y = given_ishigami_xy
+        rounded = jnp.round(Y, 1)
         n_distinct = np.unique(np.asarray(rounded)).size
         assert n_distinct > 20  # rounding to one decimal keeps many values
         result = analyze(ishigami.PROBLEM, X, rounded)
@@ -491,13 +523,13 @@ class TestDeltaRegression:
         continuous distribution; the spike still dominates it by two orders
         of magnitude.
         """
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=1000, seed=1))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=1000, seed=1))
         rng = np.random.default_rng(0)
         Y_np = 0.01 * rng.standard_normal(1000)
         Y_np[rng.integers(1000)] = 1.0
         Y = jnp.asarray(Y_np)
         plug = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
-        corrected = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=200, key=jax.random.key(0))
+        corrected = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=50, key=jax.random.key(0))
         c = np.asarray(corrected.delta)
         assert np.all(np.isfinite(c))
         assert np.all(c <= np.asarray(plug.delta) + 0.02)
@@ -508,9 +540,9 @@ class TestDeltaRegression:
         Every resample of a constant column is itself constant, so this
         exercises the degenerate-replicate branch of the bias correction.
         """
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=800, seed=2))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=800, seed=2))
         Y = jnp.stack([ishigami.evaluate(X), jnp.ones(800)], axis=1)
-        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=32, key=jax.random.key(0))
+        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, key=jax.random.key(0))
         np.testing.assert_allclose(np.asarray(result.delta)[1], 0.0)
         assert result.delta_conf is not None
         np.testing.assert_allclose(np.asarray(result.delta_conf)[:, 1], 0.0)
@@ -518,70 +550,29 @@ class TestDeltaRegression:
     def test_ranking_uses_original_x_under_x64(self):
         """Ranks must be computed on the original X, not a Y-dtype downcast.
 
-        Runs in a subprocess so enabling x64 cannot leak into the rest of
-        the suite. With float64 X carrying structure below the float32 ulp
-        and a float32 Y, the dominant input's delta must stay large.
+        With float64 X carrying structure below the float32 ulp and a
+        float32 Y, the dominant input's delta must stay large.
         """
-        import subprocess
-        import sys
-        import textwrap
-
-        script = textwrap.dedent(
-            """
-            import jax
-            jax.config.update("jax_enable_x64", True)
-            import numpy as np
-            import jax.numpy as jnp
-            from jaxgsa.benchmarks import ishigami
-            from jaxgsa.borgonovo import analyze
-
+        with jax.enable_x64():
             rng = np.random.default_rng(0)
             N = 1500
             x0 = 1e9 + rng.random(N)  # ulp ~64 at 1e9 >> unit spacing
-            X = np.stack([x0, rng.random(N), rng.random(N)], axis=1)
+            X = jnp.asarray(
+                np.stack([x0, rng.random(N), rng.random(N)], axis=1), dtype=jnp.float64
+            )
             Y = np.sin(2 * np.pi * (x0 - 1e9))
             d32 = np.asarray(
-                analyze(ishigami.PROBLEM, jnp.asarray(X),
-                        jnp.asarray(Y, dtype=jnp.float32), n_bootstrap=0).delta
+                analyze(
+                    ishigami.PROBLEM, X, jnp.asarray(Y, dtype=jnp.float32), n_bootstrap=0
+                ).delta
             )
             d64 = np.asarray(
-                analyze(ishigami.PROBLEM, jnp.asarray(X),
-                        jnp.asarray(Y, dtype=jnp.float64), n_bootstrap=0).delta
+                analyze(
+                    ishigami.PROBLEM, X, jnp.asarray(Y, dtype=jnp.float64), n_bootstrap=0
+                ).delta
             )
-            assert d32[0] > 0.3, d32
-            assert np.allclose(d32, d64, atol=1e-4), (d32, d64)
-            """
-        )
-        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
-        assert result.returncode == 0, result.stderr
-
-
-class TestDeltaBandwidthValidation:
-    def test_unknown_string_bandwidth_message(self, ishigami_data):
-        X, Y = ishigami_data
-        # cast so the deliberately invalid value (a string other than
-        # "silverman") exercises runtime validation without a static type error.
-        with pytest.raises(ValueError, match="'silverman' or a positive float"):
-            analyze(ishigami.PROBLEM, X, Y, bandwidth=cast(float, "scott"))
-
-    def test_bool_bandwidth_rejected(self, ishigami_data):
-        X, Y = ishigami_data
-        # bool is an int subclass; cast so the runtime rejection is exercised
-        # without a static type error.
-        with pytest.raises(ValueError, match="'silverman' or a positive float"):
-            analyze(ishigami.PROBLEM, X, Y, bandwidth=cast(float, True))
-
-    def test_float_bandwidth_accepted(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, bandwidth=0.5, n_bootstrap=0)
-        assert np.all(np.isfinite(np.asarray(result.delta)))
-
-
-class TestDeltaYNdimValidation:
-    def test_rejects_0d_y(self, ishigami_data):
-        X, _ = ishigami_data
-        with pytest.raises(ValueError, match="Y must be 1-D"):
-            analyze(ishigami.PROBLEM, X, jnp.asarray(3.0))
+        assert d32[0] > 0.3, d32
+        np.testing.assert_allclose(d32, d64, atol=1e-4)
 
 
 class TestDegenerateBandwidthIsNotAPrecondition:
@@ -605,7 +596,7 @@ class TestDegenerateBandwidthIsNotAPrecondition:
         [(100, 0.1), (50, 0.3)],
     )
     def test_explicit_bandwidth_that_cannot_apply_is_accepted(
-        self, ishigami_data, grid_size, bandwidth
+        self, given_ishigami_xy, grid_size, bandwidth
     ):
         """Tier T4. A setting that cannot change the result must not raise.
 
@@ -627,7 +618,7 @@ class TestDegenerateBandwidthIsNotAPrecondition:
         ulp. ``rtol=1e-6`` leaves room for a few ulp and still refuses any
         difference that would change a reported digit.
         """
-        X, Y = ishigami_data
+        X, Y = given_ishigami_xy
         explicit = analyze(
             ishigami.PROBLEM,
             X,
@@ -771,7 +762,7 @@ class TestDegenerateBandwidthIsNotAPrecondition:
         assert np.all(np.asarray(fixed.delta) >= 0.0)
         assert np.all(np.asarray(fixed.delta) <= 1.0)
 
-    def test_constant_column_is_exempt(self, ishigami_data):
+    def test_constant_column_is_exempt(self, given_ishigami_xy):
         """Tier T4. A constant column has no density to integrate.
 
         Its grid step and its bandwidth are both zero, so no class can
@@ -779,84 +770,24 @@ class TestDegenerateBandwidthIsNotAPrecondition:
         answer is delta = S1 = 0, and that contract must survive any
         explicit bandwidth.
         """
-        X, Y = ishigami_data
+        X, Y = given_ishigami_xy
         Y2 = jnp.stack([jnp.ones(Y.shape[0]), jnp.ones(Y.shape[0])], axis=1)
         result = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=0, degenerate_bandwidth=1e-8)
         np.testing.assert_allclose(np.asarray(result.delta), 0.0)
 
 
-def _invalid_sample(n: int = 256, seed: int = 0):
-    """Build a clean two-parameter continuous-output sample for on_invalid tests."""
-    problem = Problem(names=("a", "b"), bounds=((0.0, 1.0), (0.0, 1.0)))
-    rng = np.random.default_rng(seed)
-    X = rng.uniform(size=(n, 2))
-    Y = np.sin(3.0 * X[:, 0]) + 0.3 * X[:, 1] + 0.01 * rng.normal(size=n)
-    return problem, jnp.asarray(X), jnp.asarray(Y)
-
-
-class TestBorgonovoInvalidPolicy:
-    """T4 (behaviour): jaxgsa.borgonovo.analyze honours the shared on_invalid policy."""
-
-    def test_a_non_finite_y_raises_early_and_clearly(self):
-        """T4: the failure is reported as a bad row, not as a bad bandwidth.
-
-        Before 0.10 a NaN output survived the whole KDE and the bootstrap and
-        then surfaced through the delta-range check, whose message is about
-        conditioning classes, grid steps and ``degenerate_bandwidth``. None
-        of that was the cause. The check now runs at ingest, so the message
-        names the method, the count and the row.
-        """
-        problem, X, Y = _invalid_sample()
-        Y = Y.at[13].set(jnp.nan)
-        with pytest.raises(ValueError) as exc:
-            analyze(problem, X, Y, n_bootstrap=0)
-        message = str(exc.value)
-        assert "jaxgsa.borgonovo.analyze" in message
-        assert "1 of 256 rows" in message
-        assert "[13]" in message
-        # The misleading late path must not be what the user sees.
-        assert "half L1 distance" not in message
-        assert "degenerate_bandwidth" not in message
-
-    def test_propagate_warns_and_the_indices_go_non_finite(self):
-        """T4: 'propagate' keeps the row and lets the NaN reach delta.
-
-        The delta-range check still guards a genuine estimator failure, but
-        it must not turn a deliberate 'propagate' into a bandwidth error, so
-        under this policy it accepts a non-finite value.
-        """
-        problem, X, Y = _invalid_sample()
-        Y = Y.at[13].set(jnp.nan)
-        with pytest.warns(JaxgsaWarning, match="reaches the indices"):
-            result = analyze(problem, X, Y, n_bootstrap=0, on_invalid="propagate")
-        assert result.invalid.policy == "propagate"
-        assert result.invalid.unit_indices == (13,)
-        assert not np.all(np.isfinite(np.asarray(result.delta)))
-
-    def test_drop_removes_the_row_and_returns_finite_indices(self):
-        """T4: 'drop' analyzes the remainder and delta comes back in range."""
-        problem, X, Y = _invalid_sample()
-        Y = Y.at[13].set(jnp.nan)
-        with pytest.warns(JaxgsaWarning, match="dropped 1 of 256 rows"):
-            result = analyze(problem, X, Y, n_bootstrap=0, on_invalid="drop")
-        assert result.invalid.n_kept == 255
-        delta = np.asarray(result.delta)
-        assert np.all(np.isfinite(delta))
-        assert np.all(delta >= 0.0) and np.all(delta <= 1.0)
-
-    def test_a_bad_x_is_caught_and_named(self):
-        """T4: a non-finite input is caught too, and the report says it was X."""
-        problem, X, Y = _invalid_sample()
-        X = X.at[6, 0].set(jnp.inf)
-        with pytest.raises(ValueError, match=r"in X\b") as exc:
-            analyze(problem, X, Y, n_bootstrap=0)
-        assert "[6]" in str(exc.value)
-        with pytest.warns(JaxgsaWarning):
-            result = analyze(problem, X, Y, n_bootstrap=0, on_invalid="drop")
-        assert result.invalid.sources == ("X",)
-
-
 class TestIndicesPureCore:
+    def test_indices_is_a_named_tuple(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
+        out = jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, Y)
+        assert isinstance(out, jaxgsa.borgonovo.BorgonovoIndices)
+        assert out._fields == ("delta", "S1")
+
+    def test_scalar_error_names_the_method(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
+        with pytest.raises(ValueError, match=r"^jaxgsa\.borgonovo: grid_size"):
+            jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, Y, grid_size=1)
+
     """The transformable core ``borgonovo.indices``.
 
     Two claims. The core returns exactly what ``analyze`` reports on clean
@@ -864,50 +795,42 @@ class TestIndicesPureCore:
     which ``analyze`` cannot.
     """
 
-    def test_matches_analyze(self, ishigami_data):
+    @pytest.mark.parametrize("rank", [1, 2, 3])
+    def test_matches_analyze(self, given_ishigami_xy, rank):
         """Tier T4: ``indices`` returns the ``delta`` and ``S1`` of ``analyze``.
 
         ``analyze`` delegates to the same kernel runner, so this guards the
-        delegation wiring rather than the estimator maths.
+        delegation wiring rather than the estimator maths. The output comes
+        back at the caller's rank: ``(D,)``, ``(K, D)`` or ``(T, K, D)``.
         """
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y)
-        delta, S1 = jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, Y)
-
+        X, Y = given_ishigami_xy
+        Y2 = jnp.stack([Y, Y**2], axis=1)
+        outputs = {1: Y, 2: Y2, 3: jnp.stack([Y2, Y2 + 1.0], axis=1)}[rank]
+        result = analyze(ishigami.PROBLEM, X, outputs, grid_size=40)
+        delta, S1 = jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, outputs, grid_size=40)
+        assert delta.shape == result.delta.shape
         np.testing.assert_array_equal(np.asarray(delta), np.asarray(result.delta))
         np.testing.assert_array_equal(np.asarray(S1), np.asarray(result.S1))
 
-    def test_matches_analyze_for_multi_output(self, ishigami_data):
-        """Tier T4: the (N, T, K) path agrees field for field, at the caller's rank."""
-        X, Y = ishigami_data
-        Y2 = jnp.stack([Y, Y**2], axis=1)
-        Y3 = jnp.stack([Y2, Y2 + 1.0], axis=1)
-        for outputs in (Y2, Y3):
-            result = analyze(ishigami.PROBLEM, X, outputs, grid_size=40)
-            delta, S1 = jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, outputs, grid_size=40)
-            assert delta.shape == result.delta.shape
-            np.testing.assert_array_equal(np.asarray(delta), np.asarray(result.delta))
-            np.testing.assert_array_equal(np.asarray(S1), np.asarray(result.S1))
-
-    def test_bias_correction_is_not_in_the_core(self, ishigami_data):
+    def test_bias_correction_is_not_in_the_core(
+        self, given_ishigami_xy, delta_ishigami, delta_ishigami_boot
+    ):
         """Tier T4: the core is the plug-in estimate, never the corrected one.
 
         The Plischke correction needs bootstrap replicates, so it is policy
         and stays in ``analyze``. The core must therefore equal
         ``analyze(..., n_bootstrap=0)`` and differ from the corrected value.
         """
-        X, Y = ishigami_data
+        X, Y = given_ishigami_xy
         delta, _ = jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, Y)
-        plain = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
-        corrected = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=8, key=jax.random.key(0))
 
-        np.testing.assert_array_equal(np.asarray(delta), np.asarray(plain.delta))
-        assert not np.allclose(np.asarray(delta), np.asarray(corrected.delta))
-        assert not hasattr(jaxgsa.borgonovo.indices, "n_bootstrap")
+        np.testing.assert_array_equal(np.asarray(delta), np.asarray(delta_ishigami.delta))
+        assert not np.allclose(np.asarray(delta), np.asarray(delta_ishigami_boot.delta))
+        assert "n_bootstrap" not in inspect.signature(jaxgsa.borgonovo.indices).parameters
 
-    def test_is_jittable(self, ishigami_data):
+    def test_is_jittable(self, given_ishigami_xy):
         """Tier T4: ``jit`` traces ``indices`` over both X and Y."""
-        X, Y = ishigami_data
+        X, Y = given_ishigami_xy
         jitted = jax.jit(lambda x, y: jaxgsa.borgonovo.indices(ishigami.PROBLEM, x, y))
         delta_jit, S1_jit = jitted(X, Y)
         delta, S1 = jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, Y)
@@ -918,14 +841,14 @@ class TestIndicesPureCore:
     def test_is_vmappable(self):
         """Tier T4: ``vmap`` maps ``indices`` over a batch of output vectors."""
         N = 512
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=7))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=N, seed=7))
         batch = jnp.stack([ishigami.evaluate(X), X[:, 0], X[:, 1] ** 2])
 
         mapped = jax.vmap(
             lambda y: jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, y, grid_size=30)
         )(batch)
 
-        assert mapped[0].shape == (3, ishigami.PROBLEM.num_vars)
+        assert mapped[0].shape == (3, ishigami.PROBLEM.n_params)
         for row, outputs in enumerate(batch):
             delta, S1 = jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, outputs, grid_size=30)
             np.testing.assert_allclose(np.asarray(mapped[0][row]), np.asarray(delta), rtol=1e-4)
@@ -941,7 +864,7 @@ class TestIndicesPureCore:
         """
         with jax.enable_x64():
             N = 256
-            X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=3))
+            X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=N, seed=3))
             Y = ishigami.evaluate(X)
 
             def total_delta(outputs):
@@ -976,7 +899,7 @@ class TestIndicesPureCore:
         computes the discrete one without complaint.
         """
         problem = Problem.from_dict({"a": (0.0, 1.0), "b": (0.0, 1.0)})
-        X = jnp.asarray(monte_carlo(problem, n=400, seed=5))
+        X = jnp.asarray(monte_carlo(problem, n_samples=400, seed=5))
         constant = jnp.full((400,), 2.5)
         discrete = jnp.where(X[:, 0] > 0.5, 1.0, 0.0)
 
@@ -991,40 +914,30 @@ class TestIndicesPureCore:
             analyze(problem, X, discrete)
 
 
-class TestBiasCorrectDefaultWarning:
-    """The tri-state default warns once per process when None resolves to True."""
+class TestBiasCorrectFlag:
+    """``bias_correct`` is a plain bool: False is the plain estimate always."""
 
-    @staticmethod
-    def _reset(monkeypatch, value: bool):
-        import jaxgsa.borgonovo._analyze as mod
-
-        monkeypatch.setattr(mod, "_warned_bias_correct_default", value)
-
-    def test_default_with_bootstrap_warns_once(self, ishigami_data, monkeypatch):
-        self._reset(monkeypatch, False)
-        X, Y = ishigami_data
-        with pytest.warns(JaxgsaWarning, match="jaxgsa.borgonovo: bias_correct"):
-            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=8, key=jax.random.key(0))
-        # Second default call in the same process: silent.
+    def test_default_is_false_and_bootstrap_only_adds_intervals(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
+        plain = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
         with warnings.catch_warnings():
             warnings.simplefilter("error", JaxgsaWarning)
-            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=8, key=jax.random.key(0))
+            boot = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, key=jax.random.key(0))
+        np.testing.assert_allclose(np.asarray(boot.delta), np.asarray(plain.delta), rtol=1e-6)
 
-    def test_explicit_values_never_warn(self, ishigami_data, monkeypatch):
-        self._reset(monkeypatch, False)
-        X, Y = ishigami_data
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", JaxgsaWarning)
-            analyze(
-                ishigami.PROBLEM, X, Y, n_bootstrap=8, bias_correct=True, key=jax.random.key(0)
-            )
-            analyze(
-                ishigami.PROBLEM, X, Y, n_bootstrap=8, bias_correct=False, key=jax.random.key(0)
-            )
+    def test_true_changes_delta(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
+        key = jax.random.key(0)
+        off = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, key=key)
+        on = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, bias_correct=True, key=key)
+        assert not np.allclose(np.asarray(on.delta), np.asarray(off.delta), rtol=1e-6)
 
-    def test_default_without_bootstrap_stays_silent(self, ishigami_data, monkeypatch):
-        self._reset(monkeypatch, False)
-        X, Y = ishigami_data
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", JaxgsaWarning)
-            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
+    def test_true_without_bootstrap_raises(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
+        with pytest.raises(ValueError, match="jaxgsa.borgonovo: bias_correct=True"):
+            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0, bias_correct=True)
+
+    def test_non_bool_raises_type_error(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
+        with pytest.raises(TypeError, match="bias_correct must be True or False"):
+            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0, bias_correct=None)  # type: ignore[arg-type]

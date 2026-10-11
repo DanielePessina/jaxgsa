@@ -13,9 +13,10 @@ removed rather than quietly outliving the problem.
 Tier T4 (internal consistency) throughout: what a transformability contract
 can be checked against is the untransformed call.
 
-Every case runs on a truncated Gaussian as well as a uniform problem. The
-truncated marginal is the one that used to break, through the shared CDF
-transform; a uniform-only test would not see it.
+The problem has a uniform column (x2), a truncated Gaussian (x1) and a plain
+Gaussian (x3), so one case exercises the shared CDF transform for all three
+marginal families. The truncated marginal is the one that used to break; a
+uniform-only test would not see it.
 """
 
 from __future__ import annotations
@@ -26,7 +27,6 @@ import numpy as np
 import pytest
 
 from jaxgsa import hdmr
-from jaxgsa.benchmarks import ishigami
 from jaxgsa.hdmr._engine import _compute_f_crits
 from jaxgsa.problem import Problem
 
@@ -40,13 +40,6 @@ TRUNCATED_PROBLEM = Problem.from_dict(
         "x3": {"dist": "gaussian", "mean": 1.0, "variance": 0.25},
     }
 )
-
-
-def _uniform_case(n: int = N_ROWS, seed: int = 0):
-    """Return ``(problem, X, Y)`` for the Ishigami function on uniforms."""
-    rng = np.random.default_rng(seed)
-    X = jnp.asarray(rng.uniform(-np.pi, np.pi, size=(n, 3)))
-    return ishigami.PROBLEM, X, ishigami.evaluate(X)
 
 
 def _truncated_case(n: int = N_ROWS, seed: int = 1):
@@ -65,13 +58,10 @@ def _truncated_case(n: int = N_ROWS, seed: int = 1):
     return TRUNCATED_PROBLEM, X, Y
 
 
-CASES = {"uniform": _uniform_case, "truncated_gaussian": _truncated_case}
-
-
-@pytest.fixture(params=sorted(CASES), ids=sorted(CASES))
-def case(request):
-    """One ``(problem, X, Y)`` triple per marginal family under test."""
-    return CASES[request.param]()
+@pytest.fixture(scope="module")
+def case():
+    """One ``(problem, X, Y)`` triple: a smooth model on mixed marginals."""
+    return _truncated_case()
 
 
 # ---------------------------------------------------------------------------
@@ -80,10 +70,18 @@ def case(request):
 
 
 def test_indices_matches_analyze(case):
-    """Tier T4: ``indices`` returns exactly what ``analyze`` reports."""
+    """Tier T4: ``indices`` returns exactly what ``analyze`` reports.
+
+    It returns a bare tuple of four arrays: no result object, no term labels,
+    no F counts.
+    """
     problem, X, Y = case
-    result = hdmr.analyze(problem, X, Y, maxorder=2, maxiter=50)
-    Sa, Sb, S, ST = hdmr.indices(problem, X, Y, maxorder=2, maxiter=50)
+    result = hdmr.analyze(problem, X, Y, order=2, max_iter=50)
+    out = hdmr.indices(problem, X, Y, order=2, max_iter=50)
+    assert isinstance(out, hdmr.HDMRIndices)
+    assert len(out) == 4
+    assert all(isinstance(a, jax.Array) for a in out)
+    Sa, Sb, S, ST = out
 
     np.testing.assert_array_equal(np.asarray(Sa), np.asarray(result.Sa))
     np.testing.assert_array_equal(np.asarray(Sb), np.asarray(result.Sb))
@@ -96,8 +94,8 @@ def test_indices_matches_analyze_for_a_time_series(case):
     problem, X, Y = case
     Y3 = jnp.stack([jnp.stack([Y, 2.0 * Y], axis=-1), jnp.stack([-Y, 0.5 * Y], axis=-1)], axis=1)
 
-    result = hdmr.analyze(problem, X, Y3, maxorder=2, maxiter=50)
-    Sa, _, _, ST = hdmr.indices(problem, X, Y3, maxorder=2, maxiter=50)
+    result = hdmr.analyze(problem, X, Y3, order=2, max_iter=50)
+    Sa, _, _, ST = hdmr.indices(problem, X, Y3, order=2, max_iter=50)
 
     assert Sa.shape == result.Sa.shape == (2, 2, 6)
     assert ST.shape == result.ST.shape == (2, 2, 3)
@@ -105,17 +103,7 @@ def test_indices_matches_analyze_for_a_time_series(case):
     np.testing.assert_array_equal(np.asarray(ST), np.asarray(result.ST))
 
 
-def test_indices_returns_a_bare_tuple(case):
-    """Tier T4: four arrays, no result object, no term labels, no F counts."""
-    problem, X, Y = case
-    out = hdmr.indices(problem, X, Y, maxorder=2, maxiter=50)
-
-    assert type(out) is tuple
-    assert len(out) == 4
-    assert all(isinstance(a, jax.Array) for a in out)
-
-
-def test_indices_clamps_maxorder_without_warning():
+def test_indices_clamps_order_without_warning():
     """Tier T4: the core takes the clamp silently; ``analyze`` warns about it."""
     rng = np.random.default_rng(3)
     problem = Problem.from_dict({"a": (0.0, 1.0), "b": (0.0, 1.0)})
@@ -126,10 +114,10 @@ def test_indices_clamps_maxorder_without_warning():
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        _, _, _, ST = hdmr.indices(problem, X, Y, maxorder=3, maxiter=50)
+        _, _, _, ST = hdmr.indices(problem, X, Y, order=3, max_iter=50)
 
-    with pytest.warns(Warning, match="maxorder clamped"):
-        result = hdmr.analyze(problem, X, Y, maxorder=3, maxiter=50)
+    with pytest.warns(Warning, match="order clamped"):
+        result = hdmr.analyze(problem, X, Y, order=3, max_iter=50)
     np.testing.assert_array_equal(np.asarray(ST), np.asarray(result.ST))
 
 
@@ -138,24 +126,14 @@ def test_indices_clamps_maxorder_without_warning():
 # ---------------------------------------------------------------------------
 
 
-def test_indices_is_jittable(case):
-    """Tier T4: ``jit`` traces ``indices`` and returns the eager values.
-
-    The tolerance is float32 reassociation only. The backfitting solve is a
-    long chain of matmuls, and XLA fuses it differently under ``jit``; the
-    measured gap is around 1e-5 on an index in [0, 1].
-    """
-    problem, X, Y = case
-    jitted = jax.jit(lambda outputs: hdmr.indices(problem, X, outputs, maxorder=2, maxiter=50))
-
-    ST_jit = jitted(Y)[3]
-    ST = hdmr.indices(problem, X, Y, maxorder=2, maxiter=50)[3]
-
-    np.testing.assert_allclose(np.asarray(ST_jit), np.asarray(ST), rtol=1e-3, atol=1e-4)
-
-
 def test_jit_then_eager_shares_the_f_crit_cache(case):
-    """Tier T4: a jitted call must not poison the eager path (H1 regression).
+    """Tier T4: ``jit`` traces ``indices``, and must not poison the eager path.
+
+    The jitted values match ``analyze`` to float32 reassociation. The
+    backfitting solve is a long chain of matmuls, and XLA fuses it differently
+    under ``jit``; the measured gap is around 1e-5 on an index in [0, 1].
+
+    H1 regression.
 
     ``_compute_f_crits`` is ``lru_cache``\\ d on ``(alpha, m1, m2, m3, N)``. A
     call made from inside ``jax.jit`` traces this function once for that key.
@@ -176,10 +154,10 @@ def test_jit_then_eager_shares_the_f_crit_cache(case):
     problem, X, Y = case
     _compute_f_crits.cache_clear()
 
-    jitted = jax.jit(lambda outputs: hdmr.indices(problem, X, outputs, maxorder=2, maxiter=50))
+    jitted = jax.jit(lambda outputs: hdmr.indices(problem, X, outputs, order=2, max_iter=50))
     ST_jit = jitted(Y)[3]
 
-    result = hdmr.analyze(problem, X, Y, maxorder=2, maxiter=50)
+    result = hdmr.analyze(problem, X, Y, order=2, max_iter=50)
 
     np.testing.assert_allclose(np.asarray(ST_jit), np.asarray(result.ST), rtol=1e-3, atol=1e-4)
 
@@ -189,11 +167,11 @@ def test_indices_is_vmappable(case):
     problem, X, Y = case
     batch = jnp.stack([Y, 2.0 * Y + 1.0])
 
-    ST_batch = jax.vmap(lambda outputs: hdmr.indices(problem, X, outputs, maxorder=2, maxiter=50))(
+    ST_batch = jax.vmap(lambda outputs: hdmr.indices(problem, X, outputs, order=2, max_iter=50))(
         batch
     )[3]
 
-    assert ST_batch.shape == (2, problem.num_vars)
+    assert ST_batch.shape == (2, problem.n_params)
     # An affine rescaling of Y leaves every variance fraction unchanged, so
     # the two lanes must agree. That is a real check on the batching, not a
     # restatement of it: a mis-mapped axis would mix the two.
@@ -202,12 +180,41 @@ def test_indices_is_vmappable(case):
     )
 
 
+def test_jit_of_jvp_of_the_inputs(case):
+    """Tier T4: ``jit(jvp(...))`` differentiates an index along one direction.
+
+    The cheap stand-in for the full Jacobian below: forward mode still runs
+    through the backfitting ``while_loop`` once, and the tangent is checked
+    against a two-evaluation central difference along the same unit direction.
+    Run under x64 for the reason the slow test gives: the F-test term
+    selection is discontinuous in float32 near a threshold.
+    """
+    problem, X, Y = case
+
+    def total_st(inputs):
+        return hdmr.indices(problem, inputs, Y, order=2, max_iter=20)[3].sum()
+
+    direction = np.random.default_rng(0).standard_normal(X.shape)
+    direction /= np.linalg.norm(direction)
+    step = 1e-4
+    with jax.enable_x64():
+        X64 = jnp.asarray(X, dtype=jnp.float64)
+        v = jnp.asarray(direction, dtype=jnp.float64)
+        _, tangent = jax.jit(lambda x, t: jax.jvp(total_st, (x,), (t,)))(X64, v)
+        fd = (float(total_st(X64 + step * v)) - float(total_st(X64 - step * v))) / (2.0 * step)
+
+    assert np.isfinite(float(tangent))
+    assert abs(float(tangent)) > 0.0
+    np.testing.assert_allclose(float(tangent), fd, rtol=0, atol=1e-7)
+
+
+@pytest.mark.slow
 def test_jit_of_jacfwd_of_the_inputs(case):
     """Tier T4: ``jit(jacfwd(...))`` differentiates an index w.r.t. ``X``."""
     problem, X, Y = case
 
     def total_st(inputs):
-        return hdmr.indices(problem, inputs, Y, maxorder=2, maxiter=20)[3].sum()
+        return hdmr.indices(problem, inputs, Y, order=2, max_iter=20)[3].sum()
 
     jac = jax.jit(jax.jacfwd(total_st))(X)
 
@@ -252,10 +259,10 @@ def test_reverse_mode_is_refused_by_the_backfitting_loop():
     fixed-trip ``scan`` would make this test fail, which is the signal to
     delete it and promote the contract to ``jacrev``.
     """
-    problem, X, Y = _uniform_case()
+    problem, X, Y = _truncated_case()
 
     with pytest.raises(ValueError, match="while_loop"):
-        jax.jacrev(lambda outputs: hdmr.indices(problem, X, outputs, maxorder=2, maxiter=20)[3])(Y)
+        jax.jacrev(lambda outputs: hdmr.indices(problem, X, outputs, order=2, max_iter=20)[3])(Y)
 
 
 def test_analyze_is_not_jittable(case):

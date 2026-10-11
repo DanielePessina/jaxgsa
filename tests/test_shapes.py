@@ -1,122 +1,66 @@
 """Tests for result shapes over the ``(N,)`` / ``(N, K)`` / ``(N, T, K)`` layouts.
 
 Tier T4 (behavioural contract). No external oracle exists for our own shape
-promotion rules; these tests pin the rank each result comes back at.
+promotion rules; these tests pin the rank each result comes back at, for the
+point estimates and the bootstrap intervals together.
 """
 
 import jax
-import jax.numpy as jnp
+import pytest
 
 import jaxgsa
 from jaxgsa.problem import Problem
 
+N_BOOTSTRAP = 8
 
-def test_2d_input_shape():
-    """2D input (n_runs, K) should squeeze time dimension."""
+
+@pytest.mark.parametrize(
+    ("suffix", "n_bootstrap"),
+    [
+        ((), N_BOOTSTRAP),
+        ((3,), N_BOOTSTRAP),
+        ((2, 3), N_BOOTSTRAP),
+        ((1,), N_BOOTSTRAP),
+        ((2, 3), 0),
+    ],
+    ids=["1d", "2d", "3d", "k1", "3d-no-bootstrap"],
+)
+def test_result_ranks_follow_the_output_layout(suffix, n_bootstrap):
+    """``(N,)`` squeezes time and output, ``(N, K)`` squeezes time, ``(N, T, K)`` keeps both.
+
+    A single output ``(N, 1)`` keeps its output axis. The interval arrays gain
+    a leading axis of two (lower, upper) on the same layout. Without a
+    bootstrap the point estimates keep the same ranks and no interval is set.
+    """
     p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-    sr = jaxgsa.sobol.sample(p, n_samples=256, seed=42, verbose=False)
-    K = 3
-    Y = jnp.ones((sr.n_runs, K))
-    # Add some variation so variance isn't zero
-    Y = Y + jax.random.normal(jax.random.key(1), (sr.n_runs, K))
-    result = jaxgsa.sobol.analyze(sr, Y)
-    assert result.S1.shape == (K, p.num_vars)
-    assert result.ST.shape == (K, p.num_vars)
-    assert result.S2.shape == (K, p.num_vars, p.num_vars)
+    D = p.n_params
+    sr = jaxgsa.sobol.sample(p, n_samples=64, seed=42, verbose=False)
+    Y = jax.random.normal(jax.random.key(1), (sr.n_runs, *suffix))
+    result = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=n_bootstrap, key=jax.random.key(99))
+
+    assert result.S1.shape == (*suffix, D)
+    assert result.ST.shape == (*suffix, D)
+    assert result.S2.shape == (*suffix, D, D)
+    if n_bootstrap == 0:
+        assert result.S1_conf is None
+        assert result.ST_conf is None
+        assert result.S2_conf is None
+        return
+    assert result.S1_conf.shape == (2, *suffix, D)
+    assert result.ST_conf.shape == (2, *suffix, D)
+    assert result.S2_conf.shape == (2, *suffix, D, D)
 
 
-def test_3d_input_shape():
-    """3D input (n_runs, T, K) should preserve both dimensions."""
-    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-    sr = jaxgsa.sobol.sample(p, n_samples=256, seed=42, verbose=False)
-    T, K = 2, 3
-    Y = jax.random.normal(jax.random.key(1), (sr.n_runs, T, K))
-    result = jaxgsa.sobol.analyze(sr, Y)
-    assert result.S1.shape == (T, K, p.num_vars)
-    assert result.ST.shape == (T, K, p.num_vars)
-    assert result.S2.shape == (T, K, p.num_vars, p.num_vars)
-
-
-def test_1d_input_shape():
-    """1D input (n_runs,) should squeeze both time and output dimensions."""
-    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-    sr = jaxgsa.sobol.sample(p, n_samples=256, seed=42, verbose=False)
-    Y = jax.random.normal(jax.random.key(1), (sr.n_runs,))
-    result = jaxgsa.sobol.analyze(sr, Y)
-    assert result.S1.shape == (p.num_vars,)
-    assert result.ST.shape == (p.num_vars,)
-    assert result.S2.shape == (p.num_vars, p.num_vars)
-
-
-def test_single_param():
-    """Single parameter should produce scalar indices, no S2."""
+def test_single_parameter_without_second_order_has_no_s2():
+    """One parameter gives vector-free indices and, with no second order, no S2 at all."""
     p = Problem.from_dict({"x1": (0.0, 1.0)})
-    sr = jaxgsa.sobol.sample(p, n_samples=256, calc_second_order=False, seed=42, verbose=False)
+    sr = jaxgsa.sobol.sample(p, n_samples=64, calc_second_order=False, seed=42, verbose=False)
     Y = jax.random.normal(jax.random.key(1), (sr.n_runs,))
-    result = jaxgsa.sobol.analyze(sr, Y)
-    assert result.S1.shape == (p.num_vars,)
-    assert result.ST.shape == (p.num_vars,)
-    assert result.S2 is None
+    result = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=N_BOOTSTRAP, key=jax.random.key(99))
 
-
-def test_single_output():
-    """Single output (K=1) should still have correct shapes."""
-    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-    sr = jaxgsa.sobol.sample(p, n_samples=256, seed=42, verbose=False)
-    Y = jax.random.normal(jax.random.key(1), (sr.n_runs, 1))
-    result = jaxgsa.sobol.analyze(sr, Y)
-    assert result.S1.shape == (1, p.num_vars)
-    assert result.ST.shape == (1, p.num_vars)
-
-
-# --- Bootstrap shape tests ---
-
-
-def _bootstrap_result(Y_shape_suffix, calc_second_order=True):
-    """Helper: sample, generate Y, run bootstrap analyze."""
-    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-    sr = jaxgsa.sobol.sample(
-        p, n_samples=256, seed=42, calc_second_order=calc_second_order, verbose=False
-    )
-    Y = jax.random.normal(jax.random.key(1), (sr.n_runs, *Y_shape_suffix))
-    return jaxgsa.sobol.analyze(sr, Y, n_bootstrap=50, key=jax.random.key(99)), p
-
-
-def test_bootstrap_1d_shape():
-    """1D Y with bootstrap should have (2, D) conf shapes."""
-    result, p = _bootstrap_result(())
-    D = p.num_vars
-    assert result.S1.shape == (D,)
-    assert result.S1_conf.shape == (2, D)
-    assert result.ST_conf.shape == (2, D)
-    assert result.S2_conf.shape == (2, D, D)
-
-
-def test_bootstrap_2d_shape():
-    """2D Y (n_runs, K) with bootstrap should have (2, K, D) conf shapes."""
-    result, p = _bootstrap_result((3,))
-    D = p.num_vars
-    assert result.S1.shape == (3, D)
-    assert result.S1_conf.shape == (2, 3, D)
-    assert result.ST_conf.shape == (2, 3, D)
-    assert result.S2_conf.shape == (2, 3, D, D)
-
-
-def test_bootstrap_3d_shape():
-    """3D Y (n_runs, T, K) with bootstrap should have (2, T, K, D) conf shapes."""
-    result, p = _bootstrap_result((2, 3))
-    D = p.num_vars
-    assert result.S1.shape == (2, 3, D)
-    assert result.S1_conf.shape == (2, 2, 3, D)
-    assert result.ST_conf.shape == (2, 2, 3, D)
-    assert result.S2_conf.shape == (2, 2, 3, D, D)
-
-
-def test_bootstrap_no_second_order_shape():
-    """Bootstrap without second order: S2_conf should be None."""
-    result, p = _bootstrap_result((), calc_second_order=False)
-    D = p.num_vars
-    assert result.S1_conf.shape == (2, D)
-    assert result.ST_conf.shape == (2, D)
+    assert result.S1.shape == (p.n_params,)
+    assert result.ST.shape == (p.n_params,)
+    assert result.S1_conf.shape == (2, p.n_params)
+    assert result.ST_conf.shape == (2, p.n_params)
     assert result.S2 is None
     assert result.S2_conf is None

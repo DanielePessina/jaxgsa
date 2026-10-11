@@ -58,7 +58,6 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-import jax.numpy as jnp
 import numpy as np
 import numpy.typing as npt
 from jax import Array
@@ -73,12 +72,15 @@ from jaxgsa._core.invalid import (
 from jaxgsa._core.precision import warn_on_float64_downcast
 from jaxgsa._core.validation import (
     YLayout,
+    _layout_of,
     _prepare_Y,
+    _promote_with_zero_stats,
     _raise_categorical_analysis,
     _raise_correlated_analysis,
     _validate_output,
     _validate_x,
     _warn_zero_variance_slices,
+    to_device,
 )
 
 if TYPE_CHECKING:
@@ -89,6 +91,7 @@ __all__ = [
     "Context",
     "ScalarCheck",
     "at_least",
+    "bootstrap_checks",
     "check_scalars",
     "gates",
     "in_open_interval",
@@ -148,18 +151,52 @@ def one_of(name: str, value: object, options: Sequence[object]) -> ScalarCheck:
     )
 
 
-def check_scalars(checks: Sequence[ScalarCheck]) -> None:
+def bootstrap_checks(
+    n_bootstrap: int, ci_method: object, conf_level: float, key: object
+) -> tuple[ScalarCheck, ...]:
+    """The argument checks every bootstrapped ``analyze()`` shares.
+
+    The key check sits with the other cheap argument checks, so a missing key
+    is reported before the point estimate is paid for.
+
+    Args:
+        n_bootstrap: Bootstrap replicates requested.
+        ci_method: How the interval is built.
+        conf_level: Confidence level of the interval.
+        key: PRNG key for the resampling, or ``None``.
+
+    Returns:
+        The verdicts, in the order they are reported.
+    """
+    return (
+        at_least("n_bootstrap", n_bootstrap, 0),
+        one_of("ci_method", ci_method, ("quantile", "gaussian")),
+        in_open_interval("conf_level", conf_level, 0.0, 1.0),
+        require(
+            not (n_bootstrap > 0 and key is None),
+            "key is required when n_bootstrap > 0",
+        ),
+    )
+
+
+def check_scalars(checks: Sequence[ScalarCheck], method: str | None = None) -> None:
     """Raise on the first failing scalar argument.
 
     Args:
         checks: The verdicts, in the order the caller wants them reported.
+        method: The public entry point, such as ``"jaxgsa.rank.analyze"``.
+            When set, the message starts with its module (``jaxgsa.rank: ``)
+            unless it already names ``jaxgsa``.
 
     Raises:
         ValueError: On the first check that did not pass.
     """
     for check in checks:
         if not check.ok:
-            raise ValueError(check.message)
+            message = check.message
+            if method is not None and not message.startswith("jaxgsa"):
+                message = f"{method.rsplit('.', 1)[0]}: {message}"
+            raise ValueError(message)
 
 
 def gates(
@@ -224,7 +261,7 @@ class Context:
             :func:`prepare`, under the same names, checked with ``Y`` and
             compacted with it.
         deferred_expand: The design's output re-expansion, held back from
-            the eager preamble. Only set under ``on_invalid="none"`` (the
+            the eager preamble. Only set under ``on_invalid="skip"`` (the
             non-finite check never reads the expanded rows then), so the
             expansion can ride along with the estimator instead of
             materialising the expanded array first. ``None`` when the
@@ -319,7 +356,7 @@ def prepare(
         Y: The caller's model output.
         X: The input matrix, or ``None`` for a design-based method.
         on_invalid: The caller's non-finite policy, unvalidated. Under
-            ``"none"`` (see :mod:`jaxgsa._core.invalid`) the non-finite scan
+            ``"skip"`` (see :mod:`jaxgsa._core.invalid`) the non-finite scan
             does not run, no row is dropped, and the constant-slice warning is
             skipped with it: the analysis runs on the data exactly as given.
             The shape contracts still run, because they cost no scan.
@@ -393,7 +430,7 @@ def prepare(
         unit=unit,
         allow_drop=unit is not InvalidUnit.CURVE,
     )
-    check_scalars(checks)
+    check_scalars(checks, method)
 
     # The design-based methods gated in sample(). There is no design to
     # analyze that the sampler did not already agree to build, so re-gating
@@ -405,23 +442,24 @@ def prepare(
     # extra digits with x64 off, and the dtype it had is unreadable
     # afterwards. X is not a candidate; see warn_on_float64_downcast.
     warn_on_float64_downcast(method, {"Y": Y})
-    extra_arrays = {name: jnp.asarray(a) for name, a in (extra or {}).items()}
+    extra_arrays = {name: to_device(a) for name, a in (extra or {}).items()}
 
     if X is not None:
         X = validate_inputs(problem, X)
         if n_expected is None:
             n_expected = int(X.shape[0])
-    Y = _validate_output(Y, n_expected, problem)
+    # Without X, the row count comes from the design the sampler built.
+    Y = _validate_output(Y, n_expected, problem, "X" if X is not None else "samples.samples")
     deferred_expand: Callable[[Array], Array] | None = None
     if expand is not None:
         # The user evaluated the model once per unique row. The estimator,
         # and the unit the check works in, both live in the expanded layout.
-        # Under on_invalid='none' the check never reads the expanded rows,
+        # Under on_invalid='skip' the check never reads the expanded rows,
         # so the expansion is deferred to the estimator (which may fuse it
         # with the standardization; see Context.deferred_expand); under
         # every other policy it must happen here, before the check sees the
         # data, and the context carries the already-expanded layout.
-        if policy == "none":
+        if policy == "skip":
             deferred_expand = expand
         else:
             Y = expand(Y)
@@ -450,16 +488,25 @@ def prepare(
             X = X[mask]
         extra_arrays = {name: a[mask] for name, a in extra_arrays.items()}
 
-    Y3, layout = _prepare_Y(Y)
+    zero_stats: tuple[Array, Array] | None = None
+    check_zero = warn_zero_variance and policy != "skip"
+    # The warning has to see what the estimator will see. For a grouped
+    # unit the caller has not compacted yet, so the surviving rows are
+    # selected here; leaving the dropped rows in would hide a constant
+    # slice behind the non-finite values that were removed.
+    Y_kept = Y
+    if check_zero and unit_of_row is not None and not keep.all():
+        Y_kept = Y[np.asarray(keep)[unit_of_row]]
+    if check_zero and Y_kept is Y:
+        # Promotion and the zero-variance scan share one compiled program,
+        # so the first call compiles once instead of once per eager op.
+        Y3_new, mask, count = _promote_with_zero_stats(Y)
+        zero_stats = (mask, count)
+        Y3, layout = (Y if Y3_new is None else Y3_new), _layout_of(Y)
+    else:
+        Y3, layout = _prepare_Y(Y)
 
-    if warn_zero_variance and policy != "none":
-        # The warning has to see what the estimator will see. For a grouped
-        # unit the caller has not compacted yet, so the surviving rows are
-        # selected here; leaving the dropped rows in would hide a constant
-        # slice behind the non-finite values that were removed.
-        Y_kept = Y
-        if unit_of_row is not None and not keep.all():
-            Y_kept = Y[np.asarray(keep)[unit_of_row]]
+    if check_zero:
         # Warned on the caller's own rank, not on Y3: a (N, K) output then
         # gets "k=2" rather than the fabricated "(t=0, k=2)" that the
         # inserted singleton time axis would produce.
@@ -476,6 +523,7 @@ def prepare(
             outcome=zero_variance_outcome,
             stacklevel=4,
             method=method,
+            zero_stats=zero_stats,
         )
 
     return Context(
@@ -513,6 +561,6 @@ def validate_inputs(problem: Problem, X: Any) -> Array:
     Raises:
         ValueError: If ``X`` is not ``(N, D)`` for the problem's ``D``.
     """
-    X = jnp.asarray(X)
+    X = to_device(X)
     _validate_x(problem, X)
     return X

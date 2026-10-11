@@ -30,19 +30,46 @@ would end up labelled ``param`` in an exported netCDF file.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
+import jax.numpy as jnp
 import numpy as np
 import xarray as xr
 
+from jaxgsa._core.samples import _jaxgsa_version
 from jaxgsa._core.validation import _dims_and_coords
+from jaxgsa._core.warning_types import JaxgsaWarning
 
 if TYPE_CHECKING:
     from jax import Array
 
     from jaxgsa.problem import Problem
+
+
+def _method_name(cls: type) -> str:
+    """Return the jaxgsa method package that defines a result class.
+
+    Walks the class hierarchy for the first class defined inside ``jaxgsa``
+    and returns its package name, for example ``"sobol"``. A subclass defined
+    in user code therefore reports the method of its jaxgsa parent.
+
+    Args:
+        cls: A result class.
+
+    Returns:
+        The second part of the module path of the first jaxgsa class found.
+        Falls back to the module's own second part, or its full name, when no
+        class in the hierarchy lives in ``jaxgsa``.
+    """
+    for klass in cls.__mro__:
+        parts = klass.__module__.split(".")
+        if parts[0] == "jaxgsa" and len(parts) > 1:
+            return parts[1]
+    parts = cls.__module__.split(".")
+    return parts[1] if len(parts) > 1 else parts[0]
 
 
 @dataclass(frozen=True)
@@ -258,6 +285,10 @@ class SchemaResult:
         override that reproduces this mapping is drift waiting to happen; no
         result class needs one today.
 
+        Every dataset also gets ``method`` (the method's package name, such
+        as ``"sobol"``) and ``jaxgsa_version``, so a saved file says which
+        analysis and which release made it.
+
         A saved interval must say what it is, so a result that carries a
         ``ci`` (a :class:`CIInfo`) also gets ``ci_level``, ``ci_method`` and
         ``ci_n_bootstrap`` written here, under those exact names. ``ci`` is
@@ -271,7 +302,10 @@ class SchemaResult:
         Returns:
             A mapping written to ``xr.Dataset.attrs``.
         """
-        attrs: dict[str, Any] = {}
+        attrs: dict[str, Any] = {
+            "method": _method_name(type(self)),
+            "jaxgsa_version": _jaxgsa_version(),
+        }
         for name in self._schema.meta:
             value = getattr(self, name)
             if value is None:
@@ -396,3 +430,158 @@ class SchemaResult:
         if ci is not None:
             parts.append(f"ci={ci!r}")
         return f"{type(self).__name__}({', '.join(parts)})"
+
+
+AggregateWeights = Literal["variance", "equal"]
+"""How :func:`aggregate_indices` weights the output slices."""
+
+
+def aggregate_indices(
+    result: SchemaResult,
+    *,
+    weights: AggregateWeights,
+    variance: Any,
+    extra_fields: tuple[FieldSpec, ...] = (),
+) -> dict[str, Any]:
+    """Collapse the output axes of a result's index fields into one index per input.
+
+    This is the shared core of ``aggregate()`` on ``SobolResult``,
+    ``KucherenkoResult`` and ``PCEResult``. It acts on every declared field
+    that has an interval companion and the axes ``"param"`` or ``"pair"``
+    (``S1``, ``ST``, ``S2``). Each one becomes ``sum_t w_t * field_t`` over
+    the leading output axes, which stay in place with size 1. A result with
+    no output axes (a ``(D,)`` index) comes back unchanged, and so does one
+    whose output axes already have a single slice.
+
+    A slice with weight exactly 0 (a constant output) adds 0, even when its
+    index is ``NaN``. A slice with a positive weight and a ``NaN`` index makes
+    the aggregate ``NaN``.
+
+    The interval is never aggregated bound by bound, because that is not a
+    valid interval. When the result kept its bootstrap draws, each draw is
+    aggregated and the interval is drawn again from the aggregated draws.
+    Otherwise the interval is dropped (``None``, ``ci`` too) and one
+    :class:`JaxgsaWarning` says so.
+
+    Args:
+        result: A result whose primary field has 1, 2 or 3 dimensions.
+        weights: ``"variance"`` weights slice ``t`` by ``V_t / sum(V)``.
+            ``"equal"`` weights every slice by ``1 / n_slices``.
+        variance: Output variance per slice, shape ``()``, ``(K,)`` or
+            ``(T, K)``. It is read only for ``weights="variance"``.
+        extra_fields: Index fields to collapse in addition to the schema's
+            own, for a result that holds optional extra indices.
+
+    Returns:
+        A mapping of field name to new value, ready for
+        :func:`dataclasses.replace`. It holds the aggregated index fields,
+        their ``*_conf`` fields and ``ci``, and the summed ``variance`` when
+        the result has a ``variance`` field.
+
+    Warns:
+        JaxgsaWarning: If the result has a bootstrap interval but kept no
+            replicates, so the interval cannot be aggregated and is dropped.
+
+    Raises:
+        ValueError: If ``weights`` is not ``"variance"`` or ``"equal"``, if
+            the result has no regular output layout, or if ``weights`` is
+            ``"variance"`` and ``variance`` is missing or has the wrong shape.
+    """
+    if weights not in ("variance", "equal"):
+        raise ValueError(f"weights must be 'variance' or 'equal', got {weights!r}")
+    schema = result._schema
+    primary = getattr(result, schema.primary)
+    ndim = np.ndim(primary)
+    if ndim not in (1, 2, 3):
+        raise ValueError(
+            f"cannot aggregate a result whose {schema.primary} has {ndim} dimensions: "
+            "only the regular (D,), (K, D) and (T, K, D) layouts have output axes to collapse"
+        )
+    lead = tuple(np.shape(primary)[:-1])
+    names = [
+        spec
+        for spec in (*schema.fields, *extra_fields)
+        if spec.interval
+        and spec.axes in ("param", "pair")
+        and getattr(result, spec.name) is not None
+    ]
+    n_slices = int(np.prod(lead)) if lead else 1
+
+    ci = getattr(result, "ci", None)
+    out: dict[str, Any] = {}
+    if n_slices == 1:
+        # One output slice: the weights are 1, so the indices and their
+        # intervals are already the aggregate.
+        return out
+
+    if weights == "equal":
+        w = jnp.full(lead, 1.0 / n_slices)
+    else:
+        if variance is None:
+            raise ValueError(
+                "weights='variance' needs the per-output variance, but this result "
+                "carries none (it was built without one). "
+                "Use weights='equal', or run the analysis again."
+            )
+        v = jnp.asarray(variance)
+        if v.shape != lead:
+            raise ValueError(f"variance has shape {v.shape}, expected {lead}")
+        w = v / jnp.sum(v)
+
+    # A result that stores its own output variance keeps the summed variance.
+    own_variance = getattr(result, "variance", None)
+    if own_variance is not None:
+        out["variance"] = jnp.asarray(own_variance).sum(keepdims=True)
+
+    # The output axis now holds one slice, so its label is "aggregate". Keeping
+    # the original output names would break to_dataset (K names, one slice).
+    problem = getattr(result, "problem", None)
+    if problem is not None:
+        out["problem"] = problem.with_output_names(("aggregate",))
+
+    def collapse(arr: Any, n_trailing: int, offset: int) -> Any:
+        arr = jnp.asarray(arr)
+        wb = w.reshape((1,) * offset + lead + (1,) * n_trailing).astype(arr.dtype)
+        terms = jnp.where(wb == 0, 0.0, wb * arr)
+        axes = tuple(range(offset, offset + len(lead)))
+        return jnp.sum(terms, axis=axes, keepdims=True)
+
+    points: dict[str, Any] = {}
+    for spec in names:
+        n_trailing = 1 if spec.axes == "param" else 2
+        points[spec.name] = collapse(getattr(result, spec.name), n_trailing, 0)
+        out[spec.name] = points[spec.name]
+
+    replicates = ci.replicates if ci is not None else None
+    have_conf = [s for s in names if getattr(result, f"{s.name}_conf", None) is not None]
+    if ci is not None and replicates is not None and all(s.name in replicates for s in have_conf):
+        from jaxgsa._core.bootstrap import interval
+
+        draws = {
+            s.name: collapse(replicates[s.name], 1 if s.axes == "param" else 2, 1)
+            for s in have_conf
+        }
+        conf, new_ci = interval(
+            {s.name: points[s.name] for s in have_conf},
+            draws,
+            level=ci.level,
+            method=ci.method,
+            n_bootstrap=ci.n_bootstrap,
+            keep_replicates=True,
+        )
+        for s in have_conf:
+            out[f"{s.name}_conf"] = conf[s.name]
+        out["ci"] = new_ci
+    else:
+        if have_conf:
+            warnings.warn(
+                "aggregate() dropped the confidence intervals, because it needs the "
+                "bootstrap replicates to aggregate them. Run analyze again with "
+                "keep_replicates=True.",
+                JaxgsaWarning,
+                stacklevel=3,
+            )
+            for s in have_conf:
+                out[f"{s.name}_conf"] = None
+            out["ci"] = None
+    return out

@@ -22,7 +22,7 @@ s1_ana = np.asarray(oakley_ohagan.ANALYTICAL_S1)
 st_ana = np.asarray(oakley_ohagan.ANALYTICAL_ST)
 names = list(problem.names)
 
-print(f"Dimensions: {problem.num_vars}")
+print(f"Dimensions: {problem.n_params}")
 print("Distribution: Gaussian N(0, 1) for all inputs")
 print(f"\nAnalytical S1:  {np.array2string(s1_ana, precision=4)}")
 print(f"Analytical ST:  {np.array2string(st_ana, precision=4)}")
@@ -140,10 +140,10 @@ _fig.tight_layout()
 plt.show()
 
 _key = jax.random.key(0)
-X_hd = jax.random.normal(_key, (3000, problem.num_vars))
+X_hd = jax.random.normal(_key, (3000, problem.n_params))
 Y_hd = oakley_ohagan.evaluate(jnp.asarray(X_hd))
 
-hdmr_result = jaxgsa.hdmr.analyze(problem, X_hd, Y_hd, maxorder=2, m=2)
+hdmr_result = jaxgsa.hdmr.analyze(problem, X_hd, Y_hd, order=2, n_intervals=2)
 print(hdmr_result)
 
 
@@ -155,8 +155,8 @@ def oakley_fn(x):
 _test = oakley_fn(jnp.zeros(15))
 print(f"f(0) = {_test:.4f}")
 
-X_dg = jaxgsa.sampling.monte_carlo(problem, n=10000, seed=42)
-dgsm_result = jaxgsa.dgsm.analyze(problem, oakley_fn, jnp.asarray(X_dg))
+X_dg = jaxgsa.sampling.monte_carlo(problem, n_samples=10000, seed=42)
+dgsm_result = jaxgsa.dgsm.analyze(problem, jnp.asarray(X_dg), fn=oakley_fn)
 print(dgsm_result)
 
 _ub = np.asarray(dgsm_result.upper_bound)

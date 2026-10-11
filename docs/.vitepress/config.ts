@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitepress'
 import type { HeadConfig } from 'vitepress'
 
-const siteUrl = 'https://danielepessina.github.io/jaxgsa'
+const siteUrl = 'https://danielepessina.github.io/jaxgsa/'
 
 const description = 'Global Sensitivity Analysis in JAX'
 
@@ -49,7 +49,7 @@ export default defineConfig({
   sitemap: {
     hostname: siteUrl,
     transformItems(items) {
-      return [...items, { url: `${siteUrl}workbench/` }]
+      return [...items, { url: 'studio/' }]
     },
   },
 
@@ -183,6 +183,7 @@ export default defineConfig({
           items: [
             { text: 'HSIC', link: '/api/hsic' },
             { text: 'PAWN', link: '/api/pawn' },
+            { text: 'Rank-based S1', link: '/api/rank' },
             { text: 'Borgonovo delta', link: '/api/borgonovo' },
             { text: 'Optimal transport', link: '/api/optimal-transport' },
           ],

@@ -60,7 +60,7 @@ you indices for a plant you do not operate.
 `jaxgsa.sampling.monte_carlo` draws every marginal, categorical included.
 
 ```python
-X = jaxgsa.sampling.monte_carlo(problem, n=8192, seed=0)
+X = jaxgsa.sampling.monte_carlo(problem, n_samples=8192, seed=0)
 codes = X[:, 1].astype(int)
 print("observed level frequencies:", np.round(np.bincount(codes) / len(codes), 3))
 
@@ -98,7 +98,7 @@ ot_result = jaxgsa.optimal_transport.analyze(problem, X, Y)
 jaxgsa.optimal_transport.analyze
   problem: D=2 (temperature, catalyst)
     marginals: uniform=1, categorical=1
-    correlation: independent
+    dependence: independent
     output: N=8192 runs, T=1 x K=1 output slice
     invalid: none found in 8192 rows (policy 'raise')
   timing:
@@ -124,7 +124,7 @@ print("advective :", np.round(ot_result.advective, 3))
 print("delta     :", np.round(delta_result.delta, 3))
 print("delta's S1:", np.round(delta_result.S1, 3))
 print("pawn      :", np.round(pawn_result.pawn, 3))
-print("valid bins:", pawn_result.n_valid_bins)
+print("valid bins:", pawn_result.n_valid_classes)
 ```
 
 ```
@@ -146,13 +146,13 @@ they were the same quantity. Compare within a column.
 Two extras worth reading here. `advective` is the share of the
 optimal-transport index that comes from a shift in the output mean, as opposed
 to a change in the distribution's shape. For `catalyst` it is 0.110 out of
-0.154, so most of what the catalyst does is move the mean. `n_valid_bins` is
+0.154, so most of what the catalyst does is move the mean. `n_valid_classes` is
 `[10, 3]`: ten quantile bins for the continuous temperature, and exactly three
 for the catalyst, one per level. If that second number ever comes back below
 `L`, a declared level was too rare to estimate and PAWN dropped it.
 
 A declared level with no observed samples is dropped from the class average,
-with a `JaxgsaWarning`. `n_partitions` / `n_classes` / `n_bins` apply to the
+with a `JaxgsaWarning`. `n_classes` (PAWN, Borgonovo, OT) applies to the
 continuous columns only. PAWN gives a level with too few samples a `NaN` KS
 value and drops it from the median, max, or mean over bins, so a rare level
 cannot distort the index.
@@ -201,7 +201,7 @@ rng = np.random.default_rng(0)
 pc = jaxgsa.Problem.from_dict(
     {"x": (0.0, 1.0), "lvl": {"dist": "categorical", "probs": [1 / 3, 1 / 3, 1 / 3]}}
 )
-Xc = jaxgsa.sampling.monte_carlo(pc, n=16384, seed=0)
+Xc = jaxgsa.sampling.monte_carlo(pc, n_samples=16384, seed=0)
 lvl = Xc[:, 1].astype(int)
 Yc = np.array([0.0, 1.0, 2.0])[lvl] + 1e-3 * rng.standard_normal(len(lvl))
 
@@ -262,7 +262,7 @@ jaxgsa.sobol.sample: D=2, mode=second-order, base_n=4096, requested_runs>=8192, 
 jaxgsa.sobol.analyze
   problem: D=2 (temperature, catalyst)
     marginals: uniform=1, categorical=1
-    correlation: independent
+    dependence: independent
     output: N=24576 runs, T=1 x K=1 output slice
     invalid: none found in 4096 Saltelli groups (policy 'raise')
   timing:
@@ -354,10 +354,11 @@ jaxgsa.morris.sample(problem, n_trajectories=16)
 
 ```
 ValueError: jaxgsa.morris.sample requires continuous (orderable) inputs, but
-parameters ['catalyst'] are categorical. Use jaxgsa.sobol.sample (the Saltelli
-column-swap scheme is distribution-agnostic; it requires a problem with no
-declared correlation), or analyze given data with jaxgsa.optimal_transport,
-jaxgsa.borgonovo or jaxgsa.pawn.
+parameters ['catalyst'] are categorical. Use a categorical-aware method instead:
+jaxgsa.optimal_transport, jaxgsa.borgonovo, and jaxgsa.pawn (one conditioning
+class per level), or the design-based jaxgsa.sobol Saltelli pipeline. The
+Saltelli design comes from jaxgsa.sobol.sample and needs a problem with no
+declared correlation.
 ```
 
 Morris and eFAST are the two that cannot be repaired, and they fail for the

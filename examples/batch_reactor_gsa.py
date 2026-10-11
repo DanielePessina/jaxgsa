@@ -38,17 +38,17 @@ problem = jaxgsa.Problem.from_dict(
     output_names=("Ca",),
 )
 
-sampling_result = jaxgsa.sobol.sample(
+samples_design = jaxgsa.sobol.sample(
     problem,
     n_samples=4096,
     seed=0,
     calc_second_order=True,
 )
-print(f"unique Saltelli rows: {sampling_result.samples.shape}")
+print(f"unique Saltelli rows: {samples_design.samples.shape}")
 
 ts = jnp.asarray(np.linspace(0.05, 6.0, 40))
 
-X = jnp.asarray(sampling_result.samples)
+X = jnp.asarray(samples_design.samples)
 Ca0 = X[:, 0:1]
 temperature_C = X[:, 1:2]
 pH = X[:, 2:3]
@@ -77,7 +77,7 @@ fig_traj.tight_layout()
 plt.show()
 
 result = jaxgsa.sobol.analyze(
-    sampling_result,
+    samples_design,
     Y,
     n_bootstrap=200,
     conf_level=0.95,

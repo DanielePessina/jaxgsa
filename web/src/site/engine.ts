@@ -2,7 +2,7 @@
  * The site engine: jax-js device bootstrap, CSV/run_id exchange helpers, and
  * the thin typed wrappers that wire the React layer to the method ports.
  *
- * Ownership rule (see PLAN-WASM.md): every port call consumes its input
+ * Ownership rule (see web/docs/PLAN-WASM.md): every port call consumes its input
  * arrays. The analyze ports build their own device copies from the host
  * arrays they receive, and `analyzeKucherenko` additionally consumes the
  * `np.Array` objects this module builds — so each workflow call creates
@@ -18,12 +18,13 @@ import { sampleKucherenkoDesign, type KucherenkoDesign } from "@/jaxgsa/kucheren
 import { analyzeMorris, type MorrisMeasures } from "@/jaxgsa/morris/analyze";
 import { sampleMorris, type MorrisDesign } from "@/jaxgsa/morris/sample";
 import { analyzePawn, type PawnIndices } from "@/jaxgsa/pawn/analyze";
-import { analyzePce, type PceIndices } from "@/jaxgsa/pce/analyze";
+import { analyzePce, type PceDiagnostics, type PceIndices } from "@/jaxgsa/pce/analyze";
 import { analyzeSobol, type SobolIndices } from "@/jaxgsa/sobol/analyze";
 import { sample, type SobolDesign } from "@/jaxgsa/sobol/sample";
 import { sobolSequence } from "@/jaxgsa/sobol/sampler";
 import { transformSamples, type ProblemSpec } from "@/jaxgsa/sampling";
-import { analyzeShapleyPce, type ShapleyIndices } from "@/jaxgsa/shapley/analyze";
+import { analyzeShapleyPce, type ShapleyPceResult } from "@/jaxgsa/shapley/analyze";
+import { efastLowNWarning, pceFitWarnings, type SliceFit } from "./analysisGuards";
 import type { Demo } from "./demos";
 
 // ---------------------------------------------------------------------------
@@ -79,7 +80,7 @@ export interface ParsedCsv {
 }
 
 // ---------------------------------------------------------------------------
-// Y exchange model (PLAN-WEB-UI.md D1)
+// Y exchange model (web/docs/PLAN-WEB-UI.md D1)
 // ---------------------------------------------------------------------------
 
 /** One output column of a Y upload: an output at a single time point. */
@@ -252,39 +253,176 @@ export function describeY(y: YData): string {
   return `${outputDesc} · ${timeDesc} · ${y.rowCount} runs`;
 }
 
+/** Cap on the number of cells (rows x columns) any upload may hold. */
+export const MAX_CELLS = 5_000_000;
+
+/** A finite decimal: sign, digits, optional fraction, optional exponent. No hex, no "Infinity". */
+const DECIMAL_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+
+/** A number written with a decimal comma, e.g. "1,5" or "-0,25". */
+const DECIMAL_COMMA_RE = /^[+-]?\d+,\d+$/;
+
 /**
- * Parse a plain CSV: one header row, comma-separated numbers, tolerant of
- * trailing newlines and blank lines. Throws on non-numeric cells.
+ * Parse one text cell as a finite decimal number. `Number()` alone would
+ * accept "Infinity", "0x10" and "1e999", so the text is checked first.
  */
-export function parseCsv(text: string): ParsedCsv {
-  const lines = text.split(/\r?\n/);
+export function parseDecimal(
+  raw: string,
+): { value: number } | { reason: "not a number" | "not a finite number" } {
+  const text = raw.trim();
 
-  while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+  if (/^[+-]?inf(?:inity)?$/i.test(text)) return { reason: "not a finite number" };
 
-  if (lines.length === 0) return { headers: [], rows: [] };
+  if (!DECIMAL_RE.test(text)) return { reason: "not a number" };
 
-  const headers = lines[0].split(",").map((s) => s.trim());
+  const value = Number(text);
+
+  if (!Number.isFinite(value)) return { reason: "not a finite number" };
+
+  return { value };
+}
+
+const DELIMITERS = [",", ";", "\t"] as const;
+
+/** Pick the delimiter that occurs most often (outside quotes) in the header line. */
+function detectDelimiter(headerLine: string): string {
+  const counts = new Map<string, number>(DELIMITERS.map((d) => [d, 0]));
+  let inQuotes = false;
+
+  for (const ch of headerLine) {
+    if (ch === '"') inQuotes = !inQuotes;
+    else if (!inQuotes && counts.has(ch)) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+  }
+
+  let best: string = ",";
+  let bestCount = 0;
+
+  for (const d of DELIMITERS) {
+    const c = counts.get(d) ?? 0;
+
+    if (c > bestCount) {
+      best = d;
+      bestCount = c;
+    }
+  }
+
+  return best;
+}
+
+/** Split one CSV line into trimmed fields, honouring double-quoted fields. */
+function splitFields(line: string, delimiter: string, lineNo: number): string[] {
+  if (!line.includes('"')) return line.split(delimiter).map((s) => s.trim());
+
+  const fields: string[] = [];
+  let field = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+
+    if (inQuotes) {
+      if (ch !== '"') field += ch;
+      else if (line[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else inQuotes = false;
+    } else if (ch === '"') inQuotes = true;
+    else if (ch === delimiter) {
+      fields.push(field.trim());
+      field = "";
+    } else field += ch;
+  }
+
+  if (inQuotes) {
+    throw new Error(
+      `line ${lineNo}: a quoted field is not closed. ` +
+        `Line breaks inside quoted fields are not supported`,
+    );
+  }
+
+  fields.push(field.trim());
+
+  return fields;
+}
+
+/**
+ * Parse a numeric CSV: one header row, then finite decimal numbers. The
+ * delimiter (comma, semicolon or tab) is detected from the header line.
+ * Double-quoted fields, a UTF-8 BOM, CRLF line ends and blank lines are
+ * tolerated. The size is checked from the line count before any row is built.
+ * Throws on empty or non-numeric cells, naming the line and column.
+ */
+export function parseCsv(text: string, maxCells: number = MAX_CELLS): ParsedCsv {
+  const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  const firstEnd = body.indexOf("\n");
+
+  const headerLine = (firstEnd < 0 ? body : body.slice(0, firstEnd)).replace(/\r$/, "");
+
+  if (body.trim() === "") return { headers: [], rows: [] };
+
+  const delimiter = detectDelimiter(headerLine);
+  const headers = splitFields(headerLine, delimiter, 1);
+
+  // Upper bound on data rows: every remaining line, blank or not.
+  let newlines = 0;
+
+  for (let at = body.indexOf("\n"); at >= 0; at = body.indexOf("\n", at + 1)) newlines++;
+
+  const rowBound = body.endsWith("\n") ? newlines - 1 : newlines;
+
+  if (rowBound * headers.length > maxCells) {
+    throw new Error(
+      `file is too large: ${rowBound} rows x ${headers.length} ` +
+        `columns exceeds the ${maxCells.toLocaleString()} cell limit`,
+    );
+  }
+
+  const lines = body.split("\n");
   const rows: number[][] = [];
 
   for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
+    const line = lines[i].replace(/\r$/, "");
 
-    if (line === "") continue;
-    const cells = line.split(",").map((s) => s.trim());
+    if (line.trim() === "") continue;
+
+    const cells = splitFields(line, delimiter, i + 1);
+
+    // A one-column file with decimal commas ("1,5") splits into two cells.
+    if (headers.length === 1 && cells.length === 2 && DECIMAL_COMMA_RE.test(line.trim())) {
+      throw new Error(
+        `line ${i + 1}, column "${headers[0]}": "${line.trim()}" uses a decimal comma. ` +
+          `Write decimals with a point (1.5)`,
+      );
+    }
+
+    // Reject at the first row of the wrong width, before more rows are built.
+    if (cells.length !== headers.length) {
+      throw new Error(
+        `line ${i + 1}: expected ${headers.length} columns, found ${cells.length}`,
+      );
+    }
+
     const row: number[] = [];
 
     for (let j = 0; j < cells.length; j++) {
-      if (cells[j] === "") {
-        throw new Error(`line ${i + 1}: empty cell in column ${j + 1}`);
+      const where = `line ${i + 1}, column "${headers[j] ?? `#${j + 1}`}"`;
+
+      if (cells[j] === "") throw new Error(`${where}: empty cell`);
+
+      const parsed = parseDecimal(cells[j]);
+
+      if ("reason" in parsed) {
+        if (delimiter !== "," && DECIMAL_COMMA_RE.test(cells[j])) {
+          throw new Error(
+            `${where}: "${cells[j]}" uses a decimal comma. Write decimals with a ` +
+              `point (1.5), or save the file with comma delimiters`,
+          );
+        }
+
+        throw new Error(`${where}: "${cells[j]}" is ${parsed.reason}`);
       }
 
-      const v = Number(cells[j]);
-
-      if (Number.isNaN(v)) {
-        throw new Error(`line ${i + 1}: "${cells[j]}" is not a number`);
-      }
-
-      row.push(v);
+      row.push(parsed.value);
     }
 
     rows.push(row);
@@ -294,13 +432,58 @@ export function parseCsv(text: string): ParsedCsv {
 }
 
 /**
+ * Why a parameter name cannot be written to (or read back from) a CSV
+ * header, or null when it is fine. It is used by `buildDesignCsv` (the design
+ * download) and by the problem table, which checks each parameter name.
+ */
+export function validateParameterName(name: string): string | null {
+  if (name === "") return "A parameter name is empty.";
+
+  if (name.trim() !== name) {
+    return `Parameter name "${name}" has spaces at the start or end.`;
+  }
+
+  if (/[",;\t\r\n]/.test(name)) {
+    return (
+      `Parameter name "${name}" must not contain commas, semicolons, tabs, ` +
+      `quotes or line breaks.`
+    );
+  }
+
+  if (name === "run_id") {
+    return 'Parameter name "run_id" is reserved for the run index.';
+  }
+
+  if (TIME_SUFFIX_RE.test(name)) {
+    return (
+      `Parameter name "${name}" must not end with _t and a number. ` +
+      `That suffix marks a time point in the Y file.`
+    );
+  }
+
+  return null;
+}
+
+/**
  * Serialize a design to CSV: a `run_id` column (0..n_runs-1, the canonical
  * row order) followed by one parameter column per problem marginal.
+ * Throws when a parameter name would make the header unreadable.
  */
 export function buildDesignCsv(
   problem: ProblemSpec,
   design: { samples: Float64Array },
 ): string {
+  const seenNames = new Set<string>();
+
+  for (const name of problem.names) {
+    const bad = validateParameterName(name);
+
+    if (bad) throw new Error(bad);
+
+    if (seenNames.has(name)) throw new Error(`Parameter name "${name}" appears twice.`);
+    seenNames.add(name);
+  }
+
   const D = problem.names.length;
   const nRuns = design.samples.length / D;
   const lines = [`run_id,${problem.names.join(",")}`];
@@ -381,6 +564,58 @@ export function alignColumnsByRunId(
   });
 }
 
+/**
+ * Align Y columns onto an uploaded X by run_id. `yIds[i]` is the run_id of Y
+ * row `i`; `xIds[k]` is the run_id of X row `k`. Both must hold exactly the
+ * same set of ids. Returns the columns reordered into X row order.
+ * Throws on a non-integer, duplicate, extra or missing id.
+ */
+export function alignColumnsToXRunIds(
+  columns: YColumn[],
+  yIds: number[],
+  xIds: number[],
+): YColumn[] {
+  const position = new Map<number, number>();
+
+  xIds.forEach((id, k) => position.set(id, k));
+
+  const seen = new Set<number>();
+  const target: number[] = [];
+
+  for (let i = 0; i < yIds.length; i++) {
+    const id = yIds[i];
+
+    if (!Number.isInteger(id)) {
+      throw new Error(`line ${i + 2}: invalid run_id ${id} (expected a whole number)`);
+    }
+
+    if (seen.has(id)) throw new Error(`line ${i + 2}: duplicate run_id ${id} in Y`);
+
+    const at = position.get(id);
+
+    if (at === undefined) {
+      throw new Error(`line ${i + 2}: run_id ${id} is in Y but not in X`);
+    }
+
+    seen.add(id);
+    target.push(at);
+  }
+
+  for (const id of xIds) {
+    if (!seen.has(id)) {
+      throw new Error(`run_id ${id} is in X but missing from Y: Y must cover every X row`);
+    }
+  }
+
+  return columns.map((c) => {
+    const out = new Float64Array(xIds.length);
+
+    for (let i = 0; i < target.length; i++) out[target[i]] = c.values[i];
+
+    return { output: c.output, time: c.time, values: out };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Design generation (workflow A)
 // ---------------------------------------------------------------------------
@@ -400,7 +635,7 @@ export interface SobolConfig {
 
 export interface MorrisConfig {
   nTrajectories: number;
-  numLevels: number;
+  nLevels: number;
   seed: number;
 }
 
@@ -490,7 +725,7 @@ export function generateDesign(
     const cfg = config as MorrisConfig;
 
     const port = sampleMorris(problem, cfg.nTrajectories, {
-      numLevels: cfg.numLevels,
+      nLevels: cfg.nLevels,
       seed: cfg.seed,
       verbose: false,
     });
@@ -506,7 +741,7 @@ export function generateDesign(
       port,
       summary: [
         ["trajectories", String(port.nTrajectories)],
-        ["grid levels", String(port.numLevels)],
+        ["n_levels", String(port.nLevels)],
         ["n_expanded", String(port.nExpanded)],
         ["n_runs", String(nRuns)],
       ],
@@ -575,6 +810,8 @@ export interface ResultSlice {
   output: string;
   time: number;
   columns: ResultColumn[];
+  /** PCE fit quality for this slice (PCE and Shapley results only). */
+  fit?: PceDiagnostics;
 }
 
 export interface AnalysisResult {
@@ -584,6 +821,8 @@ export interface AnalysisResult {
   notes: string[];
   /** The settings the analysis ran with (seed, order, base_n, ...) for repro. */
   settings: AnalysisSettings;
+  /** Problems with the result the reader should see (poor fit, low N, ...). */
+  warnings?: string[];
 }
 
 export type AnalysisSettings = Record<string, string | number | boolean | null>;
@@ -594,8 +833,9 @@ function result(
   slices: ResultSlice[],
   notes: string[],
   settings: AnalysisSettings,
+  warnings: string[] = [],
 ): AnalysisResult {
-  return { method, parameters, slices, notes, settings };
+  return { method, parameters, slices, notes, settings, warnings };
 }
 
 /**
@@ -679,7 +919,16 @@ export async function analyzeGenerated(gen: GeneratedDesign, y: YData): Promise<
     }
   }
 
-  return result(gen.method, params, slices, gen.notes, Object.fromEntries(gen.summary));
+  const warnings: string[] = [];
+
+  if (gen.method === "efast") {
+    // SAFETY: the generated design's method discriminator matches its eFAST port.
+    const hint = efastLowNWarning((gen.port as EfastDesign).nPerCurve);
+
+    if (hint) warnings.push(hint);
+  }
+
+  return result(gen.method, params, slices, gen.notes, Object.fromEntries(gen.summary), warnings);
 }
 
 // ---------------------------------------------------------------------------
@@ -699,6 +948,12 @@ export function analyzeCloud(
   y: YData,
   order: number,
 ): AnalysisResult {
+  const usesOrder = method === "pce" || method === "shapley";
+
+  if (usesOrder && (!Number.isInteger(order) || order < 1)) {
+    throw new Error(`order must be a whole number >= 1, got ${order}`);
+  }
+
   const params = problem.names;
   const xf = x instanceof Float64Array ? x : Float64Array.from(x);
   const N = xf.length / problem.names.length;
@@ -710,6 +965,8 @@ export function analyzeCloud(
   }
 
   const slices: ResultSlice[] = [];
+  const fits: SliceFit[] = [];
+  let effectiveOrder = order;
 
   for (const col of y.columns) {
     if (col.values.length !== N) {
@@ -719,28 +976,43 @@ export function analyzeCloud(
     }
 
     if (method === "pce") {
-      const { S1, ST }: PceIndices = analyzePce(problem, xf, col.values, { order });
-      slices.push({
-        output: col.output,
-        time: col.time,
-        columns: [
-          { key: "S1", label: "S1", values: S1 },
-          { key: "ST", label: "ST", values: ST },
-        ],
-      });
-    } else if (method === "shapley") {
-      const { Sh, S1, ST }: ShapleyIndices = analyzeShapleyPce(problem, xf, col.values, {
-        order,
-      });
+      const fit: PceIndices = analyzePce(problem, xf, col.values, { order, diagnostics: true });
+      effectiveOrder = fit.order;
+
+      if (fit.diagnostics) {
+        fits.push({ ...fit.diagnostics, label: yColumnLabel(col.output, col.time) });
+      }
 
       slices.push({
         output: col.output,
         time: col.time,
         columns: [
-          { key: "Sh", label: "Sh", values: Sh },
-          { key: "S1", label: "S1", values: S1 },
-          { key: "ST", label: "ST", values: ST },
+          { key: "S1", label: "S1", values: fit.S1 },
+          { key: "ST", label: "ST", values: fit.ST },
         ],
+        fit: fit.diagnostics,
+      });
+    } else if (method === "shapley") {
+      const fit: ShapleyPceResult = analyzeShapleyPce(problem, xf, col.values, {
+        order,
+        diagnostics: true,
+      });
+
+      effectiveOrder = fit.order;
+
+      if (fit.diagnostics) {
+        fits.push({ ...fit.diagnostics, label: yColumnLabel(col.output, col.time) });
+      }
+
+      slices.push({
+        output: col.output,
+        time: col.time,
+        columns: [
+          { key: "Sh", label: "Sh", values: fit.Sh },
+          { key: "S1", label: "S1", values: fit.S1 },
+          { key: "ST", label: "ST", values: fit.ST },
+        ],
+        fit: fit.diagnostics,
       });
     } else if (method === "borgonovo") {
       const { delta, S1 }: BorgonovoIndices = analyzeBorgonovo(problem, xf, col.values);
@@ -762,7 +1034,18 @@ export function analyzeCloud(
     }
   }
 
-  return result(method, params, slices, [], { order });
+  if (!usesOrder) return result(method, params, slices, [], {});
+
+  // The effective order is what was fitted. autoOrder lowers the request when
+  // the term count would not fit the sample budget.
+  return result(
+    method,
+    params,
+    slices,
+    [],
+    { order: effectiveOrder, order_requested: order },
+    pceFitWarnings(fits, { requested: order, effective: effectiveOrder, nRows: N }),
+  );
 }
 
 /** Demo point cloud for the "load example" path of the given-data workflow. */
@@ -783,12 +1066,21 @@ export function loadDemoCloud(
 // Given-data uploads (workflow B)
 // ---------------------------------------------------------------------------
 
+/** An uploaded X: the point cloud, and the run_id of each row if the file had one. */
+export interface XGiven {
+  /** Row-major (N, D). */
+  flat: Float64Array;
+  /** One unique whole-number run_id per row, or null when the file has no run_id column. */
+  runIds: number[] | null;
+}
+
 /**
  * Parse an X CSV for the given-data path: one header row naming the
  * parameters (must match the problem's names, in order) followed by N rows
- * of D values. Returns the point cloud row-major, (N, D).
+ * of D values. A run_id column (from a design download) is allowed anywhere
+ * and is returned separately, so Y can be aligned to it.
  */
-export function parseXGiven(parsed: ParsedCsv, problem: ProblemSpec): Float64Array {
+export function parseXGiven(parsed: ParsedCsv, problem: ProblemSpec): XGiven {
   const D = problem.names.length;
 
   if (parsed.rows.length === 0) {
@@ -797,25 +1089,48 @@ export function parseXGiven(parsed: ParsedCsv, problem: ProblemSpec): Float64Arr
 
   const header = parsed.headers.map((h) => h.trim());
 
-  if (header.length !== D || header.some((h, j) => h !== problem.names[j])) {
+  const runIdIdx = header.indexOf("run_id");
+  const keep = header.map((_, j) => j).filter((j) => j !== runIdIdx);
+
+  if (keep.length !== D || keep.some((j, k) => header[j] !== problem.names[k])) {
     throw new Error(
-      `the X CSV header must be exactly: ${problem.names.join(", ")}`,
+      `the X CSV header must be exactly: ${problem.names.join(", ")} ` +
+        `(a run_id column is allowed)`,
     );
   }
 
   for (let i = 0; i < parsed.rows.length; i++) {
-    if (parsed.rows[i].length !== D) {
-      throw new Error(`line ${i + 2}: expected ${D} columns, found ${parsed.rows[i].length}`);
+    if (parsed.rows[i].length !== header.length) {
+      throw new Error(
+        `line ${i + 2}: expected ${header.length} columns, found ${parsed.rows[i].length}`,
+      );
     }
   }
 
   const flat = new Float64Array(parsed.rows.length * D);
 
   for (let i = 0; i < parsed.rows.length; i++) {
-    for (let j = 0; j < D; j++) flat[i * D + j] = parsed.rows[i][j];
+    for (let k = 0; k < D; k++) flat[i * D + k] = parsed.rows[i][keep[k]];
   }
 
-  return flat;
+  let runIds: number[] | null = null;
+
+  if (runIdIdx >= 0) {
+    runIds = parsed.rows.map((r) => r[runIdIdx]);
+
+    const seen = new Set<number>();
+
+    runIds.forEach((id, i) => {
+      if (!Number.isInteger(id)) {
+        throw new Error(`line ${i + 2}: invalid run_id ${id} in X (expected a whole number)`);
+      }
+
+      if (seen.has(id)) throw new Error(`line ${i + 2}: duplicate run_id ${id} in X`);
+      seen.add(id);
+    });
+  }
+
+  return { flat, runIds };
 }
 
 // ---------------------------------------------------------------------------
@@ -844,7 +1159,7 @@ export function resultToCsv(result: AnalysisResult): string {
 }
 
 export interface SessionJson {
-  app: "jaxgsa-web";
+  app: "jaxgsa-studio";
   version: 2;
   problem: ProblemSpec;
   /** One entry per generated design, keyed by method. */
@@ -860,10 +1175,12 @@ export interface SessionJson {
     parameters: string[];
     notes: string[];
     settings: AnalysisSettings;
+    warnings: string[];
     slices: Array<{
       output: string;
       time: number;
       columns: Array<{ key: string; label: string; values: number[] }>;
+      fit?: PceDiagnostics;
     }>;
   }>;
 }
@@ -894,7 +1211,7 @@ export function buildSessionJson(
   }
 
   return {
-    app: "jaxgsa-web",
+    app: "jaxgsa-studio",
     version: 2,
     problem,
     designs: designEntries,
@@ -914,9 +1231,11 @@ export function buildSessionJson(
       parameters: r.parameters,
       notes: r.notes,
       settings: r.settings,
+      warnings: r.warnings ?? [],
       slices: r.slices.map((s) => ({
         output: s.output,
         time: s.time,
+        fit: s.fit,
         columns: s.columns.map((c) => ({
           key: c.key,
           label: c.label,

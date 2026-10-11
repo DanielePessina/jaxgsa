@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import warnings
 from functools import lru_cache
-from typing import cast
+from typing import NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -46,6 +46,7 @@ from jaxgsa._core.irregular import (
     _is_irregular_y,
     analyze_irregular,
 )
+from jaxgsa._core.sampling import require_design
 from jaxgsa._core.validation import YLayout, _prepare_Y
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.efast._result import EFASTResult
@@ -138,7 +139,7 @@ def _row_count_message(n_rows: int, N: int, D: int, n_runs: int) -> str:
     return (
         f"Y has {n_rows} rows but this eFAST design requires "
         f"n_runs = n_per_curve * D = {N} * {D} = {n_runs}; "
-        "evaluate the model on every row of sampling_result.samples, in order"
+        "evaluate the model on every row of samples.samples, in order"
     )
 
 
@@ -252,12 +253,24 @@ def _indices_from_3d(
     return layout.squeeze(S1), layout.squeeze(ST)
 
 
+class EFASTIndices(NamedTuple):
+    """The arrays :func:`indices` returns, named like the :class:`EFASTResult` fields.
+
+    Attributes:
+        S1: First-order indices.
+        ST: Total-order indices.
+    """
+
+    S1: Array
+    ST: Array
+
+
 def indices(
-    sampling_result: EFASTSamples,
+    samples: EFASTSamples,
     Y: Array,
     *,
     slice_chunk_size: int | None = None,
-) -> tuple[Array, Array]:
+) -> EFASTIndices:
     """Compute eFAST indices as plain arrays, with no diagnostics.
 
     This is the transformable core of :func:`analyze`. It runs the same
@@ -283,11 +296,11 @@ def indices(
     in ``tests/test_efast.py``.
 
     Args:
-        sampling_result: The design from :func:`jaxgsa.efast.sample`, used
+        samples: The design from :func:`jaxgsa.efast.sample`, used
             only for its curve layout: ``n_per_curve``, ``M`` and the
             parameter count.
         Y: Model outputs evaluated at each row of
-            ``sampling_result.samples``, in the same row order. Shapes are
+            ``samples.samples``, in the same row order. Shapes are
             those :func:`analyze` accepts: ``(n_runs,)``, ``(n_runs, K)`` or
             ``(n_runs, T, K)``.
         slice_chunk_size: Number of output slices per vmapped batch. ``None``
@@ -295,18 +308,19 @@ def indices(
             you hit device out-of-memory errors. It changes no index.
 
     Returns:
-        ``(S1, ST)``, each shaped ``(D,)``, ``(K, D)`` or ``(T, K, D)`` to
+        An :class:`EFASTIndices` ``(S1, ST)``, each shaped ``(D,)``, ``(K, D)`` or ``(T, K, D)`` to
         mirror the layout of ``Y``. The shapes are those ``analyze`` reports.
 
     Raises:
         ValueError: If ``Y`` has an invalid rank, if its leading dimension
-            does not equal ``sampling_result.n_runs``, or if
+            does not equal ``samples.n_runs``, or if
             ``slice_chunk_size`` is given and is below 1.
     """
-    problem = sampling_result.problem
-    D = problem.num_vars
-    N = sampling_result.n_per_curve
-    M = sampling_result.M
+    require_design(samples, EFASTSamples, "jaxgsa.efast.indices", "jaxgsa.efast.sample")
+    problem = samples.problem
+    D = problem.n_params
+    N = samples.n_per_curve
+    M = samples.M
 
     Y_arr = jnp.asarray(Y)
     rank_ok = Y_arr.ndim in (1, 2, 3)
@@ -315,10 +329,8 @@ def indices(
             at_least("slice_chunk_size", slice_chunk_size, 1),
             require(rank_ok, f"Y must have 1, 2 or 3 dimensions, got {Y_arr.ndim}"),
             require(
-                not rank_ok or Y_arr.shape[0] == sampling_result.n_runs,
-                _row_count_message(
-                    Y_arr.shape[0] if Y_arr.ndim else 0, N, D, sampling_result.n_runs
-                ),
+                not rank_ok or Y_arr.shape[0] == samples.n_runs,
+                _row_count_message(Y_arr.shape[0] if Y_arr.ndim else 0, N, D, samples.n_runs),
             ),
         )
     )
@@ -327,11 +339,14 @@ def indices(
     # travels inside EFASTSamples.
     plan = _frequency_plan(D, N, M)
     Y3, layout = _prepare_Y(Y_arr)
-    return _indices_from_3d(Y3, layout, D, N, M, plan.omega_0, plan.analysis_max, slice_chunk_size)
+    S1, ST = _indices_from_3d(
+        Y3, layout, D, N, M, plan.omega_0, plan.analysis_max, slice_chunk_size
+    )
+    return EFASTIndices(S1, ST)
 
 
 def analyze(
-    sampling_result: EFASTSamples,
+    samples: EFASTSamples,
     Y: Array | IrregularY,
     *,
     slice_chunk_size: int | None = None,
@@ -347,9 +362,9 @@ def analyze(
     model runs.
 
     ``Y`` must be the model evaluated row by row on
-    ``sampling_result.samples``, with the rows in the same order. The design
+    ``samples.samples``, with the rows in the same order. The design
     metadata ``n_per_curve``, ``M``, and ``problem`` is read from
-    ``sampling_result``, so it can never be mismatched with the sampling step.
+    ``samples``, so it can never be mismatched with the sampling step.
 
     **There is no confidence interval, and there is no ``n_bootstrap``
     keyword.** This is a property of the eFAST design, not an omission. The
@@ -365,13 +380,13 @@ def analyze(
     ``vmap`` or ``jacrev``.
 
     Args:
-        sampling_result: Design returned by ``jaxgsa.efast.sample()``,
+        samples: Design returned by ``jaxgsa.efast.sample()``,
             carrying the sample matrix plus ``n_per_curve``, ``M``, and the
             problem.
         Y: Model outputs evaluated at each row of
-            ``sampling_result.samples``, in the same row order. Accepted
+            ``samples.samples``, in the same row order. Accepted
             shapes, where ``n_runs`` is
-            ``sampling_result.n_runs = n_per_curve * D``:
+            ``samples.n_runs = n_per_curve * D``:
             - ``(n_runs,)`` for scalar output
             - ``(n_runs, K)`` for K output variables
             - ``(n_runs, T, K)`` for K outputs over T time steps
@@ -397,39 +412,40 @@ def analyze(
 
     Raises:
         ValueError: If ``Y``'s leading dimension does not equal
-            ``sampling_result.n_runs``, or ``Y`` has an invalid rank; if
+            ``samples.n_runs``, or ``Y`` has an invalid rank; if
             ``on_invalid`` is not one of the three policies or is ``"drop"``;
             if ``slice_chunk_size`` is given and is not a positive integer; or
             if the sample holds a non-finite value under
             ``on_invalid="raise"``.
     """
+    require_design(samples, EFASTSamples, "jaxgsa.efast.analyze", "jaxgsa.efast.sample")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
-            channel_data=sampling_result,
-            problem=sampling_result.problem,
+            channel_data=samples,
+            problem=samples.problem,
             Y=Y,
-            n_expected=int(sampling_result.n_runs),
+            n_expected=int(samples.n_runs),
             design_based=True,
             verbose=verbose,
             kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
         )
     Y = cast(Array, Y)
 
-    from jaxgsa.efast import SPEC
+    from jaxgsa.efast import _SPEC
 
-    problem = sampling_result.problem
-    M = sampling_result.M
-    D = problem.num_vars
-    N = sampling_result.n_per_curve
+    problem = samples.problem
+    M = samples.M
+    D = problem.n_params
+    N = samples.n_per_curve
 
     Y_arr = jnp.asarray(Y)
     # A row-count complaint reads better in the design's own terms than in the
     # generic one, so it is phrased here and handed to prepare as a check.
-    rows_match = Y_arr.ndim not in (1, 2, 3) or Y_arr.shape[0] == sampling_result.n_runs
+    rows_match = Y_arr.ndim not in (1, 2, 3) or Y_arr.shape[0] == samples.n_runs
 
     ctx = prepare(
-        SPEC,
+        _SPEC,
         problem,
         Y_arr,
         on_invalid=on_invalid,
@@ -437,12 +453,10 @@ def analyze(
             at_least("slice_chunk_size", slice_chunk_size, 1),
             require(
                 rows_match,
-                _row_count_message(
-                    Y_arr.shape[0] if Y_arr.ndim else 0, N, D, sampling_result.n_runs
-                ),
+                _row_count_message(Y_arr.shape[0] if Y_arr.ndim else 0, N, D, samples.n_runs),
             ),
         ),
-        n_expected=sampling_result.n_runs,
+        n_expected=samples.n_runs,
         # The design lays the D search curves out contiguously, N rows each.
         # A curve cannot be dropped, so `keep` is always all-True; the report
         # still names the curve to investigate.

@@ -13,7 +13,7 @@ import type { ProblemSpec } from "@/jaxgsa/sampling";
  * Renders the X/Y CSV contract as file cards: an explicit column layout and
  * row layout statement per file, with a small sample table under each. Two
  * variants: the design route (run_id-aligned) and the uploaded-data route
- * (row order).
+ * (run_id when both files have it, else row order).
  */
 
 const SAMPLE_X = [
@@ -261,7 +261,8 @@ export function SchemaGuide({
                       <Mono>{n}</Mono>
                     </span>
                   ))}{" "}
-                  in this order — no <Mono>run_id</Mono>
+                  in this order. A <Mono>run_id</Mono> column is allowed. If X has
+                  one, Y can be matched to it by id
                 </>
               ) : null
             }
@@ -281,23 +282,26 @@ export function SchemaGuide({
           />
           <FileCard
             label="Y file (X uploaded)"
-            title="outputs by row order"
+            title="outputs matched to X"
             columns={
               <>
                 one output column per output slice: <Mono>{output}</Mono>
-                {D > 0 && <> — no <Mono>run_id</Mono></>}
+                {D > 0 && <>, plus an optional <Mono>run_id</Mono></>}
               </>
             }
             rows={
               <>
-                one per X row, in the <strong>same row order</strong> as the X
-                file
+                one per X row. With a <Mono>run_id</Mono> in both files, any
+                row order works. Otherwise use the <strong>same row order</strong> as X
               </>
             }
             extra={
               <Meta>
-                Row 3 of the Y file is the output of row 3 of the X file — the
-                values are matched by position.
+                If X has a <Mono>run_id</Mono> column and Y has one too, Y is
+                matched to X by id. Both files must hold the same ids. If Y has
+                no <Mono>run_id</Mono>, Y is paired by row order. If X has no{" "}
+                <Mono>run_id</Mono>, a <Mono>run_id</Mono> in Y is ignored and
+                rows are paired by order.
               </Meta>
             }
             table={
@@ -322,7 +326,7 @@ export function SchemaGuide({
                 ))}
               </>
             }
-            rows="one per X row, in the same row order as the X file"
+            rows="one per X row, matched by run_id when both files have it, else by row order"
             table={
               <SampleTable
                 caption="Time-resolved Y upload: one column per time slice"

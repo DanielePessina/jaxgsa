@@ -72,7 +72,7 @@ import jax.numpy as jnp
 import jaxgsa
 from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=2000, seed=42))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n_samples=2000, seed=42))
 Y = evaluate(X)
 
 result = jaxgsa.shapley.analyze(PROBLEM, X, Y, order=8)
@@ -88,7 +88,7 @@ print("explained_variance:", result.explained_variance)
 jaxgsa.shapley.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=2000 runs, T=1 x K=1 output slice
     invalid: none found in 2000 rows (policy 'raise')
   timing:
@@ -229,15 +229,16 @@ coefficients (Sudret, 2008), exact within the fitted polynomial. Its knobs are
 `problem.correlation`.
 
 `backend="hdmr"` fits the RS-HDMR B-spline surrogate and allocates its
-structural ANCOVA variances, truncated at `maxorder`. Its knobs are `maxorder`
-(default 2), `m`, `maxiter`, `lambdax` and `slice_chunk_size`. It accepts a
+structural ANCOVA variances, truncated at `order`. Its knobs are `order`
+(default 2), `n_intervals`, `max_iter`, `ridge` and `slice_chunk_size`. It accepts a
 declared correlation with `include_correlative=True`.
 
 Both take `(N,)`, `(N, K)` and `(N, T, K)` outputs.
 
-Backend knobs are not shared. Passing `maxorder=3` with `backend="pce"` raises
-`TypeError: analyze() got an unexpected keyword argument 'maxorder'` rather
-than being ignored, so a typo cannot quietly change nothing.
+Both backends name their truncation `order`, but the defaults differ (3 for PCE,
+2 for HDMR). Other knobs belong to one backend. Passing `n_intervals=4` with
+`backend="pce"` raises `TypeError` rather than being ignored, so a typo cannot
+quietly change nothing.
 
 Pick PCE for smooth responses, where it is exact and cheap. Pick HDMR for
 responses with kinks or plateaus, and for correlated inputs, which PCE
@@ -255,7 +256,7 @@ shape `(K, D)`, and every output row sums to 1 on its own. `(N, T, K)` gives
 This example adds a second output with a known answer. Y2 is a sum of squares
 over symmetric bounds, so it has no interactions and its three inputs are
 interchangeable. Its shares must come out at 1/3 each, which is how you check
-the multi-output path did not scramble an axis. `m=4` widens the B-spline
+the multi-output path did not scramble an axis. `n_intervals=4` widens the B-spline
 basis, for the reason on the [RS-HDMR page](/examples/hdmr).
 
 ```python
@@ -263,12 +264,12 @@ import jax.numpy as jnp
 import jaxgsa
 from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=2000, seed=42))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n_samples=2000, seed=42))
 Y1 = evaluate(X)
 Y2 = jnp.sum(X**2, axis=1)
 Y_multi = jnp.column_stack([Y1, Y2])
 
-result = jaxgsa.shapley.analyze(PROBLEM, X, Y_multi, backend="hdmr", m=4)
+result = jaxgsa.shapley.analyze(PROBLEM, X, Y_multi, backend="hdmr", n_intervals=4)
 
 print("Sh:", result.Sh)
 print("row sums:", result.Sh.sum(axis=-1))
@@ -279,7 +280,7 @@ print("explained_variance:", result.explained_variance)
 jaxgsa.shapley.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=2000 runs, T=1 x K=2 output slices
     invalid: none found in 2000 rows (policy 'raise')
   timing:
@@ -343,7 +344,7 @@ and x3 all but vanishes. A degree-2 polynomial captured 24% of Ishigami's
 variance, and these are honest shares of that 24%.
 
 The sum tells you nothing about fit quality. Only `explained_variance` does.
-Read it first, every time. If it is off, raise `order` or `maxorder` and refit
+Read it first, every time. If it is off, raise `order` and refit
 until it settles near 1.
 
 One consequence of the normalization. With `backend="pce"` the `S1` and `ST`
@@ -419,12 +420,12 @@ own design and your actual model. Neither returns a per-parameter allocation
 summing to 1.
 
 **Interactions past the truncation are simply absent.** Anything beyond
-`order` for PCE or `maxorder` for HDMR contributes nothing to the allocation,
+`order` contributes nothing to the allocation,
 and `explained_variance` is the only place that absence shows up.
 
 **The HDMR backend inherits `jaxgsa.hdmr.analyze`'s contract**: at least 300
-samples, `maxorder` in `{1, 2, 3}`, clamped with a warning when
-`D < maxorder`.
+samples, `order` in `{1, 2, 3}`, clamped with a warning when
+`D < order`.
 
 ## See also
 

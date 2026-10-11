@@ -6,13 +6,32 @@
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22099117.svg)](https://doi.org/10.5281/zenodo.22099117)
 [![CI](https://github.com/DanielePessina/jaxgsa/actions/workflows/ci.yml/badge.svg)](https://github.com/DanielePessina/jaxgsa/actions/workflows/ci.yml)
 [![Documentation](https://img.shields.io/badge/docs-online-blue)](https://danielepessina.github.io/jaxgsa/)
-[![Browser workbench](https://img.shields.io/badge/browser%20workbench-WASM-16a6c7)](https://danielepessina.github.io/jaxgsa/workbench/)
+[![jaxgsa studio](https://img.shields.io/badge/jaxgsa-studio-16a6c7)](https://danielepessina.github.io/jaxgsa/studio/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
 
 jaxgsa helps you find which inputs drive variation in a model's output. You
 choose input distributions, evaluate your model at sample points, and use
 jaxgsa to estimate each input's effect. It does not run your model for you.
+
+## Why jaxgsa
+
+- **Many outputs in one call.** Time series and multi-output models are
+  analysed in one compiled JAX call, not one Python loop per output. On 300
+  output slices, Sobol with second-order indices is 35x faster than SALib, and
+  HDMR is about 1000x faster
+  ([benchmarks](https://danielepessina.github.io/jaxgsa/guide/benchmarks)).
+  For one scalar output, SALib is as fast or faster.
+- **Gradients come free.** DGSM gets model derivatives from JAX, and the
+  estimator cores are differentiable, so an index can sit inside a larger
+  JAX computation
+  ([differentiation guide](https://danielepessina.github.io/jaxgsa/guide/differentiation)).
+- **Fourteen methods behind one interface.** Variance-based, screening,
+  moment-independent, kernel and surrogate methods share the same `Problem`,
+  sample and result types.
+- **Dependent inputs.** Correlated, custom-sampled and categorical inputs are
+  supported, with methods whose indices keep their meaning under dependence.
+- **CPU, GPU or TPU.** The same code runs on any device JAX supports.
 
 ## Install
 
@@ -54,7 +73,7 @@ explains each step and how to interpret the result.
 
 ## Choose a method
 
-jaxgsa provides thirteen analysis methods. A useful starting point depends
+jaxgsa provides fourteen analysis methods. A useful starting point depends
 on the data you can collect and the question you want answered:
 
 | If you have… | Start with… | Why |
@@ -65,11 +84,11 @@ on the data you can collect and the question you want answered:
 | Correlated inputs | [Methods guide](https://danielepessina.github.io/jaxgsa/guide/methods) | Choose a method whose indices have the meaning you need under dependence. |
 
 The [methods guide](https://danielepessina.github.io/jaxgsa/guide/methods)
-covers all thirteen methods and their assumptions. The
+covers all fourteen methods and their assumptions. The
 [API reference](https://danielepessina.github.io/jaxgsa/api/) gives signatures
 and result fields.
 
-Scalar, multi-output, and time-series results are supported. Twelve methods
+Scalar, multi-output, and time-series results are supported. Thirteen methods
 also accept output channels with separate, irregular time grids. See the
 [multi-output](https://danielepessina.github.io/jaxgsa/examples/multi-output)
 and [irregular-output](https://danielepessina.github.io/jaxgsa/examples/irregular-outputs)
@@ -86,9 +105,9 @@ examples.
 - [Benchmarks](https://danielepessina.github.io/jaxgsa/guide/benchmarks):
   measurement methods and performance results.
 
-## Browser workbench
+## jaxgsa studio
 
-The separate [browser workbench](https://danielepessina.github.io/jaxgsa/workbench/)
+The separate [jaxgsa studio](https://danielepessina.github.io/jaxgsa/studio/)
 runs ported analyses locally in the browser. Its source and development instructions
 are in `web/`. The Python
 package and documentation site have separate builds.
@@ -140,9 +159,10 @@ Or as a text citation:
 > Sensitivity Analysis in JAX*. Zenodo.
 > https://doi.org/10.5281/zenodo.22099117
 
-To cite a specific release, use its version DOI instead — for v1.0.2 that is
-[10.5281/zenodo.23057233](https://doi.org/10.5281/zenodo.23057233). See
-[CITATION.cff](CITATION.cff) for machine-readable citation metadata.
+To cite a specific release, use its version DOI instead. The
+[Zenodo record](https://doi.org/10.5281/zenodo.22099117) lists the DOI of
+each release. See [CITATION.cff](CITATION.cff) for machine-readable citation
+metadata.
 
 ## License
 

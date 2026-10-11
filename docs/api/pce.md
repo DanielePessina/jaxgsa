@@ -24,7 +24,7 @@ No structured design, and no extra model
 evaluations once the fit is done. On a smooth response it needs far fewer
 samples than a Monte-Carlo Sobol estimator.
 
-It only captures what the polynomial can represent, so check `loo_rmse` before
+It only captures what the polynomial can represent, so check `cv_rmse` before
 you trust the indices.
 
 ## A run
@@ -41,7 +41,8 @@ Y = np.sin(X[:, 0]) + 7.0 * np.sin(X[:, 1]) ** 2 + 0.1 * X[:, 2] ** 4 * np.sin(X
 res = jaxgsa.pce.analyze(problem, X, Y, order=8)
 print("S1      ", np.asarray(res.S1).round(4))
 print("ST      ", np.asarray(res.ST).round(4))
-print("loo_rmse", float(res.loo_rmse))
+print("rmse    ", float(res.rmse))
+print("cv_rmse ", float(res.cv_rmse))
 print("streamed", res.streamed)
 ```
 
@@ -49,7 +50,7 @@ print("streamed", res.streamed)
 jaxgsa.pce.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=2000 runs, T=1 x K=1 output slice
     invalid: none found in 2000 rows (policy 'raise')
   timing:
@@ -64,13 +65,14 @@ jaxgsa.pce.analyze
 
 S1       [0.3146 0.4424 0.    ]
 ST       [0.5576 0.4425 0.243 ]
-loo_rmse 0.08116015046834946
+rmse     0.06354028731584549
+cv_rmse  0.08116015046834946
 streamed False
 ```
 
 The analytic Ishigami values are `S1 = [0.314, 0.442, 0]` and
 `ST = [0.558, 0.442, 0.244]`. A degree-8 expansion on 2000 rows reproduces them
-to three decimals, and `loo_rmse = 0.081` against an output standard deviation
+to three decimals, and `cv_rmse = 0.081` against an output standard deviation
 of 3.59 says the surrogate is not the limiting factor.
 
 Drop to the default `order=3` on the same data and the answer falls apart. The
@@ -79,10 +81,10 @@ misattributes the variance to `x1`:
 
 ```
 S1 [0.6499 0.0585 0.0009]   ST [0.9396 0.0627 0.2885]
-loo_rmse 2.709   explained_variance 0.4437
+cv_rmse 2.709   explained_variance 0.4437
 ```
 
-Nothing in the index arrays says they are wrong. `loo_rmse` jumping from 0.08 to
+Nothing in the index arrays says they are wrong. `cv_rmse` jumping from 0.08 to
 2.71, and `explained_variance` at 0.44, are the only signal. Read them first,
 every time.
 
@@ -141,7 +143,7 @@ want intervals.
 The interval measures the sampling variability of `(X, Y)` propagated through
 the fit. It does not measure truncation error. An expansion too coarse to
 represent the model gives a biased index, every replicate inherits the same
-bias, and the interval stays narrow and wrong. `loo_rmse` and
+bias, and the interval stays narrow and wrong. `cv_rmse` and
 `explained_variance` are what report that.
 
 ## PCEResult
@@ -153,8 +155,9 @@ bias, and the interval stays narrow and wrong. `loo_rmse` and
 | `S1_conf`, `ST_conf`, `S2_conf` | leading `(2, ...)` | `None` when `n_bootstrap=0`. |
 | `coefficients`, `multi_index` | | The fitted expansion, reused by `predict`. |
 | `order` | | The degree the fit actually used, after any reduction. |
-| `loo_rmse` | `()` / `(K,)` / `(T, K)` | Exact leave-one-out RMSE per output slice, in the units of `Y`. |
-| `explained_variance` | | Share of the sample output variance the fit reproduces: the in-sample R^2, so it stays in `[0, 1]`. |
+| `rmse` | `()` / `(K,)` / `(T, K)` | In-sample RMSE of the fit per output slice, in the units of `Y`. |
+| `cv_rmse` | same | Exact leave-one-out RMSE per output slice, in the units of `Y`. |
+| `explained_variance` | same | `1 - rmse**2 / Var(Y)` per output slice: the in-sample R^2, so it stays in `[0, 1]`. NaN on a constant slice. |
 | `streamed` | | Which fit path ran. |
 | `problem`, `invalid`, `ci` | | Problem, non-finite report, interval provenance. |
 
@@ -168,6 +171,33 @@ Operations:
 
 All output slices share one basis and are fitted in a single multi-right-hand-
 side solve. Indices are computed independently per `(t, k)` slice.
+
+## Aggregating outputs
+
+`result.aggregate(*, weights="variance")` collapses the `T` and `K` axes into
+one index per input. With `weights="variance"` each output counts in proportion
+to its variance. This is the generalised Sobol' index of [Gamboa, Janon, Klein
+and Lagnoux (2014)](#ref-gamboa-2014), also used by [Lamboni, Monod and Makowski
+(2011)](#ref-lamboni-2011). It is the share of the total output variance that
+the input explains. With `weights="equal"` every output counts the same.
+
+The result keeps its class. Its output axes have size 1. A constant output has
+weight 0. A result with one output slice comes back unchanged.
+
+The weights come from the variance of the fitted surrogate under the input
+measure. That is the sum of the squared non-constant coefficients. A slice whose
+indices are all NaN and whose coefficients are finite (a constant output) gets
+weight 0. A slice with non-finite coefficients (a failed fit) has an unknown
+variance, so the aggregate is NaN. `aggregate` applies to
+`S1`, `ST` and `S2`.
+
+The aggregated `PCEResult` is a summary, not a surrogate. Its `coefficients`
+are NaN, so `predict()` and `shapley()` raise `ValueError`: call them before
+`aggregate()`. Its `rmse`, `cv_rmse` and `explained_variance` are `None`.
+
+With `keep_replicates=True`, each bootstrap draw is aggregated and the interval
+is drawn again from those draws. Otherwise the intervals are NaN. The weights
+stay fixed at their point estimates.
 
 ## effective_order
 
@@ -213,9 +243,9 @@ not a positive integer, when `on_invalid` is unknown or refuses the sample, when
 ## Traceable core
 
 `jaxgsa.pce.indices(problem, X, Y, *, order=3, ridge=1e-8, fit_ratio=0.5,
-batch_size=None)` returns `(S1, ST, S2)` as bare arrays with none of the checks,
+batch_size=None)` returns a `PCEIndices` named tuple `(S1, ST, S2)` of bare arrays with none of the checks,
 so it composes with `jit`, `vmap` and `jacrev`. It has no result object, so it
-reports neither the reduced order nor `loo_rmse`. Use `effective_order` for the
+reports neither the reduced order nor `cv_rmse`. Use `effective_order` for the
 first.
 
 ## References
@@ -226,5 +256,13 @@ first.
 - **Wiener-Askey orthogonal polynomial basis:** Xiu, D., & Karniadakis, G. E. (2002).
   [The Wiener–Askey Polynomial Chaos for Stochastic Differential Equations](https://doi.org/10.1137/S1064827501387826).
   *SIAM Journal on Scientific Computing*, 24(2), 619–644.
+- <a id="ref-gamboa-2014"></a>**Aggregated indices for multiple outputs:** Gamboa, F.,
+  Janon, A., Klein, T., & Lagnoux, A. (2014).
+  [Sensitivity analysis for multidimensional and functional outputs](https://doi.org/10.1214/14-EJS895).
+  *Electronic Journal of Statistics*, 8(1), 575–603.
+- <a id="ref-lamboni-2011"></a>**Aggregated indices for dynamic models:** Lamboni, M.,
+  Monod, H., & Makowski, D. (2011).
+  [Multivariate sensitivity analysis to measure global contribution of input factors in dynamic models](https://doi.org/10.1016/j.ress.2010.12.002).
+  *Reliability Engineering & System Safety*, 96(4), 450–459.
 
 See the [PCE example](/examples/pce) and the [API overview](/api/).

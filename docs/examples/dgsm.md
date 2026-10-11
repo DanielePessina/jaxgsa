@@ -10,7 +10,7 @@ The two measures it works from are
 
 - `nu_i = E[(df/dx_i)^2]`, the mean squared partial derivative. This is the
   ranking measure.
-- `sigma_i = E[df/dx_i]`, the mean signed derivative.
+- `mu_i = E[df/dx_i]`, the mean signed derivative.
 
 and the two expressions built from them are
 
@@ -18,7 +18,7 @@ and the two expressions built from them are
   is a genuine bound: `ST_i` is never above it. `C_i` is the Poincare constant of
   input `i`'s own marginal, the smallest factor for which
   `Var(g(X_i)) <= C_i * E[g'(X_i)^2]` holds for every smooth `g`.
-- `lower_bound_i = Var(x_i) * sigma_i^2 / Var(Y)`. Kucherenko & Song (2016)
+- `lower_bound_i = Var(x_i) * mu_i^2 / Var(Y)`. Kucherenko & Song (2016)
   prove this is a lower bound on `ST_i` when input `i`'s marginal is an
   untruncated Gaussian. Under a uniform or truncated marginal it is an
   estimate: it equals `ST_i` when the response is linear in that input and it
@@ -94,23 +94,23 @@ def head(x):
     return inflow / porosity + 40.0 * jnp.sqrt(roughness) + 0.02 * tracer
 
 
-X = jaxgsa.sampling.monte_carlo(problem, n=20000, seed=0)
-result = jaxgsa.dgsm.analyze(problem, head, jnp.asarray(X))
+X = jaxgsa.sampling.monte_carlo(problem, n_samples=20000, seed=0)
+result = jaxgsa.dgsm.analyze(problem, jnp.asarray(X), fn=head)
 
 print("upper:", result.upper_bound)
 print("lower:", result.lower_bound)
-print("var_y:", result.var_y)
+print("variance:", result.variance)
 ```
 
 ```
 jaxgsa.dgsm.analyze
   problem: D=4 (inflow, porosity, roughness, tracer)
     marginals: uniform=4
-    correlation: independent
+    dependence: independent
     output: N=20000 runs, T=1 x K=1 output slice
     invalid: none found in 20000 rows (policy 'raise')
   timing:
-    model sweep + estimator (includes compile on the first call): 0.5884 s
+    model sweep + estimator (includes compile on the first call): 0.4897 s
     gradients: reverse-mode autodiff (T*K=1, D=4)
     batch_size: auto (resolved from the memory budget)
   results: top 4 of 4 parameters by nu
@@ -120,6 +120,7 @@ jaxgsa.dgsm.analyze
     4. tracer     nu=0.0004
 upper: [5.4446208e-01 1.6631646e+00 6.7081735e-03 2.4349364e-07]
 lower: [3.8285753e-01 6.9644910e-01 5.4230299e-03 2.0026555e-07]
+variance: 166.44568
 ```
 
 Read it input by input, because each one gets a different kind of answer.
@@ -158,7 +159,7 @@ of 0.696. That is not sampling noise. The Sobol run above agrees with the
 closed-form answer for this model to four digits.
 
 The literature says exactly when this can happen. Kucherenko & Song (2016)
-prove `ST_i >= Var(x_i) * sigma_i^2 / Var(Y)` in their Theorem 6, for a
+prove `ST_i >= Var(x_i) * mu_i^2 / Var(Y)` in their Theorem 6, for a
 **Gaussian** input, and nowhere else. The proof runs through Stein's identity,
 `Cov(f, x_i) = E[tau(x_i) * df/dx_i]`, whose kernel `tau` is the constant
 `Var(x_i)` for an untruncated Gaussian and is not constant for anything else.
@@ -170,18 +171,18 @@ quantities that need boundary evaluations and the higher moments
 `E[x_i^m * df/dx_i]`. jaxgsa does not compute them. `porosity` is uniform, so
 the printed floor carries no proof.
 
-Concretely, `Var(x_i) * sigma_i^2 / Var(Y)` is exact when `f` is linear in
-`x_i`, because then `sigma_i` is the slope and the conditional variance is
+Concretely, `Var(x_i) * mu_i^2 / Var(Y)` is exact when `f` is linear in
+`x_i`, because then `mu_i` is the slope and the conditional variance is
 `slope^2 * Var(x_i)`.
-For a curved response `sigma_i` is the average slope, and a function that is
+For a curved response `mu_i` is the average slope, and a function that is
 steep over a small part of its range and flat over the rest has an average slope
 much larger than its spread justifies. Strip the model down to one input to see
 it plainly:
 
 ```python
 problem_1d = jaxgsa.Problem.from_dict({"p": (0.1, 0.4)})
-X = jaxgsa.sampling.monte_carlo(problem_1d, n=200000, seed=0)
-r = jaxgsa.dgsm.analyze(problem_1d, lambda x: 1.0 / x[0], jnp.asarray(X), verbose=False)
+X = jaxgsa.sampling.monte_carlo(problem_1d, n_samples=200000, seed=0)
+r = jaxgsa.dgsm.analyze(problem_1d, jnp.asarray(X), fn=lambda x: 1.0 / x[0], verbose=False)
 print("lower_bound:", r.lower_bound, " upper_bound:", r.upper_bound)
 ```
 
@@ -205,8 +206,8 @@ anything that rests on it with Sobol.
 import numpy as np
 
 for n in (500, 2000, 20000):
-    X = jaxgsa.sampling.monte_carlo(problem, n=n, seed=0)
-    r = jaxgsa.dgsm.analyze(problem, head, jnp.asarray(X), verbose=False)
+    X = jaxgsa.sampling.monte_carlo(problem, n_samples=n, seed=0)
+    r = jaxgsa.dgsm.analyze(problem, jnp.asarray(X), fn=head, verbose=False)
     print(f"n={n:6d} upper={np.array2string(np.asarray(r.upper_bound), precision=4)}")
 ```
 
@@ -232,8 +233,8 @@ matters.
 ```python
 import jax
 
-X = jaxgsa.sampling.monte_carlo(problem, n=2000, seed=0)
-r = jaxgsa.dgsm.analyze(problem, head, jnp.asarray(X), n_bootstrap=500,
+X = jaxgsa.sampling.monte_carlo(problem, n_samples=2000, seed=0)
+r = jaxgsa.dgsm.analyze(problem, jnp.asarray(X), fn=head, n_bootstrap=500,
                         key=jax.random.key(0), verbose=False)
 print("upper      :", r.upper_bound)
 print("upper_conf :\n", r.upper_bound_conf)
@@ -247,7 +248,7 @@ upper_conf :
 ```
 
 The resampling unit is one sample row, which is the right unit here: `nu` and
-`sigma` are plain independent means over rows. The cost is one extra sweep of
+`mu` are plain independent means over rows. The cost is one extra sweep of
 the Jacobian, not one sweep per replicate, because a replicate is a weighted row
 sum and the whole resample is a matrix product against the same batches.
 
@@ -270,13 +271,13 @@ def ishigami_fn(x):
     A, B = 7.0, 0.1
     return jnp.sin(x[0]) + A * jnp.sin(x[1]) ** 2 + B * x[2] ** 4 * jnp.sin(x[0])
 
-X_ish = jaxgsa.sampling.monte_carlo(ishigami.PROBLEM, n=50_000, seed=42)
-result_ish = jaxgsa.dgsm.analyze(ishigami.PROBLEM, ishigami_fn, jnp.asarray(X_ish))
+X_ish = jaxgsa.sampling.monte_carlo(ishigami.PROBLEM, n_samples=50_000, seed=42)
+result_ish = jaxgsa.dgsm.analyze(ishigami.PROBLEM, jnp.asarray(X_ish), fn=ishigami_fn)
 ```
 
-The script prints the nu/sigma table and the bracket:
+The script prints the nu/mu table and the bracket:
 
-| Param | $\nu_i$ | $\sigma_i$ | Lower | $S_T$ | Upper |
+| Param | $\nu_i$ | $\mu_i$ | Lower | $S_T$ | Upper |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | x1 | 7.7162 | +0.0248 | 0.0001 | 0.5576 | 2.2162 |
 | x2 | 24.4046 | +0.0034 | 0.0000 | 0.4424 | 7.0094 |
@@ -284,11 +285,11 @@ The script prints the nu/sigma table and the bracket:
 
 Two readings. First, the bracket contains the analytical $S_T$ for all three
 parameters: 0.5576, 0.4424, and 0.2437 all sit between their lower and upper
-values. Second, look at x3: $\sigma_3 = 0.0009$, so the lower estimate is
+values. Second, look at x3: $\mu_3 = 0.0009$, so the lower estimate is
 0.0000, yet $S_T = 0.2437$ and the upper bound is 3.1702. x3 enters only
 through the interaction term $B x_3^4 \sin(x_1)$, whose derivative in $x_3$
 is odd; its mean over the symmetric domain is near zero, which is exactly
-what $\sigma \approx 0$ reports. The interaction is not lost, though: it is
+what $\mu \approx 0$ reports. The interaction is not lost, though: it is
 what keeps $\nu_3 = 11.04$ and the upper bound at 3.17.
 
 The script also warns that every upper bound exceeds 1, the smallest being
@@ -306,14 +307,14 @@ def linear_fn(x):
     c = jnp.array([1.0, 2.0, 3.0])
     return jnp.dot(c, x)
 
-X_lin = jaxgsa.sampling.monte_carlo(linear.PROBLEM, n=10_000, seed=123)
-result_lin = jaxgsa.dgsm.analyze(linear.PROBLEM, linear_fn, jnp.asarray(X_lin))
+X_lin = jaxgsa.sampling.monte_carlo(linear.PROBLEM, n_samples=10_000, seed=123)
+result_lin = jaxgsa.dgsm.analyze(linear.PROBLEM, jnp.asarray(X_lin), fn=linear_fn)
 ```
 
 For a purely additive model the two bounds tighten onto the exact $S_T$,
 which for $c = (1, 2, 3)$ is $(1, 4, 9)/14$:
 
-| Param | $\nu_i$ | $\sigma_i$ | Lower | $S_T$ | Upper |
+| Param | $\nu_i$ | $\mu_i$ | Lower | $S_T$ | Upper |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | x1 | 1.0000 | +1.0000 | 0.0720 | 0.0714 | 0.0876 |
 | x2 | 4.0000 | +2.0000 | 0.2882 | 0.2857 | 0.3504 |
@@ -368,10 +369,10 @@ def oscillator(x):
     )
 
 
-X = jaxgsa.sampling.monte_carlo(problem, n=4000, seed=0)
-result = jaxgsa.dgsm.analyze(problem, oscillator, jnp.asarray(X))
+X = jaxgsa.sampling.monte_carlo(problem, n_samples=4000, seed=0)
+result = jaxgsa.dgsm.analyze(problem, jnp.asarray(X), fn=oscillator)
 
-print("nu shape:", result.nu.shape, "var_y shape:", result.var_y.shape)
+print("nu shape:", result.nu.shape, "variance shape:", result.variance.shape)
 print("damping upper_bound, displacement, t = 0.25 / 2.5 / 5.0:",
       np.round(np.asarray(result.upper_bound[[0, 9, 19], 0, 2]), 4))
 ```
@@ -380,18 +381,18 @@ print("damping upper_bound, displacement, t = 0.25 / 2.5 / 5.0:",
 jaxgsa.dgsm.analyze
   problem: D=3 (amplitude, frequency, damping)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=4000 runs, T=20 x K=2 output slices
     invalid: none found in 4000 rows (policy 'raise')
   timing:
-    model sweep + estimator (includes compile on the first call): 0.6434 s
+    model sweep + estimator (includes compile on the first call): 0.6843 s
     gradients: forward-mode autodiff (T*K=40, D=3)
     batch_size: auto (resolved from the memory budget)
   results: top 3 of 3 parameters by nu, mean over 40 output slices
     1. frequency  nu=82.16
     2. damping    nu=2.081
     3. amplitude  nu=0.2049
-nu shape: (20, 2, 3) var_y shape: (20, 2)
+nu shape: (20, 2, 3) variance shape: (20, 2)
 damping upper_bound, displacement, t = 0.25 / 2.5 / 5.0: [0.0015 0.152  0.6083]
 ```
 
@@ -403,14 +404,14 @@ else you might try.
 
 Damping's upper bound climbs from 0.0015 to 0.61 across the trajectory. Early
 on you can prove damping is irrelevant. Late on you cannot prove anything, which
-is the correct answer, because by then it dominates. `var_y` has shape
+is the correct answer, because by then it dominates. `variance` has shape
 `(T, K)`: one output variance per slice, and each bound is a ratio against its
 own slice.
 
 ## Pre-computed Jacobian
 
 If the model is not JAX-differentiable, compute the derivatives however you can
-and pass `Y` and `dfdx` instead of `fn` and `X`. Adjoint solvers, hand-derived
+and pass `Y` and `dfdx` instead of `fn`. `X` is still required. Adjoint solvers, hand-derived
 formulas, and finite differences all work. `dfdx` mirrors `Y`'s layout with one
 extra trailing `(D,)` axis.
 
@@ -426,14 +427,14 @@ groundwater = jaxgsa.Problem.from_dict(
     }
 )
 
-X = np.asarray(jaxgsa.sampling.monte_carlo(groundwater, n=2000, seed=0), dtype=np.float32)
+X = np.asarray(jaxgsa.sampling.monte_carlo(groundwater, n_samples=2000, seed=0), dtype=np.float32)
 q, p, k, c = X[:, 0], X[:, 1], X[:, 2], X[:, 3]
 
 Y = q / p + 40.0 * np.sqrt(k) + 0.02 * c
 dfdx = np.stack([1.0 / p, -q / p**2, 20.0 / np.sqrt(k), np.full_like(c, 0.02)], axis=-1)
 print("Y:", Y.shape, "dfdx:", dfdx.shape)
 
-precomputed = jaxgsa.dgsm.analyze(groundwater, Y=Y, dfdx=dfdx)
+precomputed = jaxgsa.dgsm.analyze(groundwater, X, Y, dfdx=dfdx)
 print("upper_bound:", precomputed.upper_bound)
 ```
 
@@ -442,11 +443,11 @@ Y: (2000,) dfdx: (2000, 4)
 jaxgsa.dgsm.analyze
   problem: D=4 (inflow, porosity, roughness, tracer)
     marginals: uniform=4
-    correlation: independent
+    dependence: independent
     output: N=2000 runs, T=1 x K=1 output slice
     invalid: none found in 2000 rows (policy 'raise')
   timing:
-    estimator (includes compile on the first call): 0.3863 s
+    estimator (includes compile on the first call): 0.203 s
     gradients: user-supplied dfdx
     batch_size: auto (resolved from the memory budget)
   results: top 4 of 4 parameters by nu
@@ -462,11 +463,11 @@ autodiff run at `n=2000` to every printed digit. That is the useful check when
 you are unsure your hand-derived Jacobian is right. Differentiate a simplified
 version of the model in JAX and compare the two.
 
-The `(fn, X)` group and the `(Y, dfdx)` group are alternatives, not a menu. Mix
+`fn` and the `(Y, dfdx)` pair are alternatives, not a menu. Mix
 them and you get a `ValueError` naming what you passed:
 
 ```
-ValueError: Provide either (fn, X) or (Y, dfdx), not both: got fn, X from the autodiff path and Y from the pre-computed path. Drop Y to differentiate the model, or drop fn, X to use the values you already have.
+ValueError: Provide either fn or (Y, dfdx), not both: got fn from the autodiff path and Y, dfdx from the pre-computed path. Drop Y, dfdx to differentiate the model, or drop fn to use the values you already have.
 ```
 
 Half-filling one group raises the same way. Nothing is dropped in silence.
@@ -496,9 +497,10 @@ Coordinates:
   * param        (param) <U9 108B 'amplitude' 'frequency' 'damping'
 Data variables:
     nu           (time, output, param) float32 480B 0.4374 1.95 ... 164.8 4.129
-    sigma        (time, output, param) float32 480B -0.007867 ... 0.02931
+    mu           (time, output, param) float32 480B -0.007867 ... 0.02931
     upper_bound  (time, output, param) float32 480B 0.1278 4.051 ... 0.6083
     lower_bound  (time, output, param) float32 480B 1.487e-05 ... 0.0001041
+    variance     (time, output) float32 160B 0.7804 0.7904 ... 0.167 0.1651
 ```
 
 Then `ds.upper_bound.sel(param="damping", output="displacement")` is the bound
@@ -507,7 +509,7 @@ has a `param` dimension only.
 
 ## Shape rules
 
-| `fn` signature | nu / sigma / upper / lower | var_y |
+| `fn` signature | nu / mu / upper / lower | variance |
 |---|---|---|
 | `(D,) -> ()` | `(D,)` | `()` |
 | `(D,) -> (K,)` | `(K, D)` | `(K,)` |
@@ -535,7 +537,7 @@ On the pre-computed path, `dfdx` mirrors `Y` with one extra trailing `(D,)`:
   The truncated-normal solve is memoised per process, so repeated calls on the
   same marginal pay for it once.
 - `standardize_outputs=True` divides each output slice by its own standard
-  deviation. `nu` scales by `a^2` and `sigma` by `a` under `Y -> a*Y + b`, so
+  deviation. `nu` scales by `a^2` and `mu` by `a` under `Y -> a*Y + b`, so
   this is what makes slices of different magnitude comparable. The two bounds
   are ratios and do not move.
 - `on_invalid` checks the derivative as well as the output, on both calling
@@ -545,7 +547,7 @@ On the pre-computed path, `dfdx` mirrors `Y` with one extra trailing `(D,)`:
 - `batch_size` sizes the row block on the autodiff path and bounds peak memory.
   `None` derives it from the active memory budget, pricing each row at roughly
   `T*K*D` floats. It never changes which algorithm runs.
-- A `var_y` near zero makes both bounds a ratio of two small numbers, and
+- A `variance` near zero makes both bounds a ratio of two small numbers, and
   `analyze` warns for any output slice with zero variance.
 - DGSM refuses a `Problem` with categorical inputs: a derivative along an
   unordered level code has no meaning, and a categorical marginal has no

@@ -137,7 +137,7 @@ ax_designs.grid(axis="y", alpha=0.3)
 fig_designs.tight_layout()
 plt.show()
 
-sobol_samples = jaxgsa.sobol.sample(morris_problem, 0, base_n=256, seed=42, verbose=False)
+sobol_samples = jaxgsa.sobol.sample(morris_problem, base_n=256, seed=42, verbose=False)
 Y_sobol = ishigami.evaluate(jnp.asarray(sobol_samples.samples))
 
 # Two analyses, one set of model runs.

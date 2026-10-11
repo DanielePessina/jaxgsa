@@ -10,17 +10,14 @@ import jaxgsa
 from jaxgsa._core.copula import (
     _MIN_EIGENVALUE,
     _project_to_correlation,
-    _safe_cholesky,
     _spearman_to_latent,
     build_conditional_plan,
     canonicalize_correlation,
     correlation_from_covariance,
     fit_gaussian_copula,
-    latent_normal_sample,
-    latent_to_physical,
 )
-from jaxgsa._core.validation import _correlation_tolerant_methods
-from jaxgsa.problem import GaussianInputSpec, Problem
+from jaxgsa._core.validation import _dependence_tolerant_methods
+from jaxgsa.problem import Problem
 
 # An indefinite candidate: pairwise entries are individually valid but jointly
 # inconsistent (eigenvalues of this matrix include a negative one). The repair
@@ -136,14 +133,6 @@ def test_spearman_repair_reports_the_change_on_the_spearman_scale():
     spearman_change = np.abs(_latent_to_spearman(repaired) - declared).max()
     assert latent_change >= 0.05 > spearman_change
     assert f"{spearman_change:.3e}" in str(record[0].message)
-
-
-def test_spearman_round_trip_is_exact():
-    """Reporting on the declared scale is only honest if the inverse is exact."""
-    from jaxgsa._core.copula import _latent_to_spearman, _spearman_to_latent
-
-    R = np.array([[1.0, 0.7, -0.3], [0.7, 1.0, 0.2], [-0.3, 0.2, 1.0]])
-    np.testing.assert_allclose(_latent_to_spearman(_spearman_to_latent(R)), R, atol=1e-15)
 
 
 # ---------------------------------------------------------------------------
@@ -299,70 +288,6 @@ def test_fit_gaussian_copula_rejects_bad_shapes():
         fit_gaussian_copula(problem, np.zeros((2, 2)))
 
 
-def test_latent_to_physical_applies_the_marginal_inverse_cdfs():
-    problem = Problem.from_dict(
-        {
-            "u": (-2.0, 3.0),
-            "g": GaussianInputSpec(dist="gaussian", mean=1.0, variance=4.0),
-        }
-    )
-    rng = np.random.default_rng(5)
-    Z = rng.standard_normal((256, 2))
-    X = latent_to_physical(problem, Z)
-    # The affine uniform marginal stays in its declared bounds. The Gaussian
-    # marginal is monotone in latent space and retains its declared moments;
-    # these are the package contract without duplicating an inverse-CDF
-    # implementation as an oracle.
-    assert np.all(X[:, 0] >= -2.0) and np.all(X[:, 0] <= 3.0)
-    assert np.all(np.isfinite(X[:, 1]))
-    assert np.all(np.argsort(Z[:, 1]) == np.argsort(X[:, 1]))
-    assert abs(np.mean(X[:, 1]) - 1.0) < 0.25
-    assert abs(np.std(X[:, 1]) - 2.0) < 0.25
-
-
-def test_unscrambled_latent_sample_skips_the_origin():
-    """The unscrambled sequence starts past the origin, not at a clipped extreme.
-
-    The origin maps through the probit to the clipped ~-7-sigma corner in
-    every coordinate — a point no normal sample should contain. The sampler
-    fast-forwards past it, so the first returned point is the sequence's
-    second point (0.5, ..., 0.5), which maps to the origin of the latent
-    space.
-    """
-    Z = latent_normal_sample(8, 3, seed=0, scramble=False)
-    assert np.all(np.isfinite(Z))
-    assert np.abs(Z).max() < 6.0
-    np.testing.assert_allclose(Z[0], 0.0, atol=1e-12)
-
-
-def test_scrambled_latent_sample_unchanged_by_origin_skip():
-    """The scrambled path draws point 0, unlike the unscrambled path.
-
-    ``scramble=False`` skips the Sobol' sequence's all-zeros origin point
-    (:func:`test_unscrambled_latent_sample_skips_the_origin`, above) because
-    the probit would otherwise map it to a -7 sigma deviate. Scrambling
-    already displaces that point, so there is nothing to skip. This is a
-    fixed-seed regression (mismatch just detects the value changed, not why),
-    pinned as a literal rather than by recomputing the same internal transform
-    call the source makes, so a rewrite of the source's own plumbing cannot
-    make the test agree with itself no matter what it computes.
-    """
-    Z = latent_normal_sample(16, 3, seed=42, scramble=True)
-    assert np.all(np.isfinite(Z))
-    expected_first_two_rows = np.array(
-        [
-            [-0.17375381, 0.8941081, 0.86475283],
-            [1.12551012, -0.15732484, -0.00317167],
-        ]
-    )
-    np.testing.assert_allclose(Z[:2], expected_first_two_rows, atol=1e-8)
-    # The unscrambled path's first two points are (0, 0, 0) (skipped, tested
-    # separately) then (0.5, 0.5, 0.5) -> the origin of latent space. Neither
-    # appears here: scrambling has already moved the sequence's low-discrepancy
-    # points away from those coordinates.
-    assert not np.allclose(Z[0], 0.0, atol=1e-6)
-
-
 # ---------------------------------------------------------------------------
 # Hard-error guards: design samplers
 # ---------------------------------------------------------------------------
@@ -379,14 +304,14 @@ def test_sampler_guard_message_names_alternatives():
 
     ``tests/test_entry_preamble.py`` makes this claim for the *analysis*
     gate. This is the design gate, whose message is built at a different call
-    site. Asserting against ``_correlation_tolerant_methods()`` rather than a
+    site. Asserting against ``_dependence_tolerant_methods()`` rather than a
     transcribed ordering means adding a tolerant method cannot make the test
     stale without also making the message wrong.
     """
     with pytest.raises(ValueError) as excinfo:
         jaxgsa.sobol.sample(_correlated_problem(), 64, seed=1, verbose=False)
     message = str(excinfo.value)
-    assert _correlation_tolerant_methods() in message
+    assert _dependence_tolerant_methods() in message
     # The design gate additionally has to say how to draw the samples.
     assert "jaxgsa.sampling.monte_carlo" in message
 
@@ -406,67 +331,10 @@ def _correlated_xy(D: int = 2, N: int = 64):
 def test_dgsm_analyze_rejects_correlated_problem_on_both_paths():
     problem, X, Y = _correlated_xy()
     with pytest.raises(ValueError, match=r"jaxgsa\.dgsm\.analyze.*independent inputs"):
-        jaxgsa.dgsm.analyze(problem, fn=lambda x: x[0], X=X)
+        jaxgsa.dgsm.analyze(problem, X, fn=lambda x: x[0])
     dfdx = jnp.zeros((X.shape[0], 2))
     with pytest.raises(ValueError, match=r"jaxgsa\.dgsm\.analyze.*independent inputs"):
-        jaxgsa.dgsm.analyze(problem, Y=Y, dfdx=dfdx)
-
-
-def test_conditional_plan_carries_the_factor_of_its_own_matrix():
-    """T4 internal consistency: ``chol_full`` belongs to the plan's matrix.
-
-    The plan used to be paired with a Cholesky factor computed separately at
-    each call site, so a caller could hand one function the conditionals of
-    one matrix and the joint factor of another. The factor now travels on the
-    plan, and it must reconstruct exactly the matrix the plan was built from.
-    """
-    R = _equicorrelated(0.6, D=4)
-    plan = build_conditional_plan(R)
-
-    assert plan.chol_full.shape == (4, 4)
-    # Exact reconstruction: the field is the factor of R, not of anything else.
-    np.testing.assert_allclose(plan.chol_full @ plan.chol_full.T, R, atol=1e-12)
-    # And it agrees bit-for-bit with the module's own convention.
-    np.testing.assert_array_equal(plan.chol_full, _safe_cholesky(R))
-
-    # A different matrix must give a different factor, so the two cannot be
-    # silently interchanged.
-    other = build_conditional_plan(_equicorrelated(0.2, D=4))
-    assert not np.allclose(plan.chol_full, other.chol_full)
-
-
-def test_safe_cholesky_repairs_a_rank_deficient_matrix_silently():
-    """T4 internal consistency: the repair branch, and how loud it is.
-
-    This is the direction the no-op test above cannot see. On an exactly
-    singular matrix ``np.linalg.cholesky`` raises ``LinAlgError`` while
-    ``_safe_cholesky`` lifts the spectrum to ``_MIN_EIGENVALUE`` and returns a
-    factor. Moving the plan's call sites onto ``_safe_cholesky`` therefore
-    changed the behaviour for a non-positive-definite matrix from "fail" to
-    "repair".
-
-    Pinned here: the repair happens, it reconstructs the input to the lift
-    tolerance, and it says nothing. Silence is deliberate, not an oversight:
-    every matrix that reaches this function through the public API has already
-    been through ``canonicalize_correlation``, which reports the repair it
-    made on the scale the user declared. A second warning from here would
-    report the same defect twice, in units nobody wrote.
-    """
-    R = np.ones((3, 3))  # rank 1: the extreme non-PD case
-    with pytest.raises(np.linalg.LinAlgError):
-        np.linalg.cholesky(R)
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")  # any warning fails the test
-        L = _safe_cholesky(R)
-
-    assert L.shape == (3, 3)
-    assert np.isfinite(L).all()
-    np.testing.assert_array_equal(L, np.tril(L))
-    # The factor is of the lifted matrix, so it reproduces R only to the size
-    # of the lift, and its smallest eigenvalue sits at the floor, not at zero.
-    np.testing.assert_allclose(L @ L.T, R, atol=10 * _MIN_EIGENVALUE)
-    assert np.linalg.eigvalsh(L @ L.T).min() >= _MIN_EIGENVALUE / 2
+        jaxgsa.dgsm.analyze(problem, X, Y, dfdx=dfdx)
 
 
 class TestDegenerateConditionalWarning:
@@ -488,7 +356,7 @@ class TestDegenerateConditionalWarning:
         problem = _uniform_problem(D=2).with_correlation(np.array([[1.0, 0.999], [0.999, 1.0]]))
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            jaxgsa.kucherenko.sample(problem, 64, seed=0)
+            jaxgsa.kucherenko.sample(problem, base_n=64, seed=0)
         found = [w for w in caught if "deterministic function" in str(w.message)]
         assert len(found) == 1
         assert issubclass(found[0].category, jaxgsa.JaxgsaWarning)

@@ -17,15 +17,16 @@ arrays, so it composes with ``jit``, ``vmap`` and ``jacrev``.
 ``pce.effective_order`` reports the degree a fit will actually use.
 """
 
-from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.pce._analyze import analyze, effective_order, indices
+from jaxgsa._core.invalid import InvalidUnit as _InvalidUnit
+from jaxgsa._core.registry import MethodSpec as _MethodSpec
+from jaxgsa._core.registry import register as _register
+from jaxgsa.pce._analyze import PCEIndices, analyze, effective_order, indices
 from jaxgsa.pce._result import PCEResult
 
-__all__ = ["PCEResult", "analyze", "effective_order", "indices"]
+__all__ = ["PCEIndices", "PCEResult", "analyze", "effective_order", "indices"]
 
-SPEC = register(
-    MethodSpec(
+_SPEC = _register(
+    _MethodSpec(
         name="pce",
         analyze=analyze,
         sample=None,
@@ -35,6 +36,6 @@ SPEC = register(
         correlation="refuses",
         categorical="refuses",
         bootstrap="n_bootstrap",
-        invalid_unit=InvalidUnit.ROW,
+        invalid_unit=_InvalidUnit.ROW,
     )
 )

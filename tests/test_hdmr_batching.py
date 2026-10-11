@@ -19,9 +19,11 @@ import numpy as np
 import pytest
 
 import jaxgsa
-from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
+from jaxgsa.benchmarks.ishigami import PROBLEM
 from jaxgsa.hdmr import _fit
 from jaxgsa.hdmr import analyze as analyze_hdmr
+
+# The same Ishigami data and the same unbatched reference fits as test_hdmr.py.
 
 # Row-batched and single-batch runs do the same float32 reductions in a
 # different order, so agreement is to float32 noise, not bit-exact.
@@ -49,20 +51,9 @@ def _restore_memory_budget():
 
 
 @pytest.fixture(scope="module")
-def ishigami_data():
-    """Random Ishigami (X, Y) data shared by all batching tests."""
-    key = jax.random.PRNGKey(7)
-    N = 1000
-    bounds = jnp.array(PROBLEM.bounds)
-    X = jax.random.uniform(key, shape=(N, 3), minval=bounds[:, 0], maxval=bounds[:, 1])
-    Y = evaluate(X)
-    return X, Y
-
-
-@pytest.fixture(scope="module")
-def ishigami_data_ntk(ishigami_data):
+def ishigami_data_ntk(hdmr_ishigami_xy):
     """(N, T, K) variant: T=2 time steps, K=2 output columns."""
-    X, Y = ishigami_data
+    X, Y = hdmr_ishigami_xy
     Y_alt = jnp.cos(X[:, 1]) + 0.3 * X[:, 0] * X[:, 2]
     Y_tk = jnp.stack(
         [
@@ -75,10 +66,44 @@ def ishigami_data_ntk(ishigami_data):
 
 
 @pytest.fixture(scope="module")
-def full_result(ishigami_data):
-    """Unbatched maxorder=2 reference fit, computed once."""
-    X, Y = ishigami_data
-    return analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
+def full_result(hdmr_by_order):
+    """Unbatched order=2 reference fit, shared with test_hdmr.py."""
+    return hdmr_by_order[2]
+
+
+@pytest.fixture(scope="module")
+def full_ntk(ishigami_data_ntk):
+    """Unbatched (N, T, K) reference fit, computed once."""
+    X, Y_tk = ishigami_data_ntk
+    return analyze_hdmr(PROBLEM, X, Y_tk, order=2, n_intervals=2)
+
+
+def _fit_kwargs(N: int, batch_size: int, slice_chunk_size: int) -> dict:
+    """Static arguments for a direct ``_fit_hdmr`` call on 3 uniform inputs."""
+    from jaxgsa.hdmr._analyze import _get_hdmr_static_data
+    from jaxgsa.hdmr._engine import _compute_f_crits
+
+    sd = _get_hdmr_static_data(3, 2, 2)
+    return dict(
+        n_intervals=2,
+        order=2,
+        max_iter=50,
+        ridge=0.01,
+        f_crits=_compute_f_crits(0.95, sd.m1, sd.m2, sd.m3, N),
+        c2_idx=jnp.asarray(sd.c2, dtype=int),
+        c3_idx=jnp.zeros((0, 3), dtype=int),
+        beta2=jnp.asarray(sd.beta2, dtype=int),
+        beta3=jnp.asarray(sd.beta3, dtype=int),
+        n1=sd.n1,
+        n2=sd.n2,
+        n3=sd.n3,
+        n=sd.n,
+        m1=sd.m1,
+        m2=sd.m2,
+        m3=sd.m3,
+        batch_size=batch_size,
+        slice_chunk_size=slice_chunk_size,
+    )
 
 
 def _assert_results_match(batched, full):
@@ -102,7 +127,7 @@ def _assert_results_match(batched, full):
         np.asarray(batched._fit["C1"]), np.asarray(full._fit["C1"]), COEF_RTOL, COEF_ATOL
     )
     if full._fit["C2"] is None:
-        # maxorder=1 has no second-order coefficients on either side.
+        # order=1 has no second-order coefficients on either side.
         assert batched._fit["C2"] is None
     else:
         assert batched._fit["C2"] is not None
@@ -114,21 +139,27 @@ def _assert_results_match(batched, full):
 class TestRowBatching:
     """batch_size=int splits the sample axis; results match one batch."""
 
-    def test_scalar_output_matches(self, ishigami_data, full_result):
-        X, Y = ishigami_data
-        batched = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2, batch_size=137)
+    def test_scalar_output_matches(self, hdmr_ishigami_xy, full_result):
+        X, Y = hdmr_ishigami_xy
+        batched = analyze_hdmr(PROBLEM, X, Y, order=2, n_intervals=2, batch_size=137)
         _assert_results_match(batched, full_result)
 
-    def test_maxorder1_matches(self, ishigami_data):
-        X, Y = ishigami_data
-        full = analyze_hdmr(PROBLEM, X, Y, maxorder=1, m=2)
-        batched = analyze_hdmr(PROBLEM, X, Y, maxorder=1, m=2, batch_size=250)
-        _assert_results_match(batched, full)
+        # Tier T4 (internal consistency): batch_size >= N is a single batch.
+        # ``streamed`` reports whether the sample axis was actually split, so a
+        # batch size the data never reaches leaves it False.
+        single = analyze_hdmr(PROBLEM, X, Y, order=2, n_intervals=2, batch_size=10**6)
+        assert single.streamed is False
+        _assert_results_match(single, full_result)
 
-    def test_maxorder3_matches(self, ishigami_data):
-        X, Y = ishigami_data
-        full = analyze_hdmr(PROBLEM, X, Y, maxorder=3, m=2)
-        batched = analyze_hdmr(PROBLEM, X, Y, maxorder=3, m=2, batch_size=333)
+    def test_order1_matches(self, hdmr_ishigami_xy, hdmr_by_order):
+        X, Y = hdmr_ishigami_xy
+        batched = analyze_hdmr(PROBLEM, X, Y, order=1, n_intervals=2, batch_size=250)
+        _assert_results_match(batched, hdmr_by_order[1])
+
+    def test_order3_matches(self, hdmr_ishigami_xy, hdmr_by_order):
+        X, Y = hdmr_ishigami_xy
+        full = hdmr_by_order[3]
+        batched = analyze_hdmr(PROBLEM, X, Y, order=3, n_intervals=2, batch_size=333)
         _assert_results_match(batched, full)
         # Raw C3 is not comparable element-wise: with a 125-wide tensor-product
         # basis per triple, the per-term Gram is nearly singular, so f32 noise
@@ -143,44 +174,13 @@ class TestRowBatching:
             atol=PREDICT_ATOL,
         )
 
-    def test_ntk_output_matches(self, ishigami_data_ntk):
+    def test_ntk_output_matches(self, ishigami_data_ntk, full_ntk):
         X, Y_tk = ishigami_data_ntk
-        full = analyze_hdmr(PROBLEM, X, Y_tk, maxorder=2, m=2)
-        batched = analyze_hdmr(PROBLEM, X, Y_tk, maxorder=2, m=2, batch_size=111)
+        batched = analyze_hdmr(PROBLEM, X, Y_tk, order=2, n_intervals=2, batch_size=111)
         n_terms = 3 + 3
         assert batched.Sa.shape == (2, 2, n_terms)
         assert batched.rmse is not None and batched.rmse.shape == (2, 2)
-        _assert_results_match(batched, full)
-
-    def test_batch_size_larger_than_n_is_one_batch(self, ishigami_data, full_result):
-        """Tier T4 (internal consistency): batch_size >= N is a single batch.
-
-        ``streamed`` reports whether the sample axis was actually split, so a
-        batch size the data never reaches leaves it False.
-        """
-        X, Y = ishigami_data
-        single = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2, batch_size=10**6)
-        assert single.streamed is False
-        _assert_results_match(single, full_result)
-
-
-class TestAutoEngage:
-    """A small global budget splits the sample axis on its own."""
-
-    def test_tiny_budget_batches_and_matches(self, ishigami_data, full_result):
-        """Tier T4 (internal consistency): a small budget engages row batching.
-
-        This is the structural guard for the whole file. Every other test here
-        compares two batchings, and they agree by design, so a change to the
-        memory estimate that stopped row batching engaging at all would leave
-        those tests green. Asserting the reported path fails instead.
-        """
-        X, Y = ishigami_data
-        assert full_result.streamed is False
-        jaxgsa.config.set_memory_budget(256 * 1024, unit="b")  # 256 KiB
-        batched = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
-        assert batched.streamed is True
-        _assert_results_match(batched, full_result)
+        _assert_results_match(batched, full_ntk)
 
 
 class TestBothAxesCompose:
@@ -198,34 +198,8 @@ class TestBothAxesCompose:
     paths, because a dropped keyword still returns the right numbers.
     """
 
-    def _fit_kwargs(self, N: int, batch_size: int, slice_chunk_size: int) -> dict:
-        from jaxgsa.hdmr._analyze import _get_hdmr_static_data
-        from jaxgsa.hdmr._engine import _compute_f_crits
-
-        sd = _get_hdmr_static_data(3, 2, 2)
-        return dict(
-            m=2,
-            maxorder=2,
-            maxiter=50,
-            lambdax=0.01,
-            f_crits=_compute_f_crits(0.95, sd.m1, sd.m2, sd.m3, N),
-            c2_idx=jnp.asarray(sd.c2, dtype=int),
-            c3_idx=jnp.zeros((0, 3), dtype=int),
-            beta2=jnp.asarray(sd.beta2, dtype=int),
-            beta3=jnp.asarray(sd.beta3, dtype=int),
-            n1=sd.n1,
-            n2=sd.n2,
-            n3=sd.n3,
-            n=sd.n,
-            m1=sd.m1,
-            m2=sd.m2,
-            m3=sd.m3,
-            batch_size=batch_size,
-            slice_chunk_size=slice_chunk_size,
-        )
-
     def _n_traced_equations(self, X_n, Y_nl, *, batch_size: int, slice_chunk_size: int) -> int:
-        kw = self._fit_kwargs(X_n.shape[0], batch_size, slice_chunk_size)
+        kw = _fit_kwargs(X_n.shape[0], batch_size, slice_chunk_size)
         jaxpr = jax.make_jaxpr(lambda x, y: _fit._fit_hdmr(x, y, **kw))(X_n, Y_nl)
         return len(jaxpr.jaxpr.eqns)
 
@@ -255,35 +229,32 @@ class TestBothAxesCompose:
         assert both > rows_only, "slice_chunk_size added nothing once batch_size was set"
         assert both > slices_only, "batch_size added nothing once slice_chunk_size was set"
 
-    def test_slice_chunk_size_alone_subdivides(self, ishigami_data_ntk):
-        """slice_chunk_size grows the trace even with a single row batch."""
-        from jaxgsa._core.transforms import cdf_to_unit_interval
-
-        X, Y_tk = ishigami_data_ntk
-        X_n = cdf_to_unit_interval(X, PROBLEM)
-        Y_nl = Y_tk.reshape(Y_tk.shape[0], -1)
-
-        baseline = self._n_traced_equations(X_n, Y_nl, batch_size=1000, slice_chunk_size=4)
-        chunked = self._n_traced_equations(X_n, Y_nl, batch_size=1000, slice_chunk_size=2)
-        assert chunked > baseline
-
-    def test_ragged_chunks_do_not_change_the_answer(self, ishigami_data_ntk):
+    def test_ragged_chunks_do_not_change_the_answer(self, ishigami_data_ntk, full_ntk):
         """Widths that do not divide N or T*K are padded, not truncated."""
         X, Y_tk = ishigami_data_ntk  # N=1000, T*K = 4
-        full = analyze_hdmr(PROBLEM, X, Y_tk, maxorder=2, m=2)
         ragged = analyze_hdmr(
-            PROBLEM, X, Y_tk, maxorder=2, m=2, batch_size=333, slice_chunk_size=3
+            PROBLEM, X, Y_tk, order=2, n_intervals=2, batch_size=333, slice_chunk_size=3
         )
-        _assert_results_match(ragged, full)
+        _assert_results_match(ragged, full_ntk)
+        # Slice chunking alone, in one row batch, must not change the answer either.
+        sliced = analyze_hdmr(PROBLEM, X, Y_tk, order=2, n_intervals=2, slice_chunk_size=1)
+        _assert_results_match(sliced, full_ntk)
 
-    def test_both_axes_under_a_tiny_budget(self, ishigami_data_ntk):
-        """An automatic batch_size still leaves slice_chunk_size usable."""
+    def test_both_axes_under_a_tiny_budget(self, ishigami_data_ntk, full_ntk):
+        """A small budget engages row batching, and slice_chunk_size stays usable.
+
+        Tier T4 (internal consistency), and the structural guard for the whole
+        file. Every other test here compares two batchings, and they agree by
+        design, so a change to the memory estimate that stopped row batching
+        engaging at all would leave those tests green. Asserting the reported
+        path fails instead.
+        """
         X, Y_tk = ishigami_data_ntk
-        full = analyze_hdmr(PROBLEM, X, Y_tk, maxorder=2, m=2)
-        jaxgsa.config.set_memory_budget(256 * 1024, unit="b")
-        batched = analyze_hdmr(PROBLEM, X, Y_tk, maxorder=2, m=2, slice_chunk_size=1)
+        assert full_ntk.streamed is False
+        jaxgsa.config.set_memory_budget(256 * 1024, unit="b")  # 256 KiB
+        batched = analyze_hdmr(PROBLEM, X, Y_tk, order=2, n_intervals=2, slice_chunk_size=1)
         assert batched.streamed is True
-        _assert_results_match(batched, full)
+        _assert_results_match(batched, full_ntk)
 
 
 class TestPaddingIsInert:
@@ -298,33 +269,6 @@ class TestPaddingIsInert:
 
     Tier T4 (internal consistency).
     """
-
-    def _fit_kwargs(self, N: int, slice_chunk_size: int, batch_size: int) -> dict:
-        """Static arguments for a direct ``_fit_hdmr`` call on 3 uniform inputs."""
-        from jaxgsa.hdmr._analyze import _get_hdmr_static_data
-        from jaxgsa.hdmr._engine import _compute_f_crits
-
-        sd = _get_hdmr_static_data(3, 2, 2)
-        return dict(
-            m=2,
-            maxorder=2,
-            maxiter=50,
-            lambdax=0.01,
-            f_crits=_compute_f_crits(0.95, sd.m1, sd.m2, sd.m3, N),
-            c2_idx=jnp.asarray(sd.c2, dtype=int),
-            c3_idx=jnp.zeros((0, 3), dtype=int),
-            beta2=jnp.asarray(sd.beta2, dtype=int),
-            beta3=jnp.asarray(sd.beta3, dtype=int),
-            n1=sd.n1,
-            n2=sd.n2,
-            n3=sd.n3,
-            n=sd.n,
-            m1=sd.m1,
-            m2=sd.m2,
-            m3=sd.m3,
-            batch_size=batch_size,
-            slice_chunk_size=slice_chunk_size,
-        )
 
     @staticmethod
     def _assert_lanes_identical(a, b, n_lanes: int) -> None:
@@ -341,7 +285,7 @@ class TestPaddingIsInert:
     def _three_lanes(self, X, Y):
         return jnp.stack([Y, jnp.cos(X[:, 1]) + 0.3 * X[:, 0] * X[:, 2], 0.5 * Y + 3.0], axis=1)
 
-    def test_a_padded_lane_does_not_touch_the_real_lanes(self, ishigami_data):
+    def test_a_padded_lane_does_not_touch_the_real_lanes(self, hdmr_ishigami_xy):
         """Three lanes at chunk width 2: slot 3 is padding, or it is data.
 
         ``slice_chunk_size=2`` on 3 lanes gives chunks [0:2] and [2:4], so the
@@ -352,9 +296,9 @@ class TestPaddingIsInert:
         from jaxgsa._core.transforms import cdf_to_unit_interval
         from jaxgsa.hdmr._fit import _fit_hdmr
 
-        X, Y = ishigami_data
+        X, Y = hdmr_ishigami_xy
         X_n = cdf_to_unit_interval(X, PROBLEM)
-        kw = self._fit_kwargs(X.shape[0], slice_chunk_size=2, batch_size=X.shape[0])
+        kw = _fit_kwargs(X.shape[0], batch_size=X.shape[0], slice_chunk_size=2)
         lanes3 = self._three_lanes(X, Y)
         extra = (jnp.sin(X[:, 0]) * X[:, 2] - 7.0)[:, None]
 
@@ -362,7 +306,7 @@ class TestPaddingIsInert:
         filled = _fit_hdmr(X_n, jnp.concatenate([lanes3, extra], axis=1), **kw)
         self._assert_lanes_identical(padded, filled, 3)
 
-    def test_padded_row_content_cannot_reach_an_accumulator(self, ishigami_data, monkeypatch):
+    def test_padded_row_content_cannot_reach_an_accumulator(self, hdmr_ishigami_xy, monkeypatch):
         """Fill the row padding with 1e6 instead of 0 and change nothing.
 
         Every accumulator contracts against a basis the row mask has already
@@ -373,10 +317,10 @@ class TestPaddingIsInert:
         from jaxgsa._core.transforms import cdf_to_unit_interval
         from jaxgsa.hdmr import _fit as fit_mod
 
-        X, Y = ishigami_data
+        X, Y = hdmr_ishigami_xy
         X_n = cdf_to_unit_interval(X, PROBLEM)
         # 1000 rows in batches of 300: the trailing batch pads 200 rows.
-        kw = self._fit_kwargs(X.shape[0], slice_chunk_size=3, batch_size=300)
+        kw = _fit_kwargs(X.shape[0], batch_size=300, slice_chunk_size=3)
         lanes3 = self._three_lanes(X, Y)
 
         zero_padded = fit_mod._fit_hdmr(X_n, lanes3, **kw)
@@ -387,6 +331,6 @@ class TestPaddingIsInert:
             junk = jnp.full((n_pad, *A.shape[1:]), 1.0e6, dtype=A.dtype)
             return jnp.concatenate([A, junk], axis=0)
 
-        monkeypatch.setattr(fit_mod, "_pad_rows", loud_pad)
+        monkeypatch.setattr(fit_mod, "pad_rows", loud_pad)
         loud_padded = fit_mod._fit_hdmr(X_n, lanes3, **kw)
         self._assert_lanes_identical(zero_padded, loud_padded, 3)

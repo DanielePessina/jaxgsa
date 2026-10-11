@@ -63,7 +63,7 @@ jobs:
           uv run ruff check .
           uv run ty check src/jaxgsa scripts/release_smoke.py
       - name: Run every test, including slow tests
-        run: uv run pytest -m "" -q
+        run: uv run pytest -m "" -q -n auto
 
   build:
     needs: [resolve, validate]

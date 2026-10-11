@@ -37,6 +37,9 @@ from jaxgsa._core.sampling import (
     _power_of_2_error,
     _stable_unique_rows,
     _transform_samples,
+    check_budget_choice,
+    check_seed,
+    check_seed_scramble,
 )
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -117,6 +120,14 @@ class SobolSamples(UniqueDesignSamples):
     unit: np.ndarray | None = None
     expanded_to_unit: np.ndarray | None = None
 
+    def __repr__(self) -> str:
+        """Return a concise summary of the design dimensions, with no arrays."""
+        return (
+            f"SobolSamples(n_runs={self.n_runs}, n_expanded={self.n_expanded}, "
+            f"base_n={self.base_n}, n_params={self.n_params}, "
+            f"calc_second_order={self.calc_second_order})"
+        )
+
     def transform(self, theta: Theta | None = None) -> Array:
         """Re-derive the physical design from the unit cube, differentiably.
 
@@ -136,7 +147,7 @@ class SobolSamples(UniqueDesignSamples):
 
             theta = {"a": {"low": 0.0, "high": 1.0},
                      "b": {"mean": 3.0, "variance": 9.0}}
-            X = sampling_result.transform(theta)
+            X = samples.transform(theta)
 
         Tier T4 (behavioural contract): the returned array must reproduce
         :attr:`samples` when ``theta`` is ``None``, and its Jacobian with
@@ -447,7 +458,7 @@ class SobolSamples(UniqueDesignSamples):
             n_expanded=n_expanded,
             expanded_to_unique=expanded_to_unique,
             base_n=int(meta["base_n"]),
-            n_params=problem.num_vars,
+            n_params=problem.n_params,
             calc_second_order=bool(meta["calc_second_order"]),
             problem=problem,
             # `.get`: a hand-built design can be saved without a unit-cube
@@ -480,7 +491,7 @@ def _max_distinct_rows(problem: Problem) -> int | None:
     then ``None`` is returned.
     """
     dims_levels = _categorical_dims(problem)
-    if len(dims_levels) != problem.num_vars:
+    if len(dims_levels) != problem.n_params:
         return None
     return math.prod(n_levels for _, n_levels in dims_levels)
 
@@ -660,7 +671,7 @@ def _print_sampling_summary(
 
 def sample(
     problem: Problem,
-    n_samples: int,
+    n_samples: int | None = None,
     *,
     base_n: int | None = None,
     calc_second_order: bool = True,
@@ -687,9 +698,10 @@ def sample(
         problem: Problem definition with parameter names and distributions.
         n_samples: Minimum desired number of unique model evaluations. The
             returned design may contain somewhat more rows than this, never
-            fewer. Ignored when ``base_n`` is provided.
+            fewer. Give exactly one of ``n_samples`` and ``base_n``.
         base_n: If given, use this exact Sobol base size (must be a power
-            of 2) instead of searching for one. The expanded Saltelli
+            of 2) instead of searching for one. Give exactly one of
+            ``n_samples`` and ``base_n``. The expanded Saltelli
             design will have ``base_n * (2*D + 2)`` rows (second order)
             or ``base_n * (D + 2)`` rows (first/total only). This gives
             direct control over the sampling budget.
@@ -699,9 +711,10 @@ def sample(
             first/total-order indices. That nearly halves the evaluation
             budget: the Saltelli step becomes ``D + 2`` instead of
             ``2*D + 2``.
-        scramble: Whether to apply Owen scrambling to the Sobol sequence
-            (recommended; randomizes the sequence so different seeds give
-            statistically independent designs).
+        scramble: Whether to scramble the Sobol sequence with a linear
+            matrix scramble plus a digital shift (recommended; randomizes the
+            sequence so different seeds give statistically independent
+            designs).
         seed: Random seed or generator for reproducibility.
         verbose: If ``True`` (default), print a short summary describing the
             requested unique count, returned unique count, expanded Saltelli
@@ -712,7 +725,10 @@ def sample(
         later Sobol analysis.
 
     Raises:
-        ValueError: If ``base_n`` is not a power of 2, or
+        ValueError: If both or neither of ``n_samples`` and ``base_n`` are
+            given, if ``base_n`` is not a power of 2, if a ``seed`` is given
+            with ``scramble=False`` (the unscrambled sequence is
+            deterministic, so the seed would do nothing), or if
             ``problem.correlation`` declares a dependence structure (the
             Saltelli design and its estimators assume independent inputs).
 
@@ -722,8 +738,11 @@ def sample(
             unreliable; this is a warning, not an error, because a tiny
             design may be a deliberate probe.
     """
+    check_seed(seed, "jaxgsa.sobol.sample")
+    check_budget_choice(n_samples, base_n, "jaxgsa.sobol.sample")
+    check_seed_scramble(scramble, seed, "jaxgsa.sobol.sample")
     _raise_correlated_design(problem, "jaxgsa.sobol.sample")
-    D = problem.num_vars
+    D = problem.n_params
     # Rows per base point: sets the ratio between base_n and total expanded rows.
     step = _saltelli_step(D, calc_second_order)
 
@@ -732,7 +751,7 @@ def sample(
             raise ValueError(_power_of_2_error("base_n", base_n, reason="Sobol' sequence balance"))
         target_n = None
     else:
-        target_n = max(1, n_samples)
+        target_n = max(1, n_samples if n_samples is not None else 1)
         # Estimate initial base_n from requested unique count,
         # rounding up to next power of 2 (Sobol sequence requirement).
         base_n = _next_power_of_2(math.ceil(target_n / step))

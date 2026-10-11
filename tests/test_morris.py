@@ -14,7 +14,7 @@ import pytest
 from jaxgsa import JaxgsaWarning
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
-from jaxgsa.morris import analyze, indices, sample
+from jaxgsa.morris import MorrisIndices, analyze, indices, sample
 from jaxgsa.problem import GaussianInputSpec, Problem
 
 UNIT_PROBLEM = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
@@ -36,85 +36,72 @@ def ishigami_morris_result():
 
 
 @pytest.fixture(scope="module")
-def linear_morris_result():
-    """Trajectory-design Morris result for the linear benchmark."""
+def linear_morris_result_full():
+    """Trajectory-design Morris design, outputs and result for the linear benchmark."""
     sr = sample(linear.PROBLEM, n_trajectories=20, seed=0, verbose=False)
     Y = linear.evaluate(jnp.asarray(sr.samples))
-    return analyze(sr, Y)
+    return sr, Y, analyze(sr, Y)
+
+
+@pytest.fixture(scope="module")
+def linear_morris_result(linear_morris_result_full):
+    """Trajectory-design Morris result for the linear benchmark."""
+    return linear_morris_result_full[2]
+
+
+@pytest.fixture(scope="module")
+def radial_ishigami_r12():
+    """A radial Ishigami design with 12 trajectories, and its finite outputs."""
+    sr = sample(ishigami.PROBLEM, n_trajectories=12, method="radial", seed=8, verbose=False)
+    Y = np.asarray(ishigami.evaluate(jnp.asarray(sr.samples)), dtype=np.float64)
+    return sr, Y
 
 
 class TestSampling:
-    def test_shapes_and_bookkeeping(self):
-        sr = sample(UNIT_PROBLEM, n_trajectories=10, seed=1, verbose=False)
-        D = 3
-        assert sr.n_expanded == 10 * (D + 1)
+    @pytest.mark.parametrize("method", ["trajectory", "radial"])
+    def test_design_structure(self, method):
+        """Shapes, grid, step size and the ee bookkeeping agree with the design."""
+        p, n, D = 4, 25, 3
+        sr = sample(
+            UNIT_PROBLEM, n_trajectories=n, n_levels=p, method=method, seed=5, verbose=False
+        )
+        assert sr.n_expanded == n * (D + 1)
         assert sr.samples.shape[1] == D
         assert sr.samples.shape[0] == sr.n_runs <= sr.n_expanded
         assert sr.expanded_to_unique.shape == (sr.n_expanded,)
         for arr in (sr.ee_idx_after, sr.ee_idx_before, sr.ee_delta):
-            assert arr.shape == (10, D)
+            assert arr.shape == (n, D)
 
-    def test_dedup_roundtrip(self):
-        """Unique rows indexed by the map must rebuild the expanded design."""
-        sr = sample(UNIT_PROBLEM, n_trajectories=15, seed=3, verbose=False)
         expanded = sr.samples[sr.expanded_to_unique]
-        # Every consecutive pair within a trajectory differs in one coordinate
-        grouped = expanded.reshape(15, 4, 3)
-        diffs = grouped[:, 1:, :] - grouped[:, :-1, :]
-        changed = np.abs(diffs) > 1e-12
-        np.testing.assert_array_equal(changed.sum(axis=2), np.ones((15, 3)))
+        if method == "trajectory":
+            # All points sit on the p-level grid.
+            levels = sr.samples * (p - 1)
+            np.testing.assert_allclose(levels, np.round(levels), atol=1e-12)
+            # Every consecutive pair within a trajectory differs in one
+            # coordinate, and the step is delta.
+            grouped = expanded.reshape(n, D + 1, D)
+            steps = grouped[:, 1:, :] - grouped[:, :-1, :]
+            changed = np.abs(steps) > 1e-12
+            np.testing.assert_array_equal(changed.sum(axis=2), np.ones((n, D)))
+            delta = p / (2 * (p - 1))
+            np.testing.assert_allclose(np.abs(steps[changed]), delta, atol=1e-12)
 
-    def test_trajectory_rows_on_grid(self):
-        """All trajectory points must sit on the p-level grid."""
-        p = 4
-        sr = sample(UNIT_PROBLEM, n_trajectories=25, num_levels=p, seed=5, verbose=False)
-        levels = sr.samples * (p - 1)
-        np.testing.assert_allclose(levels, np.round(levels), atol=1e-12)
+        # ee_delta equals the actual coordinate change between the paired rows.
+        for j in range(n):
+            for i in range(D):
+                actual = expanded[sr.ee_idx_after[j, i], i] - expanded[sr.ee_idx_before[j, i], i]
+                assert actual == pytest.approx(sr.ee_delta[j, i], abs=1e-12)
 
-    def test_step_size_is_delta(self):
-        p = 4
-        delta = p / (2 * (p - 1))
-        sr = sample(UNIT_PROBLEM, n_trajectories=25, num_levels=p, seed=6, verbose=False)
-        expanded = sr.samples[sr.expanded_to_unique].reshape(25, 4, 3)
-        steps = expanded[:, 1:, :] - expanded[:, :-1, :]
-        nonzero = steps[np.abs(steps) > 1e-12]
-        np.testing.assert_allclose(np.abs(nonzero), delta, atol=1e-12)
-
-    def test_ee_bookkeeping_matches_design(self):
-        """ee_delta must equal the actual coordinate change between rows."""
-        for method in ("trajectory", "radial"):
-            sr = sample(UNIT_PROBLEM, n_trajectories=8, method=method, seed=9, verbose=False)
-            expanded = sr.samples[sr.expanded_to_unique]
-            for j in range(8):
-                for i in range(3):
-                    actual = (
-                        expanded[sr.ee_idx_after[j, i], i] - expanded[sr.ee_idx_before[j, i], i]
-                    )
-                    assert actual == pytest.approx(sr.ee_delta[j, i], abs=1e-12)
-
-    def test_prefix_property_trajectory(self):
-        sr_large = sample(UNIT_PROBLEM, n_trajectories=30, seed=42, verbose=False)
-        sr_small = sample(UNIT_PROBLEM, n_trajectories=10, seed=42, verbose=False)
+    @pytest.mark.parametrize("method", ["trajectory", "radial"])
+    def test_prefix_property(self, method):
+        """A smaller design is the prefix of a larger one with the same seed."""
+        sr_large = sample(UNIT_PROBLEM, n_trajectories=30, method=method, seed=42, verbose=False)
+        sr_small = sample(UNIT_PROBLEM, n_trajectories=10, method=method, seed=42, verbose=False)
         n_rows = sr_small.n_expanded
         np.testing.assert_array_equal(
             sr_large.samples[sr_large.expanded_to_unique][:n_rows],
             sr_small.samples[sr_small.expanded_to_unique],
         )
-
-    def test_prefix_property_radial(self):
-        sr_large = sample(UNIT_PROBLEM, n_trajectories=30, method="radial", seed=42, verbose=False)
-        sr_small = sample(UNIT_PROBLEM, n_trajectories=10, method="radial", seed=42, verbose=False)
-        n_rows = sr_small.n_expanded
-        np.testing.assert_array_equal(
-            sr_large.samples[sr_large.expanded_to_unique][:n_rows],
-            sr_small.samples[sr_small.expanded_to_unique],
-        )
-
-    def test_reproducible(self):
-        sr1 = sample(UNIT_PROBLEM, n_trajectories=12, seed=7, verbose=False)
-        sr2 = sample(UNIT_PROBLEM, n_trajectories=12, seed=7, verbose=False)
-        np.testing.assert_array_equal(sr1.samples, sr2.samples)
-        np.testing.assert_array_equal(sr1.ee_delta, sr2.ee_delta)
 
     def test_physical_units(self):
         problem = Problem(names=("a", "b"), bounds=((2.0, 5.0), (-1.0, 3.0)))
@@ -124,15 +111,15 @@ class TestSampling:
         assert np.all(sr.samples[:, 1] >= -1.0 - 1e-10)
         assert np.all(sr.samples[:, 1] <= 3.0 + 1e-10)
 
-    def test_odd_num_levels_warns(self):
+    def test_odd_n_levels_warns(self):
         with pytest.warns(UserWarning, match="odd"):
-            sample(UNIT_PROBLEM, n_trajectories=5, num_levels=5, seed=1, verbose=False)
+            sample(UNIT_PROBLEM, n_trajectories=5, n_levels=5, seed=1, verbose=False)
 
     def test_invalid_args_raise(self):
         with pytest.raises(ValueError, match="n_trajectories"):
             sample(UNIT_PROBLEM, n_trajectories=1, verbose=False)
-        with pytest.raises(ValueError, match="num_levels"):
-            sample(UNIT_PROBLEM, n_trajectories=5, num_levels=1, verbose=False)
+        with pytest.raises(ValueError, match="n_levels"):
+            sample(UNIT_PROBLEM, n_trajectories=5, n_levels=1, verbose=False)
         with pytest.raises(ValueError, match="method"):
             sample(UNIT_PROBLEM, n_trajectories=5, method=cast(Any, "star"), verbose=False)
 
@@ -238,7 +225,7 @@ class TestGaussianInputs:
         res = analyze(sr, Y)
         np.testing.assert_allclose(np.asarray(res.mu), [3.0, 5.0], rtol=1e-5)
 
-    def test_to_physical_units_raises(self):
+    def test_to_physical_units_needs_finite_bounds(self):
         sr = sample(self.PROBLEM, n_trajectories=10, seed=3, verbose=False)
         res = analyze(sr, jnp.asarray(np.sum(sr.samples, axis=1)))
         with pytest.raises(ValueError, match="finite uniform bounds"):
@@ -323,46 +310,35 @@ class TestDownsample:
 
 
 class TestLinearAccuracy:
-    def test_mu_star_exact(self, linear_morris_result):
-        """Linear f => unit-cube EE_i = c_i * (hi - lo) = c_i exactly."""
-        np.testing.assert_allclose(np.asarray(linear_morris_result.mu_star), COEFFS, atol=1e-5)
+    def test_linear_model_is_recovered_exactly(self, linear_morris_result):
+        """Linear f => unit-cube EE_i = c_i * (hi - lo) = c_i exactly.
 
-    def test_mu_equals_mu_star(self, linear_morris_result):
-        """Monotone increasing linear model: no sign cancellation."""
-        np.testing.assert_allclose(
-            np.asarray(linear_morris_result.mu),
-            np.asarray(linear_morris_result.mu_star),
-            atol=1e-5,
-        )
-
-    def test_sigma_zero(self, linear_morris_result):
-        """Constant elementary effects: sigma vanishes."""
-        np.testing.assert_allclose(np.asarray(linear_morris_result.sigma), 0.0, atol=1e-5)
-
-    def test_to_physical_units_recovers_coefficients(self, linear_morris_result):
-        res_phys = linear_morris_result.to_physical_units()
+        Monotone increasing, so ``mu`` equals ``mu_star`` (no sign
+        cancellation). The effects are constant, so ``sigma`` vanishes. In
+        physical units the coefficients come back.
+        """
+        res = linear_morris_result
+        np.testing.assert_allclose(np.asarray(res.mu_star), COEFFS, atol=1e-5)
+        np.testing.assert_allclose(np.asarray(res.mu), np.asarray(res.mu_star), atol=1e-5)
+        np.testing.assert_allclose(np.asarray(res.sigma), 0.0, atol=1e-5)
+        res_phys = res.to_physical_units()
         np.testing.assert_allclose(np.asarray(res_phys.mu_star), COEFFS, atol=1e-5)
         assert res_phys.space == "physical"
 
 
 class TestIshigamiAccuracy:
-    def test_all_parameters_detected(self, ishigami_morris_result):
-        """No Ishigami input is negligible; screening must not discard any."""
-        _, _, res = ishigami_morris_result
-        assert np.all(np.asarray(res.mu_star) > 1.0)
+    def test_screening_matches_the_known_structure(self, ishigami_morris_result):
+        """No input is negligible, the ranking follows ST, and x3 reads as nonlinear.
 
-    def test_ranking_consistent_with_st(self, ishigami_morris_result):
-        """mu_star ranking matches the analytical total-order ranking."""
-        _, _, res = ishigami_morris_result
-        mu_star = np.asarray(res.mu_star)
-        st_order = np.argsort(np.asarray(ishigami.ANALYTICAL_ST))
-        np.testing.assert_array_equal(np.argsort(mu_star), st_order)
-
-    def test_x3_flagged_nonlinear(self, ishigami_morris_result):
-        """x3 acts only through interaction: sigma must dominate mu_star."""
+        x3 acts only through interaction, so sigma must dominate mu_star.
+        """
         _, _, res = ishigami_morris_result
         mu_star = np.asarray(res.mu_star)
         sigma = np.asarray(res.sigma)
+        assert np.all(mu_star > 1.0)
+        np.testing.assert_array_equal(
+            np.argsort(mu_star), np.argsort(np.asarray(ishigami.ANALYTICAL_ST))
+        )
         assert sigma[2] / mu_star[2] > 1.0
 
 
@@ -378,9 +354,10 @@ class TestSobolGAccuracy:
 
 
 class TestMultiOutput:
-    def test_slices_match_scalar_runs(self):
+    def test_slices_dataset_and_core_agree_on_multi_output(self):
+        """Slices match scalar runs, the dataset is labelled, and ``indices`` agrees."""
         sr = sample(UNIT_PROBLEM, n_trajectories=15, seed=4, verbose=False)
-        Y = _multi_output(sr.samples)
+        Y = _multi_output(sr.samples)  # (N, 2)
         res_multi = analyze(sr, Y)
         for k in range(2):
             res_k = analyze(sr, Y[:, k])
@@ -391,25 +368,46 @@ class TestMultiOutput:
                 np.asarray(res_multi.sigma)[k], np.asarray(res_k.sigma), atol=1e-6
             )
 
-    def test_time_series_shapes_and_slices(self):
-        sr = sample(UNIT_PROBLEM, n_trajectories=15, seed=4, verbose=False)
-        Y2 = _multi_output(sr.samples)  # (N, 2)
-        Y3 = jnp.stack([Y2, 2.0 * Y2], axis=1)  # (N, T=2, K=2)
+        # A time axis: (N, T=2, K=2), the second step twice the first.
+        Y3 = jnp.stack([Y, 2.0 * Y], axis=1)
         res = analyze(sr, Y3)
         assert res.mu_star.shape == (2, 2, 3)
-        res_flat = analyze(sr, Y2)
         np.testing.assert_allclose(
-            np.asarray(res.mu_star)[0], np.asarray(res_flat.mu_star), atol=1e-6
+            np.asarray(res.mu_star)[0], np.asarray(res_multi.mu_star), atol=1e-6
         )
         np.testing.assert_allclose(
-            np.asarray(res.mu_star)[1], 2.0 * np.asarray(res_flat.mu_star), atol=1e-5
+            np.asarray(res.mu_star)[1], 2.0 * np.asarray(res_multi.mu_star), atol=1e-5
         )
+
+        # The pure core returns the same numbers at the caller's rank.
+        mu, mu_star, sigma = indices(sr, Y3)
+        assert mu.shape == (2, 2, sr.n_params)
+        np.testing.assert_array_equal(np.asarray(mu), np.asarray(res.mu))
+        np.testing.assert_array_equal(np.asarray(mu_star), np.asarray(res.mu_star))
+        np.testing.assert_array_equal(np.asarray(sigma), np.asarray(res.sigma))
+
+        # Names label the dataset axes.
+        problem = Problem(
+            names=("x1", "x2", "x3"),
+            bounds=((0, 1), (0, 1), (0, 1)),
+            output_names=("temp", "pressure"),
+        )
+        sr_named = sample(problem, n_trajectories=15, seed=4, verbose=False)
+        ds = analyze(sr_named, Y).to_dataset()
+        assert list(ds.coords["param"].values) == list(problem.names)
+        assert list(ds.coords["output"].values) == ["temp", "pressure"]
+        assert ds["mu_star"].shape == (2, 3)
+        ds3 = analyze(sr_named, Y3).to_dataset(time_coords=[0.5, 1.0])
+        assert list(ds3.coords["time"].values) == [0.5, 1.0]
+        assert ds3["mu_star"].dims == ("time", "output", "param")
 
 
 class TestBootstrap:
-    def test_conf_shapes_and_bracket(self, ishigami_morris_result):
+    def test_intervals_bracket_repeat_chunk_and_scale(self, ishigami_morris_result):
+        """One R=32 run: bracket, key-determinism, chunking, gaussian rule, physical units."""
         sr, Y, _ = ishigami_morris_result
-        res = analyze(sr, Y, n_bootstrap=200, key=jax.random.PRNGKey(0))
+        key = jax.random.PRNGKey(0)
+        res = analyze(sr, Y, n_bootstrap=32, key=key)
         for est, conf in [
             (res.mu, res.mu_conf),
             (res.mu_star, res.mu_star_conf),
@@ -420,34 +418,32 @@ class TestBootstrap:
             assert np.all(np.asarray(conf[0]) <= np.asarray(est) + 1e-6)
             assert np.all(np.asarray(conf[1]) >= np.asarray(est) - 1e-6)
 
-    def test_deterministic_under_key(self, ishigami_morris_result):
-        sr, Y, _ = ishigami_morris_result
-        r1 = analyze(sr, Y, n_bootstrap=50, key=jax.random.PRNGKey(3))
-        r2 = analyze(sr, Y, n_bootstrap=50, key=jax.random.PRNGKey(3))
-        np.testing.assert_array_equal(np.asarray(r1.mu_star_conf), np.asarray(r2.mu_star_conf))
+        again = analyze(sr, Y, n_bootstrap=32, key=key)
+        np.testing.assert_array_equal(np.asarray(res.mu_star_conf), np.asarray(again.mu_star_conf))
 
-    def test_chunked_matches_unchunked(self, ishigami_morris_result):
-        sr, Y, _ = ishigami_morris_result
-        r_full = analyze(sr, Y, n_bootstrap=64, key=jax.random.PRNGKey(5))
-        r_chunk = analyze(sr, Y, n_bootstrap=64, key=jax.random.PRNGKey(5), resample_chunk_size=10)
+        chunked = analyze(sr, Y, n_bootstrap=32, key=key, resample_chunk_size=10)
         # float32 reductions vary slightly with the vmap batch size
         np.testing.assert_allclose(
-            np.asarray(r_full.mu_star_conf), np.asarray(r_chunk.mu_star_conf), atol=1e-5
+            np.asarray(res.mu_star_conf), np.asarray(chunked.mu_star_conf), atol=1e-5
         )
 
-    def test_gaussian_ci_method(self, ishigami_morris_result):
-        sr, Y, _ = ishigami_morris_result
-        res = analyze(sr, Y, n_bootstrap=100, key=jax.random.PRNGKey(1), ci_method="gaussian")
-        assert res.mu_star_conf is not None
-        assert np.all(np.asarray(res.mu_star_conf[1]) >= np.asarray(res.mu_star_conf[0]))
+        gaussian = analyze(sr, Y, n_bootstrap=32, key=key, ci_method="gaussian")
+        assert gaussian.mu_star_conf is not None
+        assert np.all(np.asarray(gaussian.mu_star_conf[1]) >= np.asarray(gaussian.mu_star_conf[0]))
 
-    def test_missing_key_raises(self, ishigami_morris_result):
+        # The interval scales with the point estimate: Ishigami ranges are 2*pi.
+        res_phys = res.to_physical_units()
+        assert res_phys.mu_star_conf is not None
+        np.testing.assert_allclose(
+            np.asarray(res_phys.mu_star_conf),
+            np.asarray(res.mu_star_conf) / (2 * np.pi),
+            rtol=1e-6,
+        )
+
+    def test_bad_arguments_raise(self, ishigami_morris_result):
         sr, Y, _ = ishigami_morris_result
         with pytest.raises(ValueError, match="key is required"):
             analyze(sr, Y, n_bootstrap=10)
-
-    def test_invalid_ci_method_raises(self, ishigami_morris_result):
-        sr, Y, _ = ishigami_morris_result
         with pytest.raises(ValueError, match="ci_method"):
             analyze(sr, Y, n_bootstrap=10, key=jax.random.PRNGKey(0), ci_method=cast(Any, "bad"))
 
@@ -463,44 +459,10 @@ class TestPhysicalUnits:
             rtol=1e-6,
         )
 
-    def test_conf_scaled_too(self, ishigami_morris_result):
-        sr, Y, _ = ishigami_morris_result
-        res = analyze(sr, Y, n_bootstrap=50, key=jax.random.PRNGKey(2))
-        res_phys = res.to_physical_units()
-        assert res_phys.mu_star_conf is not None
-        np.testing.assert_allclose(
-            np.asarray(res_phys.mu_star_conf),
-            np.asarray(res.mu_star_conf) / (2 * np.pi),
-            rtol=1e-6,
-        )
-
-    def test_double_call_raises(self, ishigami_morris_result):
+    def test_double_call_returns_self(self, ishigami_morris_result):
         _, _, res = ishigami_morris_result
-        with pytest.raises(ValueError, match="already in physical units"):
-            res.to_physical_units().to_physical_units()
-
-
-class TestToDataset:
-    def test_multi_output_names(self):
-        problem = Problem(
-            names=("x1", "x2", "x3"),
-            bounds=((0, 1), (0, 1), (0, 1)),
-            output_names=("temp", "pressure"),
-        )
-        sr = sample(problem, n_trajectories=10, seed=4, verbose=False)
-        res = analyze(sr, _multi_output(sr.samples))
-        ds = res.to_dataset()
-        assert list(ds.coords["param"].values) == list(problem.names)
-        assert list(ds.coords["output"].values) == ["temp", "pressure"]
-        assert ds["mu_star"].shape == (2, 3)
-
-    def test_time_series_coords(self):
-        sr = sample(UNIT_PROBLEM, n_trajectories=10, seed=4, verbose=False)
-        Y2 = _multi_output(sr.samples)
-        Y3 = jnp.stack([Y2, 2.0 * Y2], axis=1)
-        ds = analyze(sr, Y3).to_dataset(time_coords=[0.5, 1.0])
-        assert list(ds.coords["time"].values) == [0.5, 1.0]
-        assert ds["mu_star"].dims == ("time", "output", "param")
+        phys = res.to_physical_units()
+        assert phys.to_physical_units() is phys
 
 
 class TestThinningWarning:
@@ -515,15 +477,6 @@ class TestThinningWarning:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             analyze(sr, self._linear_Y(sr))
-
-    def test_downsample_to_a_small_design_is_silent(self):
-        """Downsampling is deliberate too, so it must not trip the warning."""
-        sr = sample(linear.PROBLEM, n_trajectories=20, seed=1, verbose=False)
-        Y = np.asarray(linear.evaluate(jnp.asarray(sr.samples)))
-        sr_small, Y_small = sr.downsample(8, Y)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            analyze(sr_small, jnp.asarray(Y_small))
 
     def test_lost_blocks_warn_above_the_floor(self):
         """40 of 44 remain: well above the floor, but 4 blocks were lost."""
@@ -586,34 +539,26 @@ class TestValidation:
         with pytest.raises(ValueError, match="every usable trajectory was removed"):
             analyze(sr, Y, on_invalid="drop")
 
-    def test_standardize_outputs_divides_the_measures_by_the_output_std(self):
-        sr = sample(linear.PROBLEM, n_trajectories=20, seed=0, verbose=False)
-        Y = np.asarray(linear.evaluate(jnp.asarray(sr.samples)))
-        Yj = jnp.asarray(Y)
-        res_raw = analyze(sr, Yj)
-        res_norm = analyze(sr, Yj, standardize_outputs=True)
-        Y_exp = Y[sr.expanded_to_unique]
-        scale = Y_exp.std()
-        np.testing.assert_allclose(
-            np.asarray(res_norm.mu_star),
-            np.asarray(res_raw.mu_star) / scale,
-            rtol=1e-4,
-        )
-
-    def test_measures_scale_exactly_with_an_affine_change_of_output(self):
-        """``Y -> a*Y + b`` multiplies every Morris measure by ``a``.
+    def test_standardize_outputs_and_affine_changes(self, linear_morris_result_full):
+        """Output scaling: raw measures scale with ``a``, standardized ones do not move.
 
         Tier T0 (closed form): an elementary effect is a difference quotient,
-        so the shift cancels and the scale passes straight through. Morris
-        reports dimensional quantities and does not pretend otherwise.
+        so under ``Y -> a*Y + b`` the shift cancels and the scale passes
+        straight through. Morris reports dimensional quantities and does not
+        pretend otherwise. With ``standardize_outputs=True`` the measures
+        are divided by the output standard deviation, which scales by ``a``
+        too, so the same affine change moves nothing.
         """
-        sr = sample(linear.PROBLEM, n_trajectories=20, seed=3, verbose=False)
-        Y = jnp.asarray(linear.evaluate(jnp.asarray(sr.samples)))
+        sr, Y, base = linear_morris_result_full
         a, b = 3.0, 1e3
 
-        base = analyze(sr, Y)
-        affine = analyze(sr, a * Y + b)
+        res_norm = analyze(sr, Y, standardize_outputs=True)
+        scale = np.asarray(Y)[sr.expanded_to_unique].std()
+        np.testing.assert_allclose(
+            np.asarray(res_norm.mu_star), np.asarray(base.mu_star) / scale, rtol=1e-4
+        )
 
+        affine = analyze(sr, a * Y + b)
         for name in ("mu", "mu_star", "sigma"):
             np.testing.assert_allclose(
                 np.asarray(getattr(affine, name)),
@@ -622,22 +567,11 @@ class TestValidation:
                 atol=1e-4,
             )
 
-    def test_standardize_outputs_makes_the_measures_affine_invariant(self):
-        """In output-standard-deviation units the same affine change moves nothing.
-
-        Tier T0 (closed form): the measures scale by ``a`` and the divisor,
-        the output standard deviation, scales by ``a`` too.
-        """
-        sr = sample(linear.PROBLEM, n_trajectories=20, seed=3, verbose=False)
-        Y = jnp.asarray(linear.evaluate(jnp.asarray(sr.samples)))
-
-        base = analyze(sr, Y, standardize_outputs=True)
-        affine = analyze(sr, 3.0 * Y + 1e3, standardize_outputs=True)
-
+        affine_norm = analyze(sr, a * Y + b, standardize_outputs=True)
         for name in ("mu", "mu_star", "sigma"):
             np.testing.assert_allclose(
-                np.asarray(getattr(affine, name)),
-                np.asarray(getattr(base, name)),
+                np.asarray(getattr(affine_norm, name)),
+                np.asarray(getattr(res_norm, name)),
                 rtol=1e-3,
                 atol=1e-4,
             )
@@ -648,13 +582,13 @@ class TestOnInvalidPolicy:
 
     R = 12
 
+    @pytest.fixture(autouse=True)
+    def _design(self, radial_ishigami_r12):
+        self.sr, self.Y = radial_ishigami_r12
+
     def _design_and_Y(self):
         """A radial Ishigami design plus its finite outputs on the unique rows."""
-        sr = sample(
-            ishigami.PROBLEM, n_trajectories=self.R, method="radial", seed=8, verbose=False
-        )
-        Y = np.asarray(ishigami.evaluate(jnp.asarray(sr.samples)), dtype=np.float64)
-        return sr, Y
+        return self.sr, self.Y
 
     def _poison(self, sr, Y: np.ndarray, trajectory: int) -> tuple[np.ndarray, list[int]]:
         """Set one NaN inside one trajectory, and return its expanded rows."""
@@ -684,43 +618,42 @@ class TestOnInvalidPolicy:
         assert not np.all(np.isfinite(np.asarray(res.mu_star)))
         assert res.invalid.n_invalid == 1
 
-    def test_one_bad_value_condemns_its_whole_trajectory(self):
-        """T4: the unit is the trajectory, not the row.
+    def test_drop_condemns_whole_trajectories_and_reindexes_the_effects(self):
+        """T4: dropping trajectories equals never having generated them.
 
-        A trajectory is a chain of D+1 points, and each elementary effect is a
-        difference between two neighbours in that chain. Removing one row
-        would leave the neighbours adjacent and invent an effect that spans a
-        step nobody took, so the whole block of D+1 rows has to go.
+        The unit is the trajectory, not the row. A trajectory is a chain of
+        D+1 points, and each elementary effect is a difference between two
+        neighbours in that chain. Removing one row would leave the neighbours
+        adjacent and invent an effect that spans a step nobody took, so the
+        whole block of D+1 rows has to go.
+
+        The re-indexing is the part the shared helper cannot do.
+        ``ee_idx_after`` and ``ee_idx_before`` hold *global* expanded-row
+        indices, so compacting the output array shifts every later block and
+        leaves those indices pointing at the wrong rows. The reference
+        gathers the effects with the original, uncompacted indices and then
+        removes the trajectories, so a re-indexing mistake shows up as a
+        wrong measure rather than as an error. Trajectory 0 is included
+        because its block offset is zero, which is the one case a missing
+        shift would still get right. The survivors are not contiguous.
         """
         sr, Y = self._design_and_Y()
-        bad, rows = self._poison(sr, Y, trajectory=3)
-        with pytest.warns(JaxgsaWarning):
+        dropped = (0, 5, 11)
+        bad = Y.copy()
+        rows: list[int] = []
+        for trajectory in dropped:
+            bad, traj_rows = self._poison(sr, bad, trajectory=trajectory)
+            rows.extend(traj_rows)
+        with pytest.warns(JaxgsaWarning) as record:
             res = analyze(sr, jnp.asarray(bad), on_invalid="drop")
-        assert res.invalid.unit_indices == (3,)
+        assert any("dropped 3 of 12 trajectories" in str(w.message) for w in record)
+        assert res.invalid.unit_indices == dropped
         assert res.invalid.row_indices == tuple(rows)
-        assert len(rows) == sr.n_params + 1
-
-    @pytest.mark.parametrize("trajectory", [0, 5, 11])
-    def test_drop_reindexes_the_elementary_effects(self, trajectory):
-        """T4: dropping trajectory t equals never having generated it.
-
-        This is the part the shared helper cannot do. ``ee_idx_after`` and
-        ``ee_idx_before`` hold *global* expanded-row indices, so compacting
-        the output array shifts every later block and leaves those indices
-        pointing at the wrong rows. The reference gathers the effects with the
-        original, uncompacted indices and then removes the trajectory, so a
-        re-indexing mistake shows up as a wrong measure rather than as an
-        error. Trajectory 0 is included because its block offset is zero,
-        which is the one case a missing shift would still get right.
-        """
-        sr, Y = self._design_and_Y()
-        bad, _ = self._poison(sr, Y, trajectory=trajectory)
-        with pytest.warns(JaxgsaWarning):
-            res = analyze(sr, jnp.asarray(bad), on_invalid="drop")
+        assert len(rows) == len(dropped) * (sr.n_params + 1)
 
         Y_exp = Y[sr.expanded_to_unique]
         ee = (Y_exp[sr.ee_idx_after] - Y_exp[sr.ee_idx_before]) / sr.ee_delta
-        keep = np.arange(self.R) != trajectory
+        keep = np.isin(np.arange(self.R), dropped, invert=True)
         np.testing.assert_allclose(np.asarray(res.mu), ee[keep].mean(axis=0), rtol=1e-4, atol=1e-4)
         np.testing.assert_allclose(
             np.asarray(res.mu_star), np.abs(ee[keep]).mean(axis=0), rtol=1e-4, atol=1e-4
@@ -729,31 +662,14 @@ class TestOnInvalidPolicy:
             np.asarray(res.sigma), ee[keep].std(axis=0, ddof=1), rtol=1e-3, atol=1e-4
         )
 
-    def test_dropping_several_trajectories_reindexes_all_survivors(self):
-        """T4: the re-indexing holds when the survivors are not contiguous."""
-        sr, Y = self._design_and_Y()
-        bad = Y.copy()
-        for trajectory in (1, 4, 9):
-            bad, _ = self._poison(sr, bad, trajectory=trajectory)
-        with pytest.warns(JaxgsaWarning) as record:
-            res = analyze(sr, jnp.asarray(bad), on_invalid="drop")
-        assert any("dropped 3 of 12 trajectories" in str(w.message) for w in record)
-
-        Y_exp = Y[sr.expanded_to_unique]
-        ee = (Y_exp[sr.ee_idx_after] - Y_exp[sr.ee_idx_before]) / sr.ee_delta
-        keep = np.isin(np.arange(self.R), (1, 4, 9), invert=True)
-        np.testing.assert_allclose(
-            np.asarray(res.mu_star), np.abs(ee[keep]).mean(axis=0), rtol=1e-4, atol=1e-4
-        )
-
-    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
-    def test_a_clean_sample_reports_nothing_and_stays_silent(self, policy, recwarn):
+    def test_a_clean_sample_reports_nothing_and_stays_silent(self, recwarn):
         """T4: a clean run gives an empty report under every policy."""
         sr, Y = self._design_and_Y()
-        res = analyze(sr, jnp.asarray(Y), on_invalid=policy)
-        assert res.invalid.n_invalid == 0
-        assert res.invalid.unit is InvalidUnit.TRAJECTORY
-        assert res.invalid.n_units == self.R
+        for policy in ("raise", "propagate", "drop"):
+            res = analyze(sr, jnp.asarray(Y), on_invalid=policy)
+            assert res.invalid.n_invalid == 0
+            assert res.invalid.unit is InvalidUnit.TRAJECTORY
+            assert res.invalid.n_units == self.R
         assert [w for w in recwarn if issubclass(w.category, JaxgsaWarning)] == []
 
 
@@ -790,15 +706,36 @@ class TestIndicesCore:
         sr = sample(ishigami.PROBLEM, n_trajectories=n_trajectories, seed=seed, verbose=False)
         return sr, ishigami.evaluate(jnp.asarray(sr.samples))
 
-    def test_matches_analyze(self):
-        """T4: the three measures equal ``analyze``'s fields exactly."""
+    def test_matches_analyze_and_returns_point_estimates_only(self):
+        """T4: the three measures equal ``analyze``'s fields exactly, with no interval slot.
+
+        The reporting-units flag agrees with ``analyze`` as well. It is kept
+        on the core because it reduces over the *expanded* sample axis, which
+        the caller never holds, so there is no equivalent pre-pass on the
+        unique rows.
+
+        The bootstrap is policy: which interval to report, at what level, by
+        which endpoint rule. It stays on ``analyze``, which keeps
+        ``n_bootstrap`` and reports intervals as before.
+        """
         sr, Y = self._design_and_Y()
-        mu, mu_star, sigma = indices(sr, Y)
+        out = indices(sr, Y)
         result = analyze(sr, Y)
 
-        np.testing.assert_array_equal(np.asarray(mu), np.asarray(result.mu))
-        np.testing.assert_array_equal(np.asarray(mu_star), np.asarray(result.mu_star))
-        np.testing.assert_array_equal(np.asarray(sigma), np.asarray(result.sigma))
+        assert len(out) == 3
+        assert all(arr.shape == (sr.n_params,) for arr in out)
+        for got, field in zip(out, ("mu", "mu_star", "sigma"), strict=True):
+            np.testing.assert_array_equal(np.asarray(got), np.asarray(getattr(result, field)))
+
+        std_out = indices(sr, Y, standardize_outputs=True)
+        std_result = analyze(sr, Y, standardize_outputs=True)
+        for got, field in zip(std_out, ("mu", "mu_star", "sigma"), strict=True):
+            np.testing.assert_array_equal(np.asarray(got), np.asarray(getattr(std_result, field)))
+
+        # analyze still offers the interval the core does not.
+        boot = analyze(sr, Y, n_bootstrap=32, key=jax.random.key(0))
+        assert boot.mu_conf is not None
+        assert boot.mu_conf.shape == (2, sr.n_params)
 
     def test_zero_dimensional_Y_is_refused(self):
         """T4: the rank contract of ``analyze`` applies to ``indices`` too.
@@ -810,80 +747,23 @@ class TestIndicesCore:
         with pytest.raises(ValueError, match=r"Y must be 1-D \(N,\), 2-D \(N, K\), or 3-D"):
             indices(sr, jnp.asarray(1.0))
 
-    def test_matches_analyze_with_standardized_outputs(self):
-        """T4: the reporting-units flag agrees with ``analyze`` as well.
+    def test_is_traceable_under_jit_vmap_and_eval_shape(self):
+        """T4: ``jit``, ``vmap`` and an abstract trace all work on the core.
 
-        The flag is kept on the core because it reduces over the *expanded*
-        sample axis, which the caller never holds, so there is no equivalent
-        pre-pass on the unique rows.
+        The design is a closure constant: it holds NumPy index maps, and
+        ``indices`` never reads a value out of ``Y`` on the host. A host read
+        would raise ``TracerArrayConversionError`` or
+        ``TracerBoolConversionError`` under an abstract trace, so tracing with
+        ``eval_shape`` is the check that every array operation is traceable.
         """
         sr, Y = self._design_and_Y()
-        mu, mu_star, sigma = indices(sr, Y, standardize_outputs=True)
-        result = analyze(sr, Y, standardize_outputs=True)
-
-        np.testing.assert_array_equal(np.asarray(mu), np.asarray(result.mu))
-        np.testing.assert_array_equal(np.asarray(mu_star), np.asarray(result.mu_star))
-        np.testing.assert_array_equal(np.asarray(sigma), np.asarray(result.sigma))
-
-    def test_matches_analyze_multi_output(self):
-        """T4: an ``(n_runs, T, K)`` output comes back at the caller's rank."""
-        sr = sample(UNIT_PROBLEM, n_trajectories=15, seed=3, verbose=False)
-        X = jnp.asarray(sr.samples)
-        base = jnp.asarray(X @ COEFFS)
-        # Two time steps, two outputs, each a different function of X, so a
-        # transposed slice axis cannot pass.
-        Y = jnp.stack(
-            [
-                jnp.stack([base, 2.0 * base + X[:, 0]], axis=-1),
-                jnp.stack([base**2, X[:, 1]], axis=-1),
-            ],
-            axis=1,
-        )
-        assert Y.shape == (sr.n_runs, 2, 2)
-
-        mu, mu_star, sigma = indices(sr, Y)
-        result = analyze(sr, Y)
-
-        assert mu.shape == (2, 2, sr.n_params)
-        np.testing.assert_array_equal(np.asarray(mu), np.asarray(result.mu))
-        np.testing.assert_array_equal(np.asarray(mu_star), np.asarray(result.mu_star))
-        np.testing.assert_array_equal(np.asarray(sigma), np.asarray(result.sigma))
-
-    def test_returns_point_estimates_only(self):
-        """T4: no bootstrap on the core -- three arrays, and no interval slot.
-
-        The bootstrap is policy: which interval to report, at what level, by
-        which endpoint rule. It stays on ``analyze``, which keeps
-        ``n_bootstrap`` and reports intervals as before.
-        """
-        sr, Y = self._design_and_Y()
-        out = indices(sr, Y)
-
-        assert len(out) == 3
-        assert all(arr.shape == (sr.n_params,) for arr in out)
-        # analyze still offers the interval the core does not.
-        result = analyze(sr, Y, n_bootstrap=32, key=jax.random.key(0))
-        assert result.mu_conf is not None
-        assert result.mu_conf.shape == (2, sr.n_params)
-
-    def test_is_jittable(self):
-        """T4: ``jit`` traces the core and returns the eager values."""
-        sr, Y = self._design_and_Y()
-        # The design is a closure constant: it holds NumPy index maps, and
-        # ``indices`` never reads a value out of ``Y`` on the host.
         jitted = jax.jit(lambda outputs: indices(sr, outputs))
-
         for traced, eager in zip(jitted(Y), indices(sr, Y), strict=True):
             np.testing.assert_allclose(np.asarray(traced), np.asarray(eager), rtol=1e-6)
 
-    def test_is_vmappable(self):
-        """T4: ``vmap`` maps the core over a batch of output vectors."""
-        sr, _ = self._design_and_Y()
         X = jnp.asarray(sr.samples)
         batch = jnp.stack([ishigami.evaluate(X), X[:, 0], X[:, 1] ** 2])
-
         mu_batch, mu_star_batch, sigma_batch = jax.vmap(lambda out: indices(sr, out))(batch)
-
         assert mu_batch.shape == (3, sr.n_params)
         for row, outputs in enumerate(batch):
             mu, mu_star, sigma = indices(sr, outputs)
@@ -892,6 +772,9 @@ class TestIndicesCore:
                 np.asarray(mu_star_batch[row]), np.asarray(mu_star), rtol=1e-5
             )
             np.testing.assert_allclose(np.asarray(sigma_batch[row]), np.asarray(sigma), rtol=1e-5)
+
+        shapes = jax.eval_shape(lambda outputs: indices(sr, outputs), Y)
+        assert [s.shape for s in shapes] == [(sr.n_params,)] * 3
 
     def test_jit_of_jacrev_of_the_full_chain(self):
         """T4: ``jit(jacrev(...))`` compiles a model-parameter-to-measure chain.
@@ -919,15 +802,39 @@ class TestIndicesCore:
         np.testing.assert_allclose(float(grad), float(eager), rtol=1e-10)
         np.testing.assert_allclose(float(grad), float(fd), rtol=1e-6)
 
-    def test_reads_no_array_value_on_the_host(self):
-        """T4: every array operation inside the core is traceable.
 
-        A host read of ``Y`` would raise ``TracerArrayConversionError`` or
-        ``TracerBoolConversionError`` under an abstract trace, so tracing with
-        ``eval_shape`` alone is the check: nothing concrete is available.
-        """
-        sr, Y = self._design_and_Y()
+class TestInterfaceCleanup:
+    def test_first_argument_must_be_morris_samples(self):
+        for fn in (analyze, indices):
+            with pytest.raises(TypeError, match="takes the MorrisSamples.*not a Problem"):
+                fn(cast(Any, UNIT_PROBLEM), jnp.zeros(8))
 
-        shapes = jax.eval_shape(lambda outputs: indices(sr, outputs), Y)
+    def test_indices_is_a_named_tuple(self):
+        sr = sample(UNIT_PROBLEM, n_trajectories=8, seed=1, verbose=False)
+        Y = jnp.asarray(np.sum(sr.samples, axis=1))
+        out = indices(sr, Y)
+        assert isinstance(out, MorrisIndices)
+        mu, mu_star, sigma = out
+        np.testing.assert_allclose(out.mu_star, mu_star)
 
-        assert [s.shape for s in shapes] == [(sr.n_params,)] * 3
+    def test_to_physical_units_is_idempotent(self):
+        problem = Problem(names=("a", "b"), bounds=((0, 2), (0, 4)))
+        sr = sample(problem, n_trajectories=8, seed=1, verbose=False)
+        res = analyze(sr, jnp.asarray(np.sum(sr.samples, axis=1)), verbose=False)
+        phys = res.to_physical_units()
+        assert phys.to_physical_units() is phys
+
+    def test_samples_repr_is_compact(self):
+        sr = sample(UNIT_PROBLEM, n_trajectories=8, seed=1, verbose=False)
+        text = repr(sr)
+        assert "n_runs=" in text and "n_trajectories=8" in text
+        assert "array" not in text and len(text) < 200
+
+
+def test_morris_load_rejects_other_samples_file(tmp_path):
+    from jaxgsa import sobol
+
+    path = tmp_path / "sobol.npz"
+    sobol.sample(ishigami.PROBLEM, base_n=8, seed=0).save(path)
+    with pytest.raises(ValueError, match="holds a SobolSamples; load it with jaxgsa.sobol"):
+        type(sample(ishigami.PROBLEM, 4, seed=0)).load(path)

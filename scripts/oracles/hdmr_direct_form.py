@@ -261,7 +261,7 @@ def ishigami_case() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 def sobol_g_case() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Sobol g-function on 4 uniform inputs over [0, 1], N = 2000, seed 20260819.
 
-    Four inputs rather than the usual eight: at maxorder 2 the term count is
+    Four inputs rather than the usual eight: at order 2 the term count is
     quadratic in D, and 4 keeps the printed table readable while still
     exercising a case with several inactive terms.
 
@@ -401,10 +401,10 @@ def jaxgsa_values(X: np.ndarray, y: np.ndarray, lo: float, hi: float) -> dict[st
         problem,
         jnp.asarray(X),
         jnp.asarray(y),
-        maxorder=MAXORDER,
-        maxiter=MAXITER,
-        m=M_INTERVALS,
-        lambdax=LAMBDAX,
+        order=MAXORDER,
+        max_iter=MAXITER,
+        n_intervals=M_INTERVALS,
+        ridge=LAMBDAX,
     )
     return {
         "Sa": np.asarray(r.Sa),
@@ -434,7 +434,7 @@ def main() -> int:
         direct = direct_form_hdmr(X_n, y)
         lib = jaxgsa_values(X, y, lo, hi)
         recorded = EXPECTED.get(name)
-        print(f"\n{name}  (N={X.shape[0]}, D={X.shape[1]}, maxorder={MAXORDER})")
+        print(f"\n{name}  (N={X.shape[0]}, D={X.shape[1]}, order={MAXORDER})")
         print(
             f"  {'field':7} {'idx':>3} {'recorded':>22} {'direct form':>22} {'jaxgsa':>22}  status"
         )

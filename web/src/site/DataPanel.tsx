@@ -3,6 +3,8 @@ import { AnimatePresence, motion } from "motion/react";
 import { Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Table,
   TableBody,
@@ -16,6 +18,7 @@ import { FileUpload } from "./FileUpload";
 import { downloadText } from "./download";
 import {
   alignColumnsByRunId,
+  alignColumnsToXRunIds,
   buildDesignCsv,
   generateDesign,
   loadDemoCloud,
@@ -29,12 +32,33 @@ import {
   type XSource,
   type YData,
 } from "./engine";
+import {
+  DEFAULT_DESIGN_FORM,
+  designConfig,
+  designFormErrors,
+  designMismatch,
+  duplicatesNote,
+  efastDefaultPoints,
+  efastMinPoints,
+  mergeStoredForm,
+  type StoredForm,
+  plannedRuns,
+  type DesignForm,
+} from "./designForm";
 import { useBusyAction } from "./hooks";
 import { DESIGN_METHOD_META } from "./methods";
-import { ErrorBanner, NumberField } from "./primitives";
+import { ErrorBanner } from "./primitives";
 import { SchemaGuide } from "./SchemaGuide";
+import { usePersistentState } from "./session";
 import type { Demo } from "./demos";
 import type { ProblemSpec } from "@/jaxgsa/sampling";
+
+/**
+ * The run_id of each row of an uploaded X, keyed by the X array itself. The
+ * ids follow the array, so they survive this panel unmounting while the
+ * parent still holds the X.
+ */
+const X_RUN_IDS = new WeakMap<Float64Array, number[] | null>();
 
 const DESIGN_METHODS: DesignMethod[] = ["sobol", "morris", "kucherenko", "efast"];
 
@@ -115,6 +139,58 @@ function RouteCard({ selected, title, status, blurb, onSelect }: RouteCardProps)
   );
 }
 
+/** Labeled number input with an inline hint and error. */
+function FormField({
+  id,
+  label,
+  value,
+  onChange,
+  hint,
+  error,
+  placeholder,
+  min,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  hint?: string;
+  error?: string;
+  placeholder?: string;
+  min?: number;
+}) {
+  const noteId = `${id}-note`;
+  const note = error ?? hint;
+
+  return (
+    <div className="space-y-1">
+      <Label htmlFor={id} className="font-mono text-xs">
+        {label}
+      </Label>
+      <Input
+        id={id}
+        type="number"
+        min={min}
+        step={1}
+        value={value}
+        placeholder={placeholder}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={note ? noteId : undefined}
+        onChange={(e) => onChange(e.target.value)}
+        className="h-8 font-mono text-xs"
+      />
+      {note && (
+        <p
+          id={noteId}
+          className={`text-[11px] leading-snug ${error ? "text-destructive" : "text-muted-foreground"}`}
+        >
+          {note}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /** Config fields + preview + download for one design method. */
 function DesignMethodCell({
   method,
@@ -123,6 +199,9 @@ function DesignMethodCell({
   onDesign,
   active,
   onUse,
+  form,
+  setField,
+  disabled,
 }: {
   method: DesignMethod;
   problem: ProblemSpec;
@@ -131,50 +210,35 @@ function DesignMethodCell({
   /** Whether this method's design is the currently selected X source. */
   active: boolean;
   onUse: () => void;
+  form: DesignForm;
+  setField: (field: keyof DesignForm, value: string) => void;
+  disabled: boolean;
 }) {
   const meta = DESIGN_METHOD_META[method];
-  const [baseN, setBaseN] = useState("128");
-  const [nTrajectories, setNTrajectories] = useState("20");
-  const [numLevels, setNumLevels] = useState("4");
-  const [nSamples, setNSamples] = useState("128");
-  const [nPerCurve, setNPerCurve] = useState("");
-  const [seed, setSeed] = useState("0");
-  const { busy, error, run } = useBusyAction();
+  const { busy, error, setError, run } = useBusyAction();
+
+  // The panel stays mounted when the problem changes: drop the old error.
+  const [seenProblem, setSeenProblem] = useState(problem);
+
+  if (seenProblem !== problem) {
+    setSeenProblem(problem);
+    setError(null);
+  }
 
   const D = problem.names.length;
-
-  // eFAST minimum points per curve: 4*M^2*max(D-1, 1) + 1 with M=4.
-  const efastMin = 4 * 16 * Math.max(D - 1, 1) + 1;
+  const errors = designFormErrors(method, form, D);
+  const invalid = Object.keys(errors).length > 0;
+  const efastMin = efastMinPoints(D);
+  const efastDefault = efastDefaultPoints(D);
 
   const onGenerate = () => {
-    const config =
-      method === "sobol"
-        ? { baseN: Number(baseN), calcSecondOrder: false, seed: Number(seed) }
-        : method === "morris"
-          ? {
-              nTrajectories: Number(nTrajectories),
-              numLevels: Number(numLevels),
-              seed: Number(seed),
-            }
-          : method === "kucherenko"
-            ? { nSamples: Number(nSamples), seed: Number(seed) }
-            : {
-                nPerCurve: Number(nPerCurve || efastMin),
-                M: 4,
-                seed: Number(seed),
-              };
-
-    void run(() => onDesign(generateDesign(method, problem, config)));
+    if (invalid) return;
+    void run(() => onDesign(generateDesign(method, problem, designConfig(method, form, D))));
   };
 
-  const plannedRuns =
-    method === "sobol"
-      ? Number(baseN) * (D + 2)
-      : method === "morris"
-        ? Number(nTrajectories) * (D + 1)
-        : method === "kucherenko"
-          ? Number(nSamples) * (2 * D + 1)
-          : Number(nPerCurve || efastMin) * D;
+  const planned = plannedRuns(method, form, D);
+  const mismatch = design ? designMismatch(method, form, design, D, active) : null;
+  const dupNote = design ? duplicatesNote(design) : null;
 
   const preview = design
     ? Array.from({ length: Math.min(3, design.nRuns) }, (_, r) => {
@@ -200,69 +264,92 @@ function DesignMethodCell({
 
       <div className="mt-3 grid grid-cols-2 gap-2">
         {method === "sobol" && (
-          <NumberField
+          <FormField
             id={`${method}-baseN`}
             label="Base N"
-            value={baseN}
-            onChange={setBaseN}
+            value={form.baseN}
+            onChange={(v) => setField("baseN", v)}
+            hint="Must be a power of 2: 16, 32, 64, 128…"
+            error={errors.baseN}
             min={16}
           />
         )}
         {method === "morris" && (
           <>
-            <NumberField
+            <FormField
               id={`${method}-traj`}
               label="Trajectories"
-              value={nTrajectories}
-              onChange={setNTrajectories}
+              value={form.nTrajectories}
+              onChange={(v) => setField("nTrajectories", v)}
+              error={errors.nTrajectories}
               min={2}
             />
-            <NumberField
+            <FormField
               id={`${method}-levels`}
               label="Levels"
-              value={numLevels}
-              onChange={setNumLevels}
+              value={form.nLevels}
+              onChange={(v) => setField("nLevels", v)}
+              error={errors.nLevels}
               min={2}
             />
           </>
         )}
         {method === "kucherenko" && (
-          <NumberField
+          <FormField
             id={`${method}-samples`}
-            label="Samples"
-            value={nSamples}
-            onChange={setNSamples}
+            label="Model runs"
+            value={form.nSamples}
+            onChange={(v) => setField("nSamples", v)}
+            hint="Minimum number of model runs. Base N is the smallest power of 2 that reaches it, so the design may have more runs."
+            error={errors.nSamples}
             min={2}
           />
         )}
         {method === "efast" && (
-          <NumberField
+          <FormField
             id={`${method}-curve`}
             label="Points per curve"
-            value={nPerCurve || String(efastMin)}
-            onChange={setNPerCurve}
+            value={form.nPerCurve}
+            onChange={(v) => setField("nPerCurve", v)}
+            placeholder={String(efastDefault)}
+            hint={`Leave empty for ${efastDefault}. The minimum is ${efastMin}. Fewer points can bias the indices.`}
+            error={errors.nPerCurve}
             min={efastMin}
           />
         )}
-        <NumberField
+        <FormField
           id={`${method}-seed`}
           label="Seed"
-          value={seed}
-          onChange={setSeed}
+          value={form.seed}
+          onChange={(v) => setField("seed", v)}
+          error={errors.seed}
         />
       </div>
 
-      {Number.isFinite(plannedRuns) && plannedRuns > 0 && (
-        <div className="mt-3 flex items-center justify-between rounded-sm border border-border/60 bg-muted/20 px-3 py-2 text-xs">
-          <span className="text-muted-foreground">Model evaluation budget</span>
-          <span className="font-mono tabular-nums">
-            up to {plannedRuns.toLocaleString()} runs
-          </span>
+      {planned !== null && planned > 0 && (
+        <div className="mt-3 rounded-sm border border-border/60 bg-muted/20 px-3 py-2 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-muted-foreground">Model evaluation budget</span>
+            <span className="font-mono tabular-nums">
+              up to {planned.toLocaleString()} runs
+            </span>
+          </div>
+          {(method === "morris" || method === "sobol") && (
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              The design removes duplicate points, so the real count can be lower.
+            </p>
+          )}
         </div>
       )}
 
+      {mismatch && (
+        <p role="status" className="mt-2 text-xs text-amber-600 dark:text-amber-400">
+          {mismatch}
+        </p>
+      )}
+
       <div className="mt-3 flex items-center gap-2">
-        <Button type="button" size="sm" onClick={onGenerate} disabled={busy}>
+        <Button type="button" size="sm" onClick={onGenerate} disabled={busy || disabled || invalid}>
           {busy ? "Generating…" : design ? "Regenerate design" : "Generate design"}
         </Button>
         {design && !active && (
@@ -287,6 +374,7 @@ function DesignMethodCell({
               </span>
             ))}
           </div>
+          {dupNote && <p className="text-xs text-muted-foreground">{dupNote}</p>}
           {design.notes.map((n) => (
             <p key={n} className="text-xs text-muted-foreground">
               {n}
@@ -324,13 +412,17 @@ function DesignMethodCell({
             type="button"
             variant="outline"
             size="sm"
-            onClick={() =>
-              downloadText(
-                `jaxgsa-${method}-design.csv`,
-                buildDesignCsv(problem, design),
-                "text/csv",
-              )
-            }
+            onClick={() => {
+              try {
+                downloadText(
+                  `jaxgsa-${method}-design.csv`,
+                  buildDesignCsv(problem, design),
+                  "text/csv",
+                );
+              } catch (err) {
+                setError(err instanceof Error ? err.message : String(err));
+              }
+            }}
             className="w-full"
           >
             Download design CSV
@@ -388,9 +480,32 @@ export function DataPanel({
   activeDemo: Demo | null;
   disabled: boolean;
 }) {
-  const [selectedMethod, setSelectedMethod] = useState<DesignMethod>("sobol");
+  const [storedMethod, setSelectedMethod] = usePersistentState<DesignMethod>(
+    "data-method",
+    "sobol",
+  );
+
+  const [storedForm, setStoredForm] = usePersistentState<StoredForm>(
+    "data-design-form",
+    DEFAULT_DESIGN_FORM,
+  );
+
   const [error, setError] = useState<string | null>(null);
-  const { busy } = useBusyAction();
+
+  // The panel stays mounted when the problem changes: drop the old error.
+  const [seenProblem, setSeenProblem] = useState(problem);
+
+  if (seenProblem !== problem) {
+    setSeenProblem(problem);
+    setError(null);
+  }
+
+  // A stale or edited entry must not break the form: keep only string fields.
+  const selectedMethod = DESIGN_METHODS.includes(storedMethod) ? storedMethod : "sobol";
+  const form = mergeStoredForm(storedForm);
+
+  const setField = (field: keyof DesignForm, value: string) =>
+    setStoredForm((f) => ({ ...mergeStoredForm(f), [field]: value }));
 
   const D = problem.names.length;
 
@@ -400,9 +515,23 @@ export function DataPanel({
 
   const demo = activeDemo;
 
+  // A design and an uploaded X never coexist: the design route needs run_id
+  // in Y, the uploaded route does not. Switching clears the other side.
+  const dropUploadedX = () => {
+    setGivenX(null);
+    setGivenXLabel("no X data loaded");
+  };
+
   const pickDesign = (method: DesignMethod) => {
     setXSource({ kind: "design", method });
+    dropUploadedX();
     onYData(null);
+    setError(null);
+  };
+
+  const handleDesign = (gen: GeneratedDesign) => {
+    onDesign(gen);
+    dropUploadedX();
     setError(null);
   };
 
@@ -414,61 +543,92 @@ export function DataPanel({
     setError(null);
   };
 
-  const onUploadX = (parsed: ParsedCsv) => {
-    try {
-      const flat = parseXGiven(parsed, problem);
-      pickUploaded(
-        flat,
-        `uploaded X · ${flat.length / D} rows × ${D} cols`,
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
+  // Both upload handlers throw on invalid files. FileUpload turns the throw
+  // into an error and keeps its success state hidden.
+  const onUploadX = (parsed: ParsedCsv, file: File) => {
+    const { flat, runIds } = parseXGiven(parsed, problem);
+
+    X_RUN_IDS.set(flat, runIds);
+
+    pickUploaded(
+      flat,
+      `uploaded X · ${file.name} · ${flat.length / D} rows × ${D} cols${runIds ? " · with run_id" : ""}`,
+    );
+  };
+
+  // A failed Y upload clears the Y that was loaded before, so the panel never
+  // shows an old file next to an error about a new one.
+  const onYError = (message: string) => {
+    setError(message);
+    onYData(null);
   };
 
   const onDemoCloud = () => {
     if (!demo) return;
     const { x, y, n } = loadDemoCloud(demo, 1024);
+
+    X_RUN_IDS.set(x, null);
     pickUploaded(x, `example point cloud (${demo.label}) · ${n} rows`);
-    onYData(scalarYData(y, `demo model (${demo.label}) · ${n} outputs`));
+    onYData(scalarYData(y, `demo model (${demo.label}) · ${n} rows`));
   };
 
-  const onUploadY = (parsed: ParsedCsv) => {
+  const onUploadY = (parsed: ParsedCsv, file: File) => {
     setError(null);
 
-    try {
-      const { columns, runIds, rowCount } = parseYColumns(parsed, problem);
+    const { columns, runIds, rowCount } = parseYColumns(parsed, problem);
 
-      if (xSource?.kind === "design") {
-        const design = designs[xSource.method];
+    if (xSource?.kind === "design") {
+      const design = designs[xSource.method];
 
-        if (!design) {
-          throw new Error("the design for the selected X source is missing");
-        }
+      if (!design) {
+        throw new Error("the design for the selected X source is missing");
+      }
 
-        if (runIds === null) {
-          throw new Error(
-            'the Y file must contain a "run_id" column matching the design download',
-          );
-        }
-
-        const aligned = alignColumnsByRunId(columns, runIds, design);
-        onYData({ columns: aligned, rowCount, label: `uploaded Y · ${rowCount} runs` });
-      } else if (xSource?.kind === "uploaded") {
-        const N = givenX ? givenX.length / D : 0;
-
-        if (rowCount !== N) {
-          throw new Error(`X has ${N} rows but Y has ${rowCount} values`);
-        }
-
-        onYData({ columns, rowCount, label: `uploaded Y · ${rowCount} outputs` });
-      } else {
+      if (runIds === null) {
         throw new Error(
-          "Attach outputs to a data route first — generate a design or upload X.",
+          'the Y file must contain a "run_id" column matching the design download',
         );
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+
+      const aligned = alignColumnsByRunId(columns, runIds, design);
+
+      onYData({
+        columns: aligned,
+        rowCount,
+        label: `uploaded Y · ${file.name} · ${rowCount} rows`,
+      });
+    } else if (xSource?.kind === "uploaded" && givenX !== null) {
+      const N = givenX.length / D;
+      const xIds = X_RUN_IDS.get(givenX) ?? null;
+      const base = `uploaded Y · ${file.name} · ${rowCount} rows`;
+
+      if (xIds !== null && runIds !== null) {
+        // Both files carry run_id: match Y to X by id, in any row order.
+        onYData({
+          columns: alignColumnsToXRunIds(columns, runIds, xIds),
+          rowCount: N,
+          label: `${base} · matched to X by run_id`,
+        });
+
+        return;
+      }
+
+      if (rowCount !== N) {
+        throw new Error(`X has ${N} rows but Y has ${rowCount} values`);
+      }
+
+      onYData({
+        columns,
+        rowCount,
+        label:
+          xIds !== null
+            ? `${base} · paired with X by row order (Y has no run_id)`
+            : base,
+      });
+    } else {
+      throw new Error(
+        "Attach outputs to a data route first — generate a design or upload X.",
+      );
     }
   };
 
@@ -483,6 +643,8 @@ export function DataPanel({
   };
 
   const { ready, summary } = dataRouteStatus(xSource, yData);
+  const uploadedXActive = xSource?.kind === "uploaded" && givenX !== null;
+  const xRunIds = givenX !== null && uploadedXActive ? (X_RUN_IDS.get(givenX) ?? null) : null;
 
   return (
     <Card>
@@ -584,7 +746,10 @@ export function DataPanel({
                       method={selectedMethod}
                       problem={problem}
                       design={designs[selectedMethod] ?? null}
-                      onDesign={onDesign}
+                      onDesign={handleDesign}
+                      form={form}
+                      setField={setField}
+                      disabled={disabled}
                       active={
                         xSource?.kind === "design" && xSource.method === selectedMethod
                       }
@@ -593,6 +758,13 @@ export function DataPanel({
                   </motion.div>
                 </AnimatePresence>
 
+                {xSource?.kind === "uploaded" && (
+                  <p className="text-xs text-muted-foreground">
+                    Your own X is in use (the other route). Press "Use this design" or
+                    generate a design to switch. That removes the uploaded X.
+                  </p>
+                )}
+
                 {xSource?.kind === "design" && (
                   <div className="space-y-2 border-t border-border pt-3">
                     <FileUpload
@@ -600,7 +772,8 @@ export function DataPanel({
                       hint="must include run_id — the row numbers 0…N−1 from the downloaded design CSV · outputs: y, or name_t0, name_t0.5… for time-resolved data"
                       disabled={disabled}
                       onLoaded={onUploadY}
-                      onError={setError}
+                      onError={onYError}
+                      status={yData ? yData.label : null}
                       exampleLabel={
                         demo ? `Evaluate demo model (${demo.label})` : undefined
                       }
@@ -617,29 +790,44 @@ export function DataPanel({
               </div>
             ) : (
               <div className="space-y-4 rounded-sm border border-border p-4">
+                {xSource?.kind === "design" && (
+                  <p className="text-xs text-muted-foreground">
+                    A {xSource.method} design is in use. Uploading X replaces it.
+                  </p>
+                )}
                 <FileUpload
                   label="Upload inputs (X)"
-                  hint={`header must be exactly: ${problem.names.join(", ")} — one row per run, in order. No run_id.`}
-                  disabled={disabled || busy}
+                  hint={`header must be exactly: ${problem.names.join(", ")} — one row per run. A run_id column from a design download is allowed. If X has one, Y is matched to it by id.`}
+                  disabled={disabled}
                   onLoaded={onUploadX}
                   onError={setError}
+                  status={xSource?.kind === "uploaded" && givenX ? givenXLabel : null}
                   exampleLabel={
                     demo ? `Try PCE/Shapley example (${demo.label})` : undefined
                   }
                   onExample={demo ? onDemoCloud : undefined}
-                  exampleDisabled={disabled || busy}
+                  exampleDisabled={disabled}
                 />
                 <FileUpload
                   label="Upload outputs (Y)"
-                  hint="no run_id needed — one output column per output slice (y, or name_t0, name_t0.5…), one value per X row, same row order"
-                  disabled={disabled || givenX === null}
+                  hint={
+                    !uploadedXActive
+                      ? "upload X first — this slot opens when your own X is loaded"
+                      : xRunIds !== null
+                        ? "one output column per output slice (y, or name_t0, name_t0.5…), one value per X row. Include run_id to match X by id, in any order. Without run_id, Y is paired with X by row order."
+                        : "one output column per output slice (y, or name_t0, name_t0.5…), one value per X row, same row order as X. X has no run_id, so a run_id column in Y is ignored."
+                  }
+                  disabled={disabled || !uploadedXActive}
                   onLoaded={onUploadY}
-                  onError={setError}
+                  onError={onYError}
+                  status={uploadedXActive && yData ? yData.label : null}
                 />
                 <p className="font-mono text-xs text-muted-foreground">
-                  {yData
-                    ? `${yData.label} · ${describeY(yData)}`
-                    : givenXLabel}
+                  {!uploadedXActive
+                    ? givenXLabel
+                    : yData
+                      ? `${yData.label} · ${describeY(yData)}`
+                      : `Active X: ${givenXLabel}`}
                 </p>
               </div>
             )}
@@ -648,16 +836,14 @@ export function DataPanel({
 
         <SchemaGuide
           problem={problem}
-          route={
-            xSource?.kind === "design"
-              ? "design"
-              : xSource?.kind === "uploaded"
-                ? "uploaded"
-                : route.kind === "new"
-                  ? "design"
-                  : "none"
+          route={route.kind === "new" ? "design" : "uploaded"}
+          method={
+            route.kind === "new"
+              ? xSource?.kind === "design"
+                ? xSource.method
+                : selectedMethod
+              : undefined
           }
-          method={xSource?.kind === "design" ? xSource.method : undefined}
         />
 
         {designMethods.length > 0 && (

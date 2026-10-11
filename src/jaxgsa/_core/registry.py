@@ -10,7 +10,7 @@ registry instead of keeping their own lists, which is what stops those lists
 drifting apart.
 
 Registration happens as an import side effect: importing ``jaxgsa`` imports
-all thirteen method packages, and each one calls :func:`register` at module
+all fourteen method packages, and each one calls :func:`register` at module
 level. That is why this module imports nothing from those packages — the
 dependency runs one way only, which is what makes a central record possible
 without an import cycle.
@@ -41,7 +41,7 @@ class MethodSpec:
         name: The namespace name, matching the package directory and the entry
             in ``jaxgsa.__all__``.
         analyze: The public analysis entry point. Every method both exports
-            and defines this as ``analyze``, so a grep finds all thirteen;
+            and defines this as ``analyze``, so a grep finds all fourteen;
             reading it from here is still the way to enumerate them without
             knowing the package names.
         sample: The design generator for a design-based method, or ``None``

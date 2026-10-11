@@ -21,7 +21,7 @@ TWO_OUTPUTS = Problem.from_dict(
 
 @pytest.mark.parametrize("shape", [(2, N), (3, N, 2)])
 def test_nonleading_sample_axis_is_rejected(shape):
-    with pytest.raises(ValueError, match="sample rows"):
+    with pytest.raises(ValueError, match="rows but X has"):
         _validate_output(jnp.ones(shape), N)
 
 
@@ -40,5 +40,5 @@ def test_given_data_methods_do_not_transpose_outputs():
     X = jnp.asarray(jaxgsa.sampling.monte_carlo(UNLABELED, 400, seed=2))
     Y = jnp.stack((X[:, 0], X[:, 1]), axis=1)
 
-    with pytest.raises(ValueError, match="sample rows"):
+    with pytest.raises(ValueError, match="rows but X has"):
         jaxgsa.pce.analyze(UNLABELED, X, Y.T)

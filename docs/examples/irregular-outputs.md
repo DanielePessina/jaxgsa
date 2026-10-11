@@ -100,10 +100,10 @@ do not reuse identical random draws.
 
 ## Supported methods and limits
 
-Automatic bucketing is available on these twelve `analyze` entry points:
+Automatic bucketing is available on these thirteen `analyze` entry points:
 
 `borgonovo`, `efast`, `hdmr`, `hsic`, `kucherenko`, `morris`,
-`optimal_transport`, `pawn`, `pce`, `shapley`, `sobol`, and `vkoga`.
+`optimal_transport`, `pawn`, `pce`, `rank`, `shapley`, `sobol`, and `vkoga`.
 
 `dgsm` is the exception. It requires a Jacobian with a fixed output layout, so
 the ragged form is rejected; use one of the methods above or analyze each

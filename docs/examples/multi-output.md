@@ -68,7 +68,7 @@ jaxgsa.sobol.sample: D=4, mode=second-order, base_n=256, requested_runs>=2048, n
 jaxgsa.sobol.analyze
   problem: D=4 (amplitude, frequency, damping, offset)
     marginals: uniform=4
-    correlation: independent
+    dependence: independent
     output: N=2560 runs, T=40 x K=2 output slices
     invalid: none found in 256 Saltelli groups (policy 'raise')
   timing:
@@ -223,10 +223,10 @@ def oscillator(X):
 
 
 # 1. Sobol (Saltelli), first/total-order only
-sampling_result = jaxgsa.sobol.sample(problem, n_samples=4096, seed=0, calc_second_order=False)
-Y_sobol = oscillator(jnp.asarray(sampling_result.samples))[..., None]  # (N, T) -> (N, T, 1)
+samples = jaxgsa.sobol.sample(problem, n_samples=4096, seed=0, calc_second_order=False)
+Y_sobol = oscillator(jnp.asarray(samples.samples))[..., None]  # (N, T) -> (N, T, 1)
 sobol_result = jaxgsa.sobol.analyze(
-    sampling_result,
+    samples,
     Y_sobol,
     n_bootstrap=200,
     conf_level=0.95,
@@ -249,8 +249,8 @@ def oscillator_unbatched(x):
     )
 
 
-X_dgsm = jaxgsa.sampling.monte_carlo(problem, n=50_000, seed=7)
-dgsm_result = jaxgsa.dgsm.analyze(problem, oscillator_unbatched, jnp.asarray(X_dgsm))
+X_dgsm = jaxgsa.sampling.monte_carlo(problem, n_samples=50_000, seed=7)
+dgsm_result = jaxgsa.dgsm.analyze(problem, jnp.asarray(X_dgsm), fn=oscillator_unbatched)
 ```
 
 `calc_second_order=False` keeps the Saltelli design at $(D+2) \times

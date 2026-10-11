@@ -9,7 +9,7 @@ import {
  * Port of `jaxgsa.morris.sample` (trajectory scheme only) to plain TS.
  *
  * The trajectory design walks each of `r` independent paths of `D + 1`
- * points on a coarse `num_levels` grid, perturbing every parameter exactly
+ * points on a coarse `n_levels` grid, perturbing every parameter exactly
  * once per path (Morris 1991). Points are built on an integer half-level
  * grid, in units of `1 / (2 (p - 1))`, and converted to float once at the
  * end so equal grid points are bitwise identical across trajectories — which
@@ -33,7 +33,7 @@ export interface MorrisDesign {
   /** Number of trajectories r, the Morris repetition unit. */
   nTrajectories: number;
   /** Grid levels p used by the trajectory design. */
-  numLevels: number;
+  nLevels: number;
   /** Expanded-row index of the perturbed point of each elementary effect, row-major (r, D). */
   eeIdxAfter: Int32Array;
   /** Expanded-row index of the reference point of each elementary effect, row-major (r, D). */
@@ -45,7 +45,7 @@ export interface MorrisDesign {
 
 export interface SampleMorrisOptions {
   /** Grid levels p (default 4, step delta = p / (2 (p - 1))). */
-  numLevels?: number;
+  nLevels?: number;
   /** Seed for the deterministic splitmix32 stream (default 0). */
   seed?: number;
   /** Print a summary like the Python sample() (default true). */
@@ -95,7 +95,7 @@ interface TrajectoryDesign {
 }
 
 /**
- * Generate Morris trajectories on the `num_levels` grid, the verbatim port
+ * Generate Morris trajectories on the `n_levels` grid, the verbatim port
  * of `_build_trajectories` in src/jaxgsa/morris/_sampling.py. Per-trajectory
  * randomness is consumed in the Python order: base levels, step signs, then
  * the parameter order permutation.
@@ -103,11 +103,11 @@ interface TrajectoryDesign {
 function buildTrajectories(
   nTrajectories: number,
   nParams: number,
-  numLevels: number,
+  nLevels: number,
   rng: Rng,
 ): TrajectoryDesign {
   const D = nParams;
-  const p = numLevels;
+  const p = nLevels;
   // delta = p / (2 (p - 1)) expressed in half-level units of 1 / (2 (p - 1)).
   const deltaInt = p;
   const delta = p / (2.0 * (p - 1));
@@ -215,7 +215,7 @@ export function sampleMorris(
   options: SampleMorrisOptions = {},
 ): MorrisDesign {
   const {
-    numLevels = 4,
+    nLevels = 4,
     seed = 0,
     verbose = true,
     method = "trajectory",
@@ -234,8 +234,8 @@ export function sampleMorris(
     );
   }
 
-  if (numLevels < 2) {
-    throw new Error(`jaxgsa.morris.sample: num_levels must be >= 2, got ${numLevels}`);
+  if (nLevels < 2) {
+    throw new Error(`jaxgsa.morris.sample: n_levels must be >= 2, got ${nLevels}`);
   }
 
   if (method === "radial") {
@@ -249,9 +249,9 @@ export function sampleMorris(
     throw new Error(`jaxgsa.morris.sample: method must be "trajectory", got ${method}`);
   }
 
-  if (numLevels % 2 !== 0) {
+  if (nLevels % 2 !== 0) {
     console.warn(
-      `jaxgsa.morris.sample: num_levels=${numLevels} is odd — grid levels are not ` +
+      `jaxgsa.morris.sample: n_levels=${nLevels} is odd — grid levels are not ` +
         "equally probable and steps land off-grid; an even value is recommended",
     );
   }
@@ -264,7 +264,7 @@ export function sampleMorris(
   const { expandedUnit, eeIdxAfter, eeIdxBefore, eeDelta } = buildTrajectories(
     nTrajectories,
     D,
-    numLevels,
+    nLevels,
     rng,
   );
 
@@ -279,7 +279,7 @@ export function sampleMorris(
     const duplicateFraction = nExpanded > 0 ? duplicatesRemoved / nExpanded : 0;
     console.info(
       `jaxgsa.morris.sample: D=${D}, method=trajectory, ` +
-        `n_trajectories=${nTrajectories}, num_levels=${numLevels}, ` +
+        `n_trajectories=${nTrajectories}, n_levels=${nLevels}, ` +
         `n_expanded=${nExpanded}, n_runs=${nRuns}, ` +
         `duplicates_removed=${duplicatesRemoved} (${(duplicateFraction * 100).toFixed(1)}%)`,
     );
@@ -290,7 +290,7 @@ export function sampleMorris(
     expandedToUnique,
     nExpanded,
     nTrajectories,
-    numLevels,
+    nLevels,
     eeIdxAfter,
     eeIdxBefore,
     eeDelta,

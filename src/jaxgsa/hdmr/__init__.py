@@ -14,15 +14,16 @@ traced. ``hdmr.indices`` runs the same fit and returns ``(Sa, Sb, S, ST)`` as
 plain arrays, so it composes with ``jit``, ``vmap`` and ``jacfwd``.
 """
 
-from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.hdmr._analyze import analyze, indices
+from jaxgsa._core.invalid import InvalidUnit as _InvalidUnit
+from jaxgsa._core.registry import MethodSpec as _MethodSpec
+from jaxgsa._core.registry import register as _register
+from jaxgsa.hdmr._analyze import HDMRIndices, analyze, indices
 from jaxgsa.hdmr._result import HDMRResult
 
-__all__ = ["HDMRResult", "analyze", "indices"]
+__all__ = ["HDMRIndices", "HDMRResult", "analyze", "indices"]
 
-SPEC = register(
-    MethodSpec(
+_SPEC = _register(
+    _MethodSpec(
         name="hdmr",
         analyze=analyze,
         sample=None,
@@ -32,6 +33,6 @@ SPEC = register(
         correlation="accepts",
         categorical="refuses",
         bootstrap="n_bootstrap",
-        invalid_unit=InvalidUnit.ROW,
+        invalid_unit=_InvalidUnit.ROW,
     )
 )

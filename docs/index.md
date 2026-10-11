@@ -16,8 +16,8 @@ hero:
       text: API Reference
       link: /api/problem
     - theme: alt
-      text: Browser Workbench
-      link: https://danielepessina.github.io/jaxgsa/workbench/
+      text: jaxgsa studio
+      link: https://danielepessina.github.io/jaxgsa/studio/
 features:
   - title: Start with one result
     details: Define the inputs, run the model, and read which inputs matter on their own or through interactions.

@@ -49,7 +49,7 @@ def _assert_morris_equal(left: MorrisSamples, right: MorrisSamples) -> None:
     _assert_array_identical(left.ee_delta, right.ee_delta)
     assert left.n_expanded == right.n_expanded
     assert left.n_trajectories == right.n_trajectories
-    assert left.num_levels == right.num_levels
+    assert left.n_levels == right.n_levels
     assert left.method == right.method
     assert left.n_params == right.n_params
     assert left.n_blocks_dropped == right.n_blocks_dropped
@@ -69,6 +69,11 @@ def test_npz_round_trip(tmp_path):
             ),
         },
         output_names=("response",),
+        # A declared identity matrix is "declared but independent", so the
+        # design samplers still accept the problem. A non-identity matrix
+        # cannot reach a Saltelli design (the sampler raises), which is why
+        # it is covered through the metadata round trip below.
+        correlation=np.eye(2),
     )
     samples = jaxgsa.sobol.sample(
         problem,
@@ -84,42 +89,40 @@ def test_npz_round_trip(tmp_path):
 
     assert path.with_suffix(".npz").exists()
     _assert_equal(samples, loaded)
+    stored = loaded.problem.correlation
+    assert stored is not None
+    np.testing.assert_array_equal(stored, np.eye(2))
+    with np.load(path.with_suffix(".npz"), allow_pickle=False) as data:
+        meta = json.loads(data["metadata"].item())
+    assert meta["problem"]["correlation"] == [[1.0, 0.0], [0.0, 1.0]]
 
 
-def test_explicit_npz_suffix_round_trip(tmp_path):
-    samples = _sample_tiny(Problem.from_dict({"x": (0.0, 1.0)}), 16, seed=2, verbose=False)
-    path = tmp_path / "design.npz"
+def test_save_and_load_path_handling(tmp_path, monkeypatch):
+    """An explicit suffix, a dotted stem and a bare filename all round trip.
 
-    samples.save(path)
-
-    _assert_equal(samples, SobolSamples.load(path))
-
-
-def test_dotted_stem_appends_npz_suffix(tmp_path):
-    """A dotted stem must gain '.npz' by appending, not by suffix replacement."""
-    samples = _sample_tiny(Problem.from_dict({"x": (0.0, 1.0)}), 16, seed=2, verbose=False)
-    path = tmp_path / "design.2026-07"
-
-    samples.save(path)
-
-    assert (tmp_path / "design.2026-07.npz").exists()
-    assert not (tmp_path / "design.npz").exists()
-    _assert_equal(samples, SobolSamples.load(path))
-
-
-def test_dotted_stems_do_not_collide(tmp_path):
-    """Saving 'run.A' and 'run.B' must produce two distinct files."""
+    A dotted stem must gain '.npz' by appending, not by suffix replacement, so
+    'run.A' and 'run.B' stay two distinct files. A path with no directory part
+    saves into the working directory, because its parent is '.'.
+    """
     problem = Problem.from_dict({"x": (0.0, 1.0), "y": (0.0, 1.0)})
     samples_a = _sample_tiny(problem, 32, seed=1, verbose=False)
     samples_b = _sample_tiny(problem, 64, seed=2, verbose=False)
 
+    samples_a.save(tmp_path / "design.npz")
+    _assert_equal(samples_a, SobolSamples.load(tmp_path / "design.npz"))
+
     samples_a.save(tmp_path / "run.A")
     samples_b.save(tmp_path / "run.B")
-
     assert (tmp_path / "run.A.npz").exists()
     assert (tmp_path / "run.B.npz").exists()
+    assert not (tmp_path / "run.npz").exists()
     _assert_equal(samples_a, SobolSamples.load(tmp_path / "run.A"))
     _assert_equal(samples_b, SobolSamples.load(tmp_path / "run.B"))
+
+    monkeypatch.chdir(tmp_path)
+    samples_a.save("bare")
+    assert (tmp_path / "bare.npz").exists()
+    _assert_equal(samples_a, SobolSamples.load("bare"))
 
 
 def test_identity_mapping_skips_index_array(tmp_path):
@@ -258,34 +261,6 @@ def test_problem_meta_load_tolerates_pre_060_files_without_correlation_key():
     assert restored.correlation is None
 
 
-def test_npz_round_trip_carries_identity_correlation(tmp_path):
-    """End-to-end NPZ persistence with a declared (identity) correlation.
-
-    An identity matrix is 'declared but independent', so the design samplers
-    still accept the problem; a non-identity correlation cannot reach a
-    Saltelli design at all (the sampler raises), which is why the non-trivial
-    matrix is covered through the metadata round-trip tests above.
-    """
-    problem = Problem.from_dict(
-        {"x": (0.0, 1.0), "y": (0.0, 1.0)},
-        correlation=np.eye(2),
-    )
-    samples = _sample_tiny(problem, 32, seed=6, verbose=False)
-
-    path = tmp_path / "correlated_design"
-    samples.save(path)
-    loaded = SobolSamples.load(path)
-
-    _assert_equal(samples, loaded)
-    stored = loaded.problem.correlation
-    assert stored is not None
-    np.testing.assert_array_equal(stored, np.eye(2))
-
-    with np.load(tmp_path / "correlated_design.npz", allow_pickle=False) as data:
-        meta = json.loads(data["metadata"].item())
-    assert meta["problem"]["correlation"] == [[1.0, 0.0], [0.0, 1.0]]
-
-
 def _every_design(problem: Problem):
     """One design object of each class that can be saved, by class name."""
     # The designs are deliberately tiny; silence the degenerate-design warning
@@ -296,11 +271,13 @@ def _every_design(problem: Problem):
             "SobolSamples": jaxgsa.sobol.sample(problem, 16, seed=1, verbose=False),
             "MorrisSamples": jaxgsa.morris.sample(problem, 4, seed=1, verbose=False),
             "EFASTSamples": jaxgsa.efast.sample(problem, 65, seed=1, verbose=False),
-            "KucherenkoSamples": jaxgsa.kucherenko.sample(problem, 16, seed=1, verbose=False),
+            "KucherenkoSamples": jaxgsa.kucherenko.sample(
+                problem, base_n=16, seed=1, verbose=False
+            ),
         }
 
 
-def test_save_to_a_missing_directory_names_the_directory(tmp_path):
+def test_every_design_class_reports_a_missing_directory_the_same_way(tmp_path):
     """NumPy's own error names a temporary file, not the caller's mistake.
 
     ``np.savez_compressed`` under a directory that is not there fails deep
@@ -310,36 +287,13 @@ def test_save_to_a_missing_directory_names_the_directory(tmp_path):
     not have.
     """
     problem = Problem.from_dict({"x": (0.0, 1.0), "y": (0.0, 1.0)})
-    samples = _sample_tiny(problem, 16, seed=1, verbose=False)
-    missing = tmp_path / "not_there"
-
-    with pytest.raises(FileNotFoundError) as excinfo:
-        samples.save(missing / "design")
-
-    message = str(excinfo.value)
-    assert str(missing) in message
-    assert "does not exist" in message
-    assert "mkdir" in message
-    assert not missing.exists()  # the save made nothing
-
-
-def test_every_design_class_reports_a_missing_directory_the_same_way(tmp_path):
-    problem = Problem.from_dict({"x": (0.0, 1.0), "y": (0.0, 1.0)})
     missing = tmp_path / "not_there"
 
     for name, samples in _every_design(problem).items():
         with pytest.raises(FileNotFoundError) as excinfo:
             samples.save(missing / "design")
-        assert "does not exist" in str(excinfo.value), name
-    assert not missing.exists()
-
-
-def test_a_bare_filename_saves_into_the_working_directory(tmp_path, monkeypatch):
-    """A path with no directory part must still work: its parent is '.'."""
-    monkeypatch.chdir(tmp_path)
-    samples = _sample_tiny(Problem.from_dict({"x": (0.0, 1.0)}), 16, seed=2, verbose=False)
-
-    samples.save("design")
-
-    assert (tmp_path / "design.npz").exists()
-    _assert_equal(samples, SobolSamples.load("design"))
+        message = str(excinfo.value)
+        assert str(missing) in message, name
+        assert "does not exist" in message, name
+        assert "mkdir" in message, name
+    assert not missing.exists()  # the save made nothing

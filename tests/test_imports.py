@@ -41,8 +41,8 @@ def test_version_is_exposed():
     assert jaxgsa.__version__ == version("jaxgsa")
 
 
-def test_theta_is_reexported_for_gradient_users():
+def test_theta_lives_only_in_sobol():
     from jaxgsa._core.sampling import Theta
 
-    assert jaxgsa.Theta is Theta
+    assert not hasattr(jaxgsa, "Theta")
     assert jaxgsa.sobol.Theta is Theta

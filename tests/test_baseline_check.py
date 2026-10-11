@@ -50,166 +50,106 @@ def baseline() -> dict[str, Any]:
     return {"method": {"S1": _array([1.0, 2.0]), "streamed": False}}
 
 
-class TestNoDifference:
-    def test_identical_input_compares_clean(self, baseline):
-        diffs = compare(baseline, baseline)
-        assert diffs.values == []
-        assert diffs.schema == []
-        assert not diffs
-
-    def test_nan_equals_nan(self):
-        """A NaN index is a legitimate result and must not read as a change."""
-        nan = float("nan")
-        one = {"m": {"S1": _array([nan, 1.0])}}
-        assert not compare(one, one)
+def _method(s1=(1.0, 2.0), **fields: Any) -> dict[str, Any]:
+    """One method entry shaped like ``baseline``, with fields replaced or added."""
+    return {"method": {"S1": _array(list(s1)), "streamed": False, **fields}}
 
 
-class TestValueChanges:
-    """Everything here is a wiring error, and must land in ``values``."""
+def test_identical_input_compares_clean_and_nan_equals_nan(baseline):
+    """No difference reads as none. A NaN index is a result, not a change."""
+    diffs = compare(baseline, baseline)
+    assert diffs.values == []
+    assert diffs.schema == []
+    assert not diffs
+    one = {"m": {"S1": _array([float("nan"), 1.0])}}
+    assert not compare(one, one)
 
-    def test_a_moved_number_is_a_value_change(self, baseline):
-        current = {"method": {"S1": _array([1.0, 2.5]), "streamed": False}}
+
+def test_each_kind_of_value_change_lands_in_values(baseline):
+    """A moved number, shape, dtype or scalar is a wiring error, so ``values``."""
+    cases = {
+        "2.0 -> 2.5": _method(s1=(1.0, 2.5)),
+        "shape": _method(s1=(1.0, 2.0, 3.0)),
+        "dtype": {"method": {"S1": {**_array([1.0, 2.0]), "dtype": "float32"}, "streamed": False}},
+        "streamed": _method(streamed=True),
+    }
+    for expected, current in cases.items():
         diffs = compare(baseline, current)
-        assert diffs.schema == []
-        assert len(diffs.values) == 1
-        assert "2.0 -> 2.5" in diffs.values[0]
-        assert "delta" in diffs.values[0]
-
-    def test_a_changed_shape_is_a_value_change(self, baseline):
-        current = {"method": {"S1": _array([1.0, 2.0, 3.0]), "streamed": False}}
-        diffs = compare(baseline, current)
-        assert diffs.schema == []
-        assert len(diffs.values) == 1
-        assert "shape" in diffs.values[0]
-
-    def test_a_changed_dtype_is_a_value_change(self, baseline):
-        current = {"method": {"S1": {**_array([1.0, 2.0]), "dtype": "float32"}, "streamed": False}}
-        diffs = compare(baseline, current)
-        assert diffs.schema == []
-        assert "dtype" in diffs.values[0]
-
-    def test_a_changed_scalar_is_a_value_change(self, baseline):
-        current = {"method": {"S1": _array([1.0, 2.0]), "streamed": True}}
-        diffs = compare(baseline, current)
-        assert diffs.schema == []
-        assert len(diffs.values) == 1
-        assert "streamed" in diffs.values[0]
+        assert diffs.schema == [], expected
+        assert len(diffs.values) == 1, expected
+        assert expected in diffs.values[0], expected
+    moved = compare(baseline, cases["2.0 -> 2.5"])
+    assert "delta" in moved.values[0]
 
 
-class TestSchemaChanges:
+def test_a_gained_or_lost_field_lands_in_schema(baseline):
     """A gained or lost field is not a wiring error, and must not read as one."""
+    gained = compare(baseline, _method(invalid={"n": 0}))
+    assert gained.values == []
+    assert len(gained.schema) == 1
+    assert "ADDED" in gained.schema[0]
 
-    def test_a_gained_field_is_a_schema_change(self, baseline):
-        current = {"method": {"S1": _array([1.0, 2.0]), "streamed": False, "invalid": {"n": 0}}}
-        diffs = compare(baseline, current)
-        assert diffs.values == []
-        assert len(diffs.schema) == 1
-        assert "ADDED" in diffs.schema[0]
-
-    def test_a_lost_field_is_a_schema_change(self, baseline):
-        current = {"method": {"S1": _array([1.0, 2.0])}}
-        diffs = compare(baseline, current)
-        assert diffs.values == []
-        assert len(diffs.schema) == 1
-        assert "REMOVED" in diffs.schema[0]
+    lost = compare(baseline, {"method": {"S1": _array([1.0, 2.0])}})
+    assert lost.values == []
+    assert len(lost.schema) == 1
+    assert "REMOVED" in lost.schema[0]
 
 
-class TestComparingTwoStoredDumps:
+def test_a_gained_field_does_not_hide_a_moved_number(baseline):
+    """The regression the values/schema split exists to prevent.
+
+    Fifty added fields alongside one moved number is exactly the state this
+    repository was in while the on_invalid report was landing. In one
+    undifferentiated list the moved number is the fifty-first line.
+    """
+    diffs = compare(baseline, _method(s1=(1.0, 999.0), invalid={"n": 0}))
+    assert len(diffs.values) == 1, "the moved number must be reported on its own"
+    assert len(diffs.schema) == 1
+    assert "999.0" in diffs.values[0]
+
+
+def test_exit_codes_and_reports_for_two_stored_dumps(tmp_path, baseline, capsys):
     """`--current` is how CI diffs two commits dumped on one runner.
 
     The stored baseline cannot be used in CI: it records float32 bits, and
     those depend on the CPU, so an Apple-silicon file compared against an
     x86-64 run reports about a thousand moved values with no code change.
+    CI asks one question, did this change move a number, so
+    ``--allow-schema-change`` waves a gained field through but never a moved
+    value.
     """
+    base = tmp_path / "base.json"
+    head = tmp_path / "head.json"
 
-    def _write(self, path, results):
-        path.write_text(json.dumps({"header": {"git_commit": "test"}, "results": results}))
+    def run(current, *flags):
+        for path, results in ((base, baseline), (head, current)):
+            path.write_text(json.dumps({"header": {"git_commit": "test"}, "results": results}))
+        code = baseline_check.main(["--baseline", str(base), "--current", str(head), *flags])
+        return code, capsys.readouterr().out
 
-    def test_two_identical_dumps_pass(self, tmp_path, baseline, capsys):
-        base, head = tmp_path / "base.json", tmp_path / "head.json"
-        self._write(base, baseline)
-        self._write(head, baseline)
-        code = baseline_check.main(["--baseline", str(base), "--current", str(head)])
-        assert code == 0
-        assert "PASSED" in capsys.readouterr().out
+    code, out = run(baseline)
+    assert code == 0
+    assert "PASSED" in out
 
-    def test_a_moved_value_exits_one(self, tmp_path, baseline, capsys):
-        base, head = tmp_path / "base.json", tmp_path / "head.json"
-        self._write(base, baseline)
-        self._write(head, {"method": {"S1": _array([1.0, 2.5]), "streamed": False}})
-        assert baseline_check.main(["--baseline", str(base), "--current", str(head)]) == 1
-        assert "value(s) moved" in capsys.readouterr().out
+    code, out = run(_method(s1=(1.0, 2.5)))
+    assert code == 1
+    assert "value(s) moved" in out
 
-    def test_a_schema_change_alone_exits_two(self, tmp_path, baseline, capsys):
-        base, head = tmp_path / "base.json", tmp_path / "head.json"
-        self._write(base, baseline)
-        self._write(head, {"method": {**baseline["method"], "invalid": {"n": 0}}})
-        assert baseline_check.main(["--baseline", str(base), "--current", str(head)]) == 2
-        out = capsys.readouterr().out
-        assert "schema change(s)" in out
-        assert "regenerate" in out
+    code, out = run(_method(invalid={"n": 0}))
+    assert code == 2
+    assert "schema change(s)" in out
+    assert "regenerate" in out
 
-    def test_a_missing_current_file_is_refused(self, tmp_path, baseline):
-        base = tmp_path / "base.json"
-        self._write(base, baseline)
-        assert (
-            baseline_check.main(["--baseline", str(base), "--current", str(tmp_path / "no")]) == 1
-        )
+    code, out = run(_method(ci={"level": 0.95}), "--allow-schema-change")
+    assert code == 0
+    assert "schema change(s)" in out, "the change must still be reported, just not fatal"
 
+    code, out = run(_method(s1=(1.0, 999.0), ci={"level": 0.95}), "--allow-schema-change")
+    assert code == 1, "the flag must not become a way to wave a wiring error through"
+    assert "999.0" in out
 
-class TestAllowSchemaChange:
-    """CI asks one question: did this change move a number?
-
-    A result that gains a field is a deliberate edit to the public surface,
-    reviewed in the diff like any other. Blocking it on the numerical guard
-    would mean every PR that touches a result class goes red for the wrong
-    reason. Moved values must still fail.
-    """
-
-    def _write(self, path, results):
-        path.write_text(json.dumps({"header": {"git_commit": "test"}, "results": results}))
-
-    def test_a_schema_change_passes_when_allowed(self, tmp_path, baseline, capsys):
-        base, head = tmp_path / "base.json", tmp_path / "head.json"
-        self._write(base, baseline)
-        self._write(head, {"method": {**baseline["method"], "ci": {"level": 0.95}}})
-        code = baseline_check.main(
-            ["--baseline", str(base), "--current", str(head), "--allow-schema-change"]
-        )
-        assert code == 0
-        out = capsys.readouterr().out
-        assert "schema change(s)" in out, "the change must still be reported, just not fatal"
-
-    def test_a_moved_value_still_fails_when_schema_changes_are_allowed(
-        self, tmp_path, baseline, capsys
-    ):
-        """The flag must not become a way to wave a wiring error through."""
-        base, head = tmp_path / "base.json", tmp_path / "head.json"
-        self._write(base, baseline)
-        self._write(
-            head,
-            {"method": {"S1": _array([1.0, 999.0]), "streamed": False, "ci": {"level": 0.95}}},
-        )
-        code = baseline_check.main(
-            ["--baseline", str(base), "--current", str(head), "--allow-schema-change"]
-        )
-        assert code == 1
-        assert "999.0" in capsys.readouterr().out
-
-
-class TestTheTwoKindsStaySeparate:
-    def test_a_gained_field_does_not_hide_a_moved_number(self, baseline):
-        """The regression this split exists to prevent.
-
-        Fifty added fields alongside one moved number is exactly the state
-        this repository was in while the on_invalid report was landing. In one
-        undifferentiated list the moved number is the fifty-first line.
-        """
-        current = {"method": {"S1": _array([1.0, 999.0]), "streamed": False, "invalid": {"n": 0}}}
-        diffs = compare(baseline, current)
-        assert len(diffs.values) == 1, "the moved number must be reported on its own"
-        assert len(diffs.schema) == 1
-        assert "999.0" in diffs.values[0]
+    missing = baseline_check.main(["--baseline", str(base), "--current", str(tmp_path / "no")])
+    assert missing == 1
 
 
 class TestEveryMethodIsDumped:
@@ -273,3 +213,17 @@ class TestEveryMethodIsDumped:
             assert name not in getattr(baseline_dump, other), (
                 f"{name} is listed in {other}, which calls it the wrong way"
             )
+
+
+def test_renamed_fields_in_an_old_baseline_still_compare():
+    """A 1.0 baseline holds old field names. A rename is not a lost field."""
+
+    def entry(**fields: Any) -> dict[str, Any]:
+        return {"case": {"methods": {"hsic": {"status": "ok", "fields": fields}}}}
+
+    old = entry(R2_HSIC=_array([0.5]), T_HSIC=_array([0.1]))
+    new = entry(R2=_array([0.5]), T=_array([0.1]))
+    assert not compare(old, new)
+    moved = compare(old, entry(R2=_array([0.6]), T=_array([0.1])))
+    assert moved.schema == []
+    assert len(moved.values) == 1

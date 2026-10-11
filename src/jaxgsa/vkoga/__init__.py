@@ -3,7 +3,9 @@
 This is a given-data method. It fits a Vectorial Kernel Orthogonal Greedy
 Algorithm (VKOGA) surrogate to the ``(X, Y)`` you already have. It then
 computes variance-based sensitivity indices that stay meaningful when the
-inputs are dependent, using a Gaussian copula for the dependency structure.
+inputs are dependent. The dependence comes from the problem: a Gaussian
+copula (``problem.correlation``) or a custom joint and conditional sampler
+(``problem.with_sampler(...)``).
 
 Unlike every sampling-based method in this package, the indices here do not
 assume independent inputs. They follow Li et al. (2010). The familiar main and
@@ -16,7 +18,8 @@ quasi-Monte-Carlo loop, so there is no ``indices()`` that survives ``jit``,
 ``jaxgsa._core.registry.MethodSpec.pure_core``), not a gap: no traceable
 core exists to export.
 
-Gating: ``analyze`` accepts a declared ``problem.correlation``. It refuses
+Gating: ``analyze`` accepts a declared ``problem.correlation`` or a custom
+sampler on the problem. It refuses
 categorical parameters. The isotropic kernel needs a continuous CDF map on
 every coordinate, and an unordered level code has none. Use
 :mod:`jaxgsa.optimal_transport` or :mod:`jaxgsa.borgonovo` for categorical
@@ -29,13 +32,18 @@ Example::
     import jaxgsa
 
     problem = jaxgsa.Problem(names=("x1", "x2", "x3"), bounds=[(0, 1)] * 3)
-    X = jaxgsa.sampling.monte_carlo(problem, 2048)   # independent, space-filling
-    Y = model(X)
 
     # Declare the dependence on the problem. Fit it from observed data with
     # jaxgsa.sampling.fit_correlation(problem, X_data) when you have no
     # published matrix.
     problem = problem.with_correlation(R)
+
+    # The surrogate must be accurate where the analysis distribution puts
+    # its mass. Rows drawn from that distribution work; an independent
+    # design is a safe default when R is not fixed yet or one fit is reused
+    # under several correlations.
+    X = jaxgsa.sampling.monte_carlo(problem, 2048)
+    Y = model(X)
 
     result = jaxgsa.vkoga.analyze(problem, X, Y, key=jax.random.key(0))
     result.S_TC   # total correlated: rank parameters to measure
@@ -53,15 +61,16 @@ References:
     Wirtz & Haasdonk (2013). Dolomites Res. Notes Approx. 6:83-100.
 """
 
-from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa._core.registry import MethodSpec, register
+from jaxgsa._core.invalid import InvalidUnit as _InvalidUnit
+from jaxgsa._core.registry import MethodSpec as _MethodSpec
+from jaxgsa._core.registry import register as _register
 from jaxgsa.vkoga._analyze import analyze
 from jaxgsa.vkoga._result import VKOGAResult
 
 __all__ = ["VKOGAResult", "analyze"]
 
-SPEC = register(
-    MethodSpec(
+_SPEC = _register(
+    _MethodSpec(
         name="vkoga",
         analyze=analyze,
         sample=None,
@@ -74,6 +83,6 @@ SPEC = register(
         # this method is not jit-able, vmap-able or differentiable, and the
         # declaration keeps that apart from an oversight.
         pure_core=False,
-        invalid_unit=InvalidUnit.ROW,
+        invalid_unit=_InvalidUnit.ROW,
     )
 )

@@ -3,7 +3,9 @@
     "attrs": [
       "ci_level",
       "ci_method",
-      "ci_n_bootstrap"
+      "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method"
     ],
     "coords": [
       "output",
@@ -21,7 +23,7 @@
       "output",
       "param"
     ],
-    "type": "DeltaResult",
+    "type": "BorgonovoResult",
     "var_dims": [
       "S1:output,param",
       "S1_lower:output,param",
@@ -35,7 +37,9 @@
     "attrs": [
       "ci_level",
       "ci_method",
-      "ci_n_bootstrap"
+      "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method"
     ],
     "coords": [
       "param"
@@ -51,7 +55,7 @@
     "dims": [
       "param"
     ],
-    "type": "DeltaResult",
+    "type": "BorgonovoResult",
     "var_dims": [
       "S1:param",
       "S1_lower:param",
@@ -65,7 +69,9 @@
     "attrs": [
       "ci_level",
       "ci_method",
-      "ci_n_bootstrap"
+      "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method"
     ],
     "coords": [
       "output",
@@ -85,7 +91,7 @@
       "param",
       "time"
     ],
-    "type": "DeltaResult",
+    "type": "BorgonovoResult",
     "var_dims": [
       "S1:time,output,param",
       "S1_lower:time,output,param",
@@ -96,16 +102,20 @@
     ]
   },
   "dgsm@multi": {
-    "attrs": [],
+    "attrs": [
+      "jaxgsa_version",
+      "method"
+    ],
     "coords": [
       "output",
       "param"
     ],
     "data_vars": [
       "lower_bound",
+      "mu",
       "nu",
-      "sigma",
-      "upper_bound"
+      "upper_bound",
+      "variance"
     ],
     "dims": [
       "output",
@@ -114,21 +124,26 @@
     "type": "DGSMResult",
     "var_dims": [
       "lower_bound:output,param",
+      "mu:output,param",
       "nu:output,param",
-      "sigma:output,param",
-      "upper_bound:output,param"
+      "upper_bound:output,param",
+      "variance:output"
     ]
   },
   "dgsm@scalar": {
-    "attrs": [],
+    "attrs": [
+      "jaxgsa_version",
+      "method"
+    ],
     "coords": [
       "param"
     ],
     "data_vars": [
       "lower_bound",
+      "mu",
       "nu",
-      "sigma",
-      "upper_bound"
+      "upper_bound",
+      "variance"
     ],
     "dims": [
       "param"
@@ -136,13 +151,17 @@
     "type": "DGSMResult",
     "var_dims": [
       "lower_bound:param",
+      "mu:param",
       "nu:param",
-      "sigma:param",
-      "upper_bound:param"
+      "upper_bound:param",
+      "variance:"
     ]
   },
   "dgsm@series": {
-    "attrs": [],
+    "attrs": [
+      "jaxgsa_version",
+      "method"
+    ],
     "coords": [
       "output",
       "param",
@@ -150,9 +169,10 @@
     ],
     "data_vars": [
       "lower_bound",
+      "mu",
       "nu",
-      "sigma",
-      "upper_bound"
+      "upper_bound",
+      "variance"
     ],
     "dims": [
       "output",
@@ -162,14 +182,17 @@
     "type": "DGSMResult",
     "var_dims": [
       "lower_bound:time,output,param",
+      "mu:time,output,param",
       "nu:time,output,param",
-      "sigma:time,output,param",
-      "upper_bound:time,output,param"
+      "upper_bound:time,output,param",
+      "variance:time,output"
     ]
   },
   "efast@multi": {
     "attrs": [
       "M",
+      "jaxgsa_version",
+      "method",
       "omega_0"
     ],
     "coords": [
@@ -193,6 +216,8 @@
   "efast@scalar": {
     "attrs": [
       "M",
+      "jaxgsa_version",
+      "method",
       "omega_0"
     ],
     "coords": [
@@ -214,6 +239,8 @@
   "efast@series": {
     "attrs": [
       "M",
+      "jaxgsa_version",
+      "method",
       "omega_0"
     ],
     "coords": [
@@ -238,6 +265,9 @@
   },
   "hdmr@multi": {
     "attrs": [
+      "jaxgsa_version",
+      "method",
+      "order",
       "streamed"
     ],
     "coords": [
@@ -253,6 +283,7 @@
       "ST",
       "Sa",
       "Sb",
+      "explained_variance",
       "rmse",
       "select"
     ],
@@ -270,12 +301,16 @@
       "ST:output,param",
       "Sa:output,term",
       "Sb:output,term",
+      "explained_variance:output",
       "rmse:output",
       "select:term"
     ]
   },
   "hdmr@scalar": {
     "attrs": [
+      "jaxgsa_version",
+      "method",
+      "order",
       "streamed"
     ],
     "coords": [
@@ -290,6 +325,7 @@
       "ST",
       "Sa",
       "Sb",
+      "explained_variance",
       "rmse",
       "select"
     ],
@@ -306,12 +342,16 @@
       "ST:param",
       "Sa:term",
       "Sb:term",
+      "explained_variance:",
       "rmse:",
       "select:term"
     ]
   },
   "hdmr@series": {
     "attrs": [
+      "jaxgsa_version",
+      "method",
+      "order",
       "streamed"
     ],
     "coords": [
@@ -328,6 +368,7 @@
       "ST",
       "Sa",
       "Sb",
+      "explained_variance",
       "rmse",
       "select"
     ],
@@ -346,12 +387,16 @@
       "ST:time,output,param",
       "Sa:time,output,term",
       "Sb:time,output,term",
+      "explained_variance:time,output",
       "rmse:time,output",
       "select:term"
     ]
   },
   "hdmr_third_order@multi": {
     "attrs": [
+      "jaxgsa_version",
+      "method",
+      "order",
       "streamed"
     ],
     "coords": [
@@ -369,6 +414,7 @@
       "ST",
       "Sa",
       "Sb",
+      "explained_variance",
       "rmse",
       "select"
     ],
@@ -388,12 +434,16 @@
       "ST:output,param",
       "Sa:output,term",
       "Sb:output,term",
+      "explained_variance:output",
       "rmse:output",
       "select:term"
     ]
   },
   "hdmr_third_order@scalar": {
     "attrs": [
+      "jaxgsa_version",
+      "method",
+      "order",
       "streamed"
     ],
     "coords": [
@@ -410,6 +460,7 @@
       "ST",
       "Sa",
       "Sb",
+      "explained_variance",
       "rmse",
       "select"
     ],
@@ -428,12 +479,16 @@
       "ST:param",
       "Sa:term",
       "Sb:term",
+      "explained_variance:",
       "rmse:",
       "select:term"
     ]
   },
   "hdmr_third_order@series": {
     "attrs": [
+      "jaxgsa_version",
+      "method",
+      "order",
       "streamed"
     ],
     "coords": [
@@ -452,6 +507,7 @@
       "ST",
       "Sa",
       "Sb",
+      "explained_variance",
       "rmse",
       "select"
     ],
@@ -472,6 +528,7 @@
       "ST:time,output,param",
       "Sa:time,output,term",
       "Sb:time,output,term",
+      "explained_variance:time,output",
       "rmse:time,output",
       "select:term"
     ]
@@ -479,6 +536,8 @@
   "hsic@multi": {
     "attrs": [
       "bandwidth",
+      "jaxgsa_version",
+      "method",
       "n_perms"
     ],
     "coords": [
@@ -486,8 +545,8 @@
       "param"
     ],
     "data_vars": [
-      "R2_HSIC",
-      "T_HSIC",
+      "R2",
+      "T",
       "hsic_raw",
       "p_values"
     ],
@@ -497,8 +556,8 @@
     ],
     "type": "HSICResult",
     "var_dims": [
-      "R2_HSIC:output,param",
-      "T_HSIC:output,param",
+      "R2:output,param",
+      "T:output,param",
       "hsic_raw:output,param",
       "p_values:output,param"
     ]
@@ -506,14 +565,16 @@
   "hsic@scalar": {
     "attrs": [
       "bandwidth",
+      "jaxgsa_version",
+      "method",
       "n_perms"
     ],
     "coords": [
       "param"
     ],
     "data_vars": [
-      "R2_HSIC",
-      "T_HSIC",
+      "R2",
+      "T",
       "hsic_raw",
       "p_values"
     ],
@@ -522,8 +583,8 @@
     ],
     "type": "HSICResult",
     "var_dims": [
-      "R2_HSIC:param",
-      "T_HSIC:param",
+      "R2:param",
+      "T:param",
       "hsic_raw:param",
       "p_values:param"
     ]
@@ -531,6 +592,8 @@
   "hsic@series": {
     "attrs": [
       "bandwidth",
+      "jaxgsa_version",
+      "method",
       "n_perms"
     ],
     "coords": [
@@ -539,8 +602,8 @@
       "time"
     ],
     "data_vars": [
-      "R2_HSIC",
-      "T_HSIC",
+      "R2",
+      "T",
       "hsic_raw",
       "p_values"
     ],
@@ -551,15 +614,17 @@
     ],
     "type": "HSICResult",
     "var_dims": [
-      "R2_HSIC:time,output,param",
-      "T_HSIC:time,output,param",
+      "R2:time,output,param",
+      "T:time,output,param",
       "hsic_raw:time,output,param",
       "p_values:time,output,param"
     ]
   },
   "kucherenko@multi": {
     "attrs": [
-      "is_correlated"
+      "dependence",
+      "jaxgsa_version",
+      "method"
     ],
     "coords": [
       "output",
@@ -583,7 +648,9 @@
   },
   "kucherenko@scalar": {
     "attrs": [
-      "is_correlated"
+      "dependence",
+      "jaxgsa_version",
+      "method"
     ],
     "coords": [
       "param"
@@ -605,7 +672,9 @@
   },
   "kucherenko@series": {
     "attrs": [
-      "is_correlated"
+      "dependence",
+      "jaxgsa_version",
+      "method"
     ],
     "coords": [
       "output",
@@ -634,6 +703,8 @@
       "ci_level",
       "ci_method",
       "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method",
       "space"
     ],
     "coords": [
@@ -673,6 +744,8 @@
       "ci_level",
       "ci_method",
       "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method",
       "space"
     ],
     "coords": [
@@ -710,6 +783,8 @@
       "ci_level",
       "ci_method",
       "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method",
       "space"
     ],
     "coords": [
@@ -751,6 +826,8 @@
       "ci_level",
       "ci_method",
       "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method",
       "mode"
     ],
     "coords": [
@@ -800,6 +877,8 @@
       "ci_level",
       "ci_method",
       "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method",
       "mode"
     ],
     "coords": [
@@ -847,6 +926,8 @@
       "ci_level",
       "ci_method",
       "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method",
       "mode"
     ],
     "coords": [
@@ -898,6 +979,8 @@
       "ci_level",
       "ci_method",
       "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method",
       "mode"
     ],
     "coords": [
@@ -941,6 +1024,8 @@
       "ci_level",
       "ci_method",
       "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method",
       "mode"
     ],
     "coords": [
@@ -985,14 +1070,16 @@
     "attrs": [
       "ci_level",
       "ci_method",
-      "ci_n_bootstrap"
+      "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method"
     ],
     "coords": [
       "output",
       "param"
     ],
     "data_vars": [
-      "n_valid_bins",
+      "n_valid_classes",
       "pawn",
       "pawn_lower",
       "pawn_upper"
@@ -1003,7 +1090,7 @@
     ],
     "type": "PAWNResult",
     "var_dims": [
-      "n_valid_bins:output,param",
+      "n_valid_classes:output,param",
       "pawn:output,param",
       "pawn_lower:output,param",
       "pawn_upper:output,param"
@@ -1013,13 +1100,15 @@
     "attrs": [
       "ci_level",
       "ci_method",
-      "ci_n_bootstrap"
+      "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method"
     ],
     "coords": [
       "param"
     ],
     "data_vars": [
-      "n_valid_bins",
+      "n_valid_classes",
       "pawn",
       "pawn_lower",
       "pawn_upper"
@@ -1029,7 +1118,7 @@
     ],
     "type": "PAWNResult",
     "var_dims": [
-      "n_valid_bins:param",
+      "n_valid_classes:param",
       "pawn:param",
       "pawn_lower:param",
       "pawn_upper:param"
@@ -1039,7 +1128,9 @@
     "attrs": [
       "ci_level",
       "ci_method",
-      "ci_n_bootstrap"
+      "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method"
     ],
     "coords": [
       "output",
@@ -1047,7 +1138,7 @@
       "time"
     ],
     "data_vars": [
-      "n_valid_bins",
+      "n_valid_classes",
       "pawn",
       "pawn_lower",
       "pawn_upper"
@@ -1059,7 +1150,7 @@
     ],
     "type": "PAWNResult",
     "var_dims": [
-      "n_valid_bins:time,output,param",
+      "n_valid_classes:time,output,param",
       "pawn:time,output,param",
       "pawn_lower:time,output,param",
       "pawn_upper:time,output,param"
@@ -1067,6 +1158,8 @@
   },
   "pce@multi": {
     "attrs": [
+      "jaxgsa_version",
+      "method",
       "order",
       "streamed"
     ],
@@ -1080,8 +1173,9 @@
       "S1",
       "S2",
       "ST",
+      "cv_rmse",
       "explained_variance",
-      "loo_rmse"
+      "rmse"
     ],
     "dims": [
       "output",
@@ -1094,12 +1188,15 @@
       "S1:output,param",
       "S2:output,param_i,param_j",
       "ST:output,param",
+      "cv_rmse:output",
       "explained_variance:output",
-      "loo_rmse:output"
+      "rmse:output"
     ]
   },
   "pce@scalar": {
     "attrs": [
+      "jaxgsa_version",
+      "method",
       "order",
       "streamed"
     ],
@@ -1112,8 +1209,9 @@
       "S1",
       "S2",
       "ST",
+      "cv_rmse",
       "explained_variance",
-      "loo_rmse"
+      "rmse"
     ],
     "dims": [
       "param",
@@ -1125,12 +1223,15 @@
       "S1:param",
       "S2:param_i,param_j",
       "ST:param",
+      "cv_rmse:",
       "explained_variance:",
-      "loo_rmse:"
+      "rmse:"
     ]
   },
   "pce@series": {
     "attrs": [
+      "jaxgsa_version",
+      "method",
       "order",
       "streamed"
     ],
@@ -1145,8 +1246,9 @@
       "S1",
       "S2",
       "ST",
+      "cv_rmse",
       "explained_variance",
-      "loo_rmse"
+      "rmse"
     ],
     "dims": [
       "output",
@@ -1160,14 +1262,101 @@
       "S1:time,output,param",
       "S2:time,output,param_i,param_j",
       "ST:time,output,param",
+      "cv_rmse:time,output",
       "explained_variance:time,output",
-      "loo_rmse:time,output"
+      "rmse:time,output"
+    ]
+  },
+  "rank@multi": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method"
+    ],
+    "coords": [
+      "output",
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper"
+    ],
+    "dims": [
+      "output",
+      "param"
+    ],
+    "type": "RankResult",
+    "var_dims": [
+      "S1:output,param",
+      "S1_lower:output,param",
+      "S1_upper:output,param"
+    ]
+  },
+  "rank@scalar": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method"
+    ],
+    "coords": [
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper"
+    ],
+    "dims": [
+      "param"
+    ],
+    "type": "RankResult",
+    "var_dims": [
+      "S1:param",
+      "S1_lower:param",
+      "S1_upper:param"
+    ]
+  },
+  "rank@series": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
+      "jaxgsa_version",
+      "method"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "time"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "time"
+    ],
+    "type": "RankResult",
+    "var_dims": [
+      "S1:time,output,param",
+      "S1_lower:time,output,param",
+      "S1_upper:time,output,param"
     ]
   },
   "shapley@multi": {
     "attrs": [
       "backend",
       "include_correlative",
+      "jaxgsa_version",
+      "method",
       "order"
     ],
     "coords": [
@@ -1196,6 +1385,8 @@
     "attrs": [
       "backend",
       "include_correlative",
+      "jaxgsa_version",
+      "method",
       "order"
     ],
     "coords": [
@@ -1222,6 +1413,8 @@
     "attrs": [
       "backend",
       "include_correlative",
+      "jaxgsa_version",
+      "method",
       "order"
     ],
     "coords": [
@@ -1253,7 +1446,9 @@
       "ci_level",
       "ci_method",
       "ci_n_bootstrap",
-      "estimator"
+      "estimator",
+      "jaxgsa_version",
+      "method"
     ],
     "coords": [
       "output",
@@ -1270,7 +1465,8 @@
       "S2_upper",
       "ST",
       "ST_lower",
-      "ST_upper"
+      "ST_upper",
+      "variance"
     ],
     "dims": [
       "output",
@@ -1288,7 +1484,8 @@
       "S2_upper:output,param_i,param_j",
       "ST:output,param",
       "ST_lower:output,param",
-      "ST_upper:output,param"
+      "ST_upper:output,param",
+      "variance:output"
     ]
   },
   "sobol@scalar": {
@@ -1296,7 +1493,9 @@
       "ci_level",
       "ci_method",
       "ci_n_bootstrap",
-      "estimator"
+      "estimator",
+      "jaxgsa_version",
+      "method"
     ],
     "coords": [
       "param",
@@ -1312,7 +1511,8 @@
       "S2_upper",
       "ST",
       "ST_lower",
-      "ST_upper"
+      "ST_upper",
+      "variance"
     ],
     "dims": [
       "param",
@@ -1329,7 +1529,8 @@
       "S2_upper:param_i,param_j",
       "ST:param",
       "ST_lower:param",
-      "ST_upper:param"
+      "ST_upper:param",
+      "variance:"
     ]
   },
   "sobol@series": {
@@ -1337,7 +1538,9 @@
       "ci_level",
       "ci_method",
       "ci_n_bootstrap",
-      "estimator"
+      "estimator",
+      "jaxgsa_version",
+      "method"
     ],
     "coords": [
       "output",
@@ -1355,7 +1558,8 @@
       "S2_upper",
       "ST",
       "ST_lower",
-      "ST_upper"
+      "ST_upper",
+      "variance"
     ],
     "dims": [
       "output",
@@ -1374,22 +1578,22 @@
       "S2_upper:time,output,param_i,param_j",
       "ST:time,output,param",
       "ST_lower:time,output,param",
-      "ST_upper:time,output,param"
+      "ST_upper:time,output,param",
+      "variance:time,output"
     ]
   },
   "vkoga@multi": {
     "attrs": [
-      "cv_rmse",
+      "dependence",
       "gamma",
-      "is_correlated",
+      "jaxgsa_version",
+      "method",
       "n_centers",
       "ridge"
     ],
     "coords": [
       "output",
-      "param",
-      "param_i",
-      "param_j"
+      "param"
     ],
     "data_vars": [
       "S_C",
@@ -1397,15 +1601,14 @@
       "S_TC",
       "S_TU",
       "S_U",
-      "correlation",
+      "cv_rmse",
+      "explained_variance",
       "rmse",
       "variance"
     ],
     "dims": [
       "output",
-      "param",
-      "param_i",
-      "param_j"
+      "param"
     ],
     "type": "VKOGAResult",
     "var_dims": [
@@ -1414,23 +1617,23 @@
       "S_TC:output,param",
       "S_TU:output,param",
       "S_U:output,param",
-      "correlation:param_i,param_j",
+      "cv_rmse:output",
+      "explained_variance:output",
       "rmse:output",
       "variance:output"
     ]
   },
   "vkoga@scalar": {
     "attrs": [
-      "cv_rmse",
+      "dependence",
       "gamma",
-      "is_correlated",
+      "jaxgsa_version",
+      "method",
       "n_centers",
       "ridge"
     ],
     "coords": [
-      "param",
-      "param_i",
-      "param_j"
+      "param"
     ],
     "data_vars": [
       "S_C",
@@ -1438,14 +1641,13 @@
       "S_TC",
       "S_TU",
       "S_U",
-      "correlation",
+      "cv_rmse",
+      "explained_variance",
       "rmse",
       "variance"
     ],
     "dims": [
-      "param",
-      "param_i",
-      "param_j"
+      "param"
     ],
     "type": "VKOGAResult",
     "var_dims": [
@@ -1454,24 +1656,24 @@
       "S_TC:param",
       "S_TU:param",
       "S_U:param",
-      "correlation:param_i,param_j",
+      "cv_rmse:",
+      "explained_variance:",
       "rmse:",
       "variance:"
     ]
   },
   "vkoga@series": {
     "attrs": [
-      "cv_rmse",
+      "dependence",
       "gamma",
-      "is_correlated",
+      "jaxgsa_version",
+      "method",
       "n_centers",
       "ridge"
     ],
     "coords": [
       "output",
       "param",
-      "param_i",
-      "param_j",
       "time"
     ],
     "data_vars": [
@@ -1480,15 +1682,14 @@
       "S_TC",
       "S_TU",
       "S_U",
-      "correlation",
+      "cv_rmse",
+      "explained_variance",
       "rmse",
       "variance"
     ],
     "dims": [
       "output",
       "param",
-      "param_i",
-      "param_j",
       "time"
     ],
     "type": "VKOGAResult",
@@ -1498,7 +1699,8 @@
       "S_TC:time,output,param",
       "S_TU:time,output,param",
       "S_U:time,output,param",
-      "correlation:param_i,param_j",
+      "cv_rmse:time,output",
+      "explained_variance:time,output",
       "rmse:time,output",
       "variance:time,output"
     ]

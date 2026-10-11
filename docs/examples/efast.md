@@ -84,7 +84,7 @@ shape: (12288, 3) n_runs: 12288
 jaxgsa.efast.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=12288 runs, T=1 x K=1 output slice
     invalid: none found in 3 search curves (policy 'raise')
   timing:
@@ -242,7 +242,7 @@ jaxgsa.efast.sample: D=8, n_curves=8, n_per_curve=4096, n_runs=32768, M=4, omega
 jaxgsa.efast.analyze
   problem: D=8 (x1, x2, x3, x4, x5, x6, x7, x8)
     marginals: uniform=8
-    correlation: independent
+    dependence: independent
     output: N=32768 runs, T=1 x K=1 output slice
     invalid: none found in 8 search curves (policy 'raise')
   timing:
@@ -345,7 +345,7 @@ jaxgsa.efast.sample: D=3, n_curves=3, n_per_curve=1025, n_runs=3075, M=4, omega_
 jaxgsa.efast.analyze
   problem: D=3 (amplitude, frequency, damping)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=3075 runs, T=1 x K=2 output slices
     invalid: none found in 3 search curves (policy 'raise')
   timing:
@@ -391,7 +391,7 @@ jaxgsa.efast.sample: D=3, n_curves=3, n_per_curve=4096, n_runs=12288, M=4, omega
 jaxgsa.efast.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=12288 runs, T=1 x K=2 output slices
     invalid: none found in 3 search curves (policy 'raise')
   timing:
@@ -449,7 +449,7 @@ jaxgsa.efast.sample: D=3, n_curves=3, n_per_curve=1025, n_runs=3075, M=4, omega_
 jaxgsa.efast.analyze
   problem: D=3 (amplitude, frequency, damping)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=3075 runs, T=20 x K=2 output slices
     invalid: none found in 3 search curves (policy 'raise')
   timing:
@@ -521,7 +521,7 @@ jaxgsa.efast.sample: D=3, n_curves=3, n_per_curve=4096, n_runs=12288, M=4, omega
 jaxgsa.efast.analyze
   problem: D=3 (amplitude, damping, frequency)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=12288 runs, T=50 x K=1 output slices
     invalid: none found in 3 search curves (policy 'raise')
   timing:

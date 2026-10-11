@@ -1,4 +1,4 @@
-name: Deploy docs and WASM workbench to GitHub Pages
+name: Deploy docs and jaxgsa studio to GitHub Pages
 
 on:
   push:
@@ -41,11 +41,13 @@ jobs:
       - run: npm run build
         working-directory: web
         env:
-          VITE_BASE: /jaxgsa/workbench/
-      - name: Add the browser workbench to the Pages artifact
+          VITE_BASE: /jaxgsa/studio/
+      - name: Add jaxgsa studio to the Pages artifact
         run: |
-          mkdir -p docs/.vitepress/dist/workbench
-          cp -R web/dist/. docs/.vitepress/dist/workbench/
+          mkdir -p docs/.vitepress/dist/studio docs/.vitepress/dist/workbench
+          cp -R web/dist/. docs/.vitepress/dist/studio/
+          # Old links to /workbench/ redirect to /studio/.
+          cp web/redirect/workbench.html docs/.vitepress/dist/workbench/index.html
       - uses: actions/upload-pages-artifact@v5
         with:
           path: docs/.vitepress/dist

@@ -32,7 +32,7 @@ PLAIN_GAUSSIAN = jaxgsa.Problem.from_dict(
 def _sample(problem):
     """Return a small in-range sample for a two-parameter problem."""
     rng = np.random.default_rng(0)
-    return jnp.asarray(rng.uniform(-1.0, 1.0, size=(16, problem.num_vars)))
+    return jnp.asarray(rng.uniform(-1.0, 1.0, size=(16, problem.n_params)))
 
 
 @pytest.mark.parametrize("problem", [TRUNCATED, PLAIN_GAUSSIAN], ids=["truncated", "untruncated"])
@@ -51,29 +51,39 @@ def test_the_transform_survives_jit_vmap_and_jacrev(problem):
     only the truncated ones, and it passed eagerly, which is why it survived.
     """
     X = _sample(problem)
-    jax.jit(lambda x: cdf_to_unit_interval(x, problem))(X)
-    jax.vmap(lambda row: cdf_to_unit_interval(row[None, :], problem)[0])(X)
+    eager = cdf_to_unit_interval(X, problem)
+    jitted = jax.jit(lambda x: cdf_to_unit_interval(x, problem))(X)
+    vmapped = jax.vmap(lambda row: cdf_to_unit_interval(row[None, :], problem)[0])(X)
     jax.jacrev(lambda x: cdf_to_unit_interval(x, problem).sum())(X)
+    # Tracing must not change the numbers.
+    np.testing.assert_allclose(np.asarray(jitted), np.asarray(eager), rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(np.asarray(vmapped), np.asarray(eager), rtol=1e-6, atol=1e-7)
 
 
-@pytest.mark.parametrize(
-    ("a", "b"),
-    [(-2.0, 2.0), (-5.0, 5.0), (-np.inf, 1.5), (-1.5, np.inf), (0.5, 3.0), (3.0, 4.0), (5.0, 6.0)],
-)
-def test_truncnorm_cdf_is_monotone_and_normalized(a, b):
+def test_truncnorm_cdf_is_monotone_and_normalized():
     """The on-device CDF is ordered and spans the declared interval.
 
     ``(5.0, 6.0)`` is the case that justifies the survival-function branch.
     The endpoint checks ensure that the branch does not collapse a far-tail
     interval to a constant value.
     """
+    cases = [
+        (-2.0, 2.0),
+        (-5.0, 5.0),
+        (-np.inf, 1.5),
+        (-1.5, np.inf),
+        (0.5, 3.0),
+        (3.0, 4.0),
+        (5.0, 6.0),
+    ]
     with jax.enable_x64():
-        lo = a if np.isfinite(a) else -8.0
-        hi = b if np.isfinite(b) else 8.0
-        z = np.linspace(lo, hi, 201)
-        got = np.asarray(_truncnorm_cdf(jnp.asarray(z), a, b))
-    assert np.all(np.isfinite(got))
-    assert np.all((got >= 0.0) & (got <= 1.0))
-    assert np.all(np.diff(got) >= 0.0)
-    assert got[0] == pytest.approx(0.0, abs=1e-12)
-    assert got[-1] == pytest.approx(1.0, abs=1e-12)
+        for a, b in cases:
+            lo = a if np.isfinite(a) else -8.0
+            hi = b if np.isfinite(b) else 8.0
+            z = np.linspace(lo, hi, 201)
+            got = np.asarray(_truncnorm_cdf(jnp.asarray(z), a, b))
+            assert np.all(np.isfinite(got)), (a, b)
+            assert np.all((got >= 0.0) & (got <= 1.0)), (a, b)
+            assert np.all(np.diff(got) >= 0.0), (a, b)
+            assert got[0] == pytest.approx(0.0, abs=1e-12), (a, b)
+            assert got[-1] == pytest.approx(1.0, abs=1e-12), (a, b)

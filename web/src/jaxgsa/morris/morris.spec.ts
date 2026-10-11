@@ -73,7 +73,7 @@ describe("analyzeMorris vs golden fixture (trajectory, scalar)", () => {
       expandedToUnique: Int32Array.from(d.expanded_to_unique),
       nExpanded: d.n_expanded,
       nTrajectories: d.n_trajectories,
-      numLevels: d.num_levels,
+      nLevels: d.n_levels,
       eeIdxAfter: Int32Array.from(d.ee_idx_after.flat()),
       eeIdxBefore: Int32Array.from(d.ee_idx_before.flat()),
       eeDelta: Float64Array.from(d.ee_delta.flat()),
@@ -141,9 +141,9 @@ describe("analyzeMorris expansion path vs direct expanded computation", () => {
   beforeAll(async () => {
     await init();
     defaultDevice("wasm");
-    // 40 trajectories, num_levels=4, D=3: 160 expanded rows over a 4^3 grid,
+    // 40 trajectories, n_levels=4, D=3: 160 expanded rows over a 4^3 grid,
     // so exact duplicates are guaranteed and the design must dedup.
-    design = sampleMorris(ISHIGAMI_PROBLEM, 40, { numLevels: 4, seed: 1, verbose: false });
+    design = sampleMorris(ISHIGAMI_PROBLEM, 40, { nLevels: 4, seed: 1, verbose: false });
     yUnique = evaluate(design);
 
     // Manually expand y and compute the reductions in plain JS.
@@ -218,7 +218,7 @@ describe("analyzeMorris expansion path vs direct expanded computation", () => {
 // ---------------------------------------------------------------------------
 
 describe("sampleMorris trajectory sampler structure", () => {
-  const design = sampleMorris(ISHIGAMI_PROBLEM, 40, { numLevels: 4, seed: 1, verbose: false });
+  const design = sampleMorris(ISHIGAMI_PROBLEM, 40, { nLevels: 4, seed: 1, verbose: false });
   const D = design.nParams;
 
   it("nExpanded == r * (D + 1) and ee bookkeeping is (r, D) flat", () => {
@@ -229,7 +229,7 @@ describe("sampleMorris trajectory sampler structure", () => {
   });
 
   it("ee index arrays stay within [0, nExpanded) and delta is ±p / (2 (p - 1))", () => {
-    const p = design.numLevels;
+    const p = design.nLevels;
 
     for (let i = 0; i < design.eeIdxAfter.length; i++) {
       expect(design.eeIdxAfter[i]).toBeGreaterThanOrEqual(0);
@@ -258,9 +258,9 @@ describe("sampleMorris trajectory sampler structure", () => {
   });
 
   it("same seed -> byte-identical designs; different seeds -> differ", () => {
-    const a = sampleMorris(ISHIGAMI_PROBLEM, 40, { numLevels: 4, seed: 1, verbose: false });
-    const b = sampleMorris(ISHIGAMI_PROBLEM, 40, { numLevels: 4, seed: 1, verbose: false });
-    const c = sampleMorris(ISHIGAMI_PROBLEM, 40, { numLevels: 4, seed: 2, verbose: false });
+    const a = sampleMorris(ISHIGAMI_PROBLEM, 40, { nLevels: 4, seed: 1, verbose: false });
+    const b = sampleMorris(ISHIGAMI_PROBLEM, 40, { nLevels: 4, seed: 1, verbose: false });
+    const c = sampleMorris(ISHIGAMI_PROBLEM, 40, { nLevels: 4, seed: 2, verbose: false });
     expect(a.samples).toEqual(b.samples);
     expect(a.expandedToUnique).toEqual(b.expandedToUnique);
     expect(a.eeIdxAfter).toEqual(b.eeIdxAfter);
@@ -282,10 +282,10 @@ describe("sampleMorris trajectory sampler structure", () => {
     ).toThrow(/radial/);
   });
 
-  it("raises for invalid arguments (trajectories < 2, num_levels < 2, categoricals)", () => {
+  it("raises for invalid arguments (trajectories < 2, n_levels < 2, categoricals)", () => {
     expect(() => sampleMorris(ISHIGAMI_PROBLEM, 1)).toThrow(/n_trajectories must be >= 2/);
-    expect(() => sampleMorris(ISHIGAMI_PROBLEM, 10, { numLevels: 1 })).toThrow(
-      /num_levels must be >= 2/,
+    expect(() => sampleMorris(ISHIGAMI_PROBLEM, 10, { nLevels: 1 })).toThrow(
+      /n_levels must be >= 2/,
     );
 
     const catProblem: ProblemSpec = {
@@ -311,7 +311,7 @@ describe("analyzeMorris statistical sanity on Ishigami (r=100)", () => {
     defaultDevice("wasm");
 
     const design = sampleMorris(ISHIGAMI_PROBLEM, 100, {
-      numLevels: 4,
+      nLevels: 4,
       seed: 3,
       verbose: false,
     });

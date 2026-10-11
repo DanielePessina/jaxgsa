@@ -1,16 +1,32 @@
 """Shared test fixtures and helpers for jaxgsa tests."""
 
 import contextlib
+import os
 import warnings
 
-import jax
-import jax.numpy as jnp
+# Under pytest-xdist every worker is its own process. XLA's CPU backend would
+# otherwise size its thread pool to every core in each of them, and the
+# workers would fight over the same cores. XLA reads the pool size from NPROC,
+# so one thread per worker lets `-n auto` scale. (The often-quoted
+# `--xla_cpu_multi_thread_eigen=false` flag does not limit the pool; measured.)
+# It must be set before JAX starts its backend, so it sits above the import.
+if os.environ.get("PYTEST_XDIST_WORKER"):
+    os.environ.setdefault("NPROC", "1")
+
+import jax  # noqa: E402
 import pytest
 
-import jaxgsa
 from jaxgsa import JaxgsaWarning
 from jaxgsa._core import verbose as _verbose
-from jaxgsa.benchmarks import ishigami, linear, oakley_ohagan, sobol_g
+
+# Shared fixtures, one module per test group. Loaded as plugins so each
+# session-scoped fixture is built once per process, whatever file asks for it.
+pytest_plugins = [
+    "_fixtures_variance",
+    "_fixtures_dependence",
+    "_fixtures_givendata",
+    "_fixtures_crosscutting",
+]
 
 
 @pytest.fixture(autouse=True)
@@ -52,51 +68,3 @@ def single_precision_warning():
     else:
         with pytest.warns(JaxgsaWarning, match="single precision"):
             yield
-
-
-# Sobol estimation error scales as O(1/sqrt(N)).  Higher-dimensional or more
-# complex models need proportionally larger sample sizes for convergence.
-@pytest.fixture(scope="session")
-def ishigami_sobol_result():
-    """Ishigami Sobol analysis result (session-scoped, computed once)."""
-    sr = jaxgsa.sobol.sample(ishigami.PROBLEM, n_samples=2**14 * 8, seed=42, verbose=False)
-    Y = ishigami.evaluate(jnp.asarray(sr.samples))
-    return jaxgsa.sobol.analyze(sr, Y)
-
-
-@pytest.fixture(scope="session")
-def linear_sobol_result():
-    """Linear additive model Sobol analysis result (session-scoped)."""
-    sr = jaxgsa.sobol.sample(linear.PROBLEM, n_samples=2**13 * 5, seed=123, verbose=False)
-    Y = linear.evaluate(jnp.asarray(sr.samples))
-    return jaxgsa.sobol.analyze(sr, Y)
-
-
-@pytest.fixture(scope="session")
-def sobol_g_result():
-    """Sobol G-function Sobol analysis result (session-scoped, first-order only)."""
-    sr = jaxgsa.sobol.sample(
-        sobol_g.PROBLEM,
-        n_samples=2**14 * 10,
-        calc_second_order=False,
-        seed=456,
-        verbose=False,
-    )
-    Y = sobol_g.evaluate(jnp.asarray(sr.samples))
-    return jaxgsa.sobol.analyze(sr, Y)
-
-
-# Oakley-O'Hagan has 15 Gaussian inputs with correlated interactions,
-# requiring ~2^14 * 32 samples for stable convergence of S1 and ST.
-@pytest.fixture(scope="session")
-def oakley_sobol_result():
-    """Oakley & O'Hagan Sobol analysis result (session-scoped, first-order only)."""
-    sr = jaxgsa.sobol.sample(
-        oakley_ohagan.PROBLEM,
-        n_samples=2**14 * 32,
-        calc_second_order=False,
-        seed=789,
-        verbose=False,
-    )
-    Y = oakley_ohagan.evaluate(jnp.asarray(sr.samples))
-    return jaxgsa.sobol.analyze(sr, Y)

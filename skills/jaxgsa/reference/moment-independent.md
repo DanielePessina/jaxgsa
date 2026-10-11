@@ -6,7 +6,8 @@ bimodal or heavy-tailed, so `Var(Y)` is a poor denominator, or when you want a
 statement variance cannot make.
 
 All four are given-data methods: they take any aligned `(X, Y)` pairs and need
-no design. All four accept a correlated problem. `borgonovo`,
+no design. All four accept a correlated or custom-sampler problem. The fifth given-data
+index, `rank`, is in `variance-based.md`. `borgonovo`,
 `optimal_transport` and `pawn` accept categorical parameters; `hsic` does not.
 
 Their indices are correlation-inclusive. A parameter the model never reads
@@ -24,7 +25,7 @@ import jaxgsa
 from jaxgsa.benchmarks import ishigami
 
 PROBLEM = ishigami.PROBLEM
-X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=4000, seed=0))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n_samples=4000, seed=0))
 Y = ishigami.evaluate(X)
 ```
 
@@ -35,7 +36,7 @@ worth absorbing before picking one:
 pawn      [0.2484, 0.4022, 0.0868]   KS distance
 delta     [0.2149, 0.3387, 0.1606]   half L1 between densities
 ot        [0.2013, 0.2775, 0.0977]   normalized W2 squared
-R2_HSIC   [0.135,  0.008,  0.025 ]   kernel dependence, at bandwidth 1.0
+R2   [0.135,  0.008,  0.025 ]   kernel dependence, at bandwidth 1.0
 ```
 
 None of them is "the" answer, and the HSIC row is a different number entirely,
@@ -63,8 +64,8 @@ Signature:
 ```python
 jaxgsa.borgonovo.analyze(problem, X, Y, *, n_classes=None, grid_size=100,
                          bandwidth="silverman", n_bootstrap=0, conf_level=0.95,
-                         ci_method="quantile", bias_correct=None, key=None,
-                         slice_chunk_size=None, degenerate_tol=...,
+                         ci_method="quantile", bias_correct=False, key=None,
+                         slice_chunk_size=None, degenerate_tol=0.01,
                          degenerate_bandwidth="auto", on_invalid="raise",
                          verbose=True, keep_replicates=False)
 ```
@@ -80,9 +81,9 @@ Keep in mind:
   `analyze` raises, naming the parameter and the knob that applies. The value is
   never clipped, because a clipped value looks plausible and is still wrong. A
   confidence bound outside the range only warns.
-- `n_bootstrap > 0` with `bias_correct` not `False` applies the bias correction,
-  including under the `bias_correct=None` default, which warns once per process
-  that it did. The corrected estimate can fall marginally below 0 for weak
+- `bias_correct` is a plain `bool`, default `False`, which always gives the plain
+  estimate. `bias_correct=True` applies the bias correction and needs
+  `n_bootstrap > 0`. The corrected estimate can fall marginally below 0 for weak
   parameters. Set `n_bootstrap=0` for the raw plug-in estimate.
 - Below about 500 samples, read the ranking and ignore the magnitudes. The
   plug-in estimate is biased upward and the correction can push weak parameters
@@ -138,7 +139,7 @@ Signature:
 
 ```python
 jaxgsa.optimal_transport.analyze(problem, X, Y, *, mode="univariate",
-                                 n_partitions=None, standardize_outputs=True,
+                                 n_classes=None, standardize_outputs=True,
                                  epsilon=0.03, max_iter=2000, tol=None,
                                  dummy=False, n_bootstrap=0, conf_level=0.95,
                                  ci_method="quantile", key=None,
@@ -154,10 +155,10 @@ Keep in mind:
   without the floor will make you believe in parameters that do nothing, so
   `analyze` warns when either mode runs with `dummy=False`. In `"univariate"`
   mode the floor is small and the warning does not fire.
-- Cost in a point-cloud mode is `(n_bootstrap + 1) * D * n_partitions` Sinkhorn
+- Cost in a point-cloud mode is `(n_bootstrap + 1) * D * n_classes` Sinkhorn
   solves, times `K` in `"trajectory"` mode, plus one dummy pass. At 100
   replicates, 10 parameters and 25 partitions that is over 25,000 solves. A
-  categorical parameter costs its own level count instead of `n_partitions`.
+  categorical parameter costs its own level count instead of `n_classes`.
 - One parameter at a time, so no `S2` and no total order. The diffusive part
   says influence exists beyond the mean shift; it does not say which parameter
   it is shared with.
@@ -173,7 +174,7 @@ CDF conditional on one parameter, aggregated over conditioning bins.
 result = jaxgsa.pawn.analyze(PROBLEM, X, Y)
 
 result.pawn           # [0.248, 0.402, 0.087]
-result.n_valid_bins   # [10, 10, 10]   <- check this
+result.n_valid_classes   # [10, 10, 10]   <- check this
 ```
 
 All 10 bins survived for all three parameters, so those indices stand on the
@@ -182,7 +183,7 @@ full sample.
 Signature:
 
 ```python
-jaxgsa.pawn.analyze(problem, X, Y, *, n_bins=10, statistic="median",
+jaxgsa.pawn.analyze(problem, X, Y, *, n_classes=10, statistic="median",
                     n_bootstrap=0, conf_level=0.95, ci_method="quantile",
                     key=None, slice_chunk_size=None, on_invalid="raise",
                     verbose=True, keep_replicates=False)
@@ -192,15 +193,15 @@ jaxgsa.pawn.analyze(problem, X, Y, *, n_bins=10, statistic="median",
 
 Keep in mind:
 
-- `n_bins` trades conditioning resolution against sample density per bin. Bins
-  holding fewer than 2 samples are dropped, `n_valid_bins` counts what is left,
+- `n_classes` trades conditioning resolution against sample density per bin. Bins
+  holding fewer than 2 samples are dropped, `n_valid_classes` counts what is left,
   and `analyze` warns when a parameter keeps fewer than half its bins. A
   parameter down to 3 bins has a median over 3 numbers.
 - Bins are equal-probability on the marginal's own CDF, so a skewed marginal
   does not by itself starve a tail bin. What empties one is a small `N`, a large
-  `n_bins`, or samples that land outside the declared marginal.
+  `n_classes`, or samples that land outside the declared marginal.
 - Categorical parameters need no binning. The level code already names the
-  conditioning class, so PAWN uses one bin per level, `n_bins` does not apply,
+  conditioning class, so PAWN uses one bin per level, `n_classes` does not apply,
   and relabelling the levels gives the same number.
 - The KS distance is a supremum, so it reacts to the single largest gap between
   two CDFs and ignores everything else. It is the sharper instrument when a
@@ -218,8 +219,8 @@ jax.config.update("jax_enable_x64", True)      # before the analysis
 
 result = jaxgsa.hsic.analyze(PROBLEM, X, Y, n_perms=200, key=jax.random.key(0))
 
-result.R2_HSIC    # [0.135, 0.008, 0.025]   first-order, at bandwidth 1.0
-result.T_HSIC     # total, counts interactions
+result.R2    # [0.135, 0.008, 0.025]   first-order, at bandwidth 1.0
+result.T     # total, counts interactions
 result.p_values   # permutation p-values, the uncertainty statement
 result.hsic_raw   # unnormalized, kernel- and scale-dependent
 result.bandwidth  # 1.0, carried because the index depends on it
@@ -233,7 +234,7 @@ The bandwidth sweep is the thing to internalise. On Ishigami at 2000 samples in
 float64:
 
 ```
-bandwidth   R2_HSIC
+bandwidth   R2
 0.25        [0.058, 0.111, 0.025]     ranks x2 > x1 > x3
 0.5         [0.085, 0.070, 0.028]
 1.0         [0.135, 0.008, 0.025]     ranks x1 > x3 > x2
@@ -248,7 +249,7 @@ near-constant.
 Signature:
 
 ```python
-jaxgsa.hsic.analyze(problem, X, Y, *, n_perms=200, key=None, bandwidth=1.0,
+jaxgsa.hsic.analyze(problem, X, Y, *, key, n_perms=200, bandwidth=1.0,
                     on_invalid="raise", verbose=True)
 ```
 
@@ -266,13 +267,13 @@ Keep in mind:
   Nothing chunks it, and `batch_size` raises `TypeError`. Above N of about
   20,000 it is impractical, since N=20,000 with D=5 in float64 is roughly 35 GB.
   Reduce `N`, or screen with a cheaper method first.
-- `R2_HSIC` has no units, does not sum to 1, and moves with the bandwidth. For a
+- `R2` has no units, does not sum to 1, and moves with the bandwidth. For a
   magnitude on a fixed [0, 1] scale use `optimal_transport` or `borgonovo`.
 - There is no bootstrap, deliberately. A row bootstrap duplicates rows onto the
   kernel diagonal, where the kernel is exactly 1, which biases the resampled
   index upward by construction. The `p_values` are the uncertainty statement.
 - Outputs of extreme magnitude can overflow float32 in the squared distances.
   Rescale with `(Y - Y.mean(0)) / Y.std(0)`, which changes nothing else.
-- The `T_HSIC` minus `R2_HSIC` gap says interactions exist, not which pairs.
+- The `T` minus `R2` gap says interactions exist, not which pairs.
 - Categorical parameters are refused: the RBF kernel would read level codes as
   distances.

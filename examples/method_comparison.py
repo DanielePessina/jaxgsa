@@ -60,7 +60,7 @@ _bounds = jnp.array(problem.bounds)
 _X_hdmr = jax.random.uniform(_key, (2000, 3), minval=_bounds[:, 0], maxval=_bounds[:, 1])
 _Y_hdmr = ishigami.evaluate(_X_hdmr)
 _t0 = time.perf_counter()
-result_hdmr = jaxgsa.hdmr.analyze(problem, _X_hdmr, _Y_hdmr, maxorder=2, m=2)
+result_hdmr = jaxgsa.hdmr.analyze(problem, _X_hdmr, _Y_hdmr, order=2, n_intervals=2)
 jax.block_until_ready(result_hdmr.S1)
 time_hdmr = time.perf_counter() - _t0
 n_evals_hdmr = len(_X_hdmr)
@@ -73,9 +73,9 @@ time_pce = time.perf_counter() - _t0
 n_evals_pce = len(_X_hdmr)
 
 # --- DGSM ---
-_X_dgsm = jaxgsa.sampling.monte_carlo(problem, n=10_000, seed=42)
+_X_dgsm = jaxgsa.sampling.monte_carlo(problem, n_samples=10_000, seed=42)
 _t0 = time.perf_counter()
-result_dgsm = jaxgsa.dgsm.analyze(problem, ishigami_fn, jnp.asarray(_X_dgsm))
+result_dgsm = jaxgsa.dgsm.analyze(problem, jnp.asarray(_X_dgsm), fn=ishigami_fn)
 jax.block_until_ready(result_dgsm.upper_bound)
 time_dgsm = time.perf_counter() - _t0
 n_evals_dgsm = len(_X_dgsm)

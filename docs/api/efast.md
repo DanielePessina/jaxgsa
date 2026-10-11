@@ -84,7 +84,7 @@ back.
 
 ```python
 analyze(
-    sampling_result: EFASTSamples,
+    samples: EFASTSamples,
     Y: Array,
     *,
     slice_chunk_size: int | None = None,
@@ -93,7 +93,7 @@ analyze(
 ) -> EFASTResult | IrregularResult
 ```
 
-`Y` holds the model output at each row of `sampling_result.samples`, in that
+`Y` holds the model output at each row of `samples.samples`, in that
 row order, as `(n_runs,)`, `(n_runs, K)` or `(n_runs, T, K)`.
 
 For output channels with different time grids, pass a ragged list or dict of
@@ -117,7 +117,7 @@ batch. It bounds peak device memory when `T * K` is large, and trades speed
 for memory. `None` derives a width from the memory budget. It changes no index
 beyond float summation order.
 
-`on_invalid` accepts `"raise"` (the default), `"propagate"` and `"none"`
+`on_invalid` accepts `"raise"` (the default), `"propagate"` and `"skip"`
 here. `"drop"` raises a `ValueError`. Dropping a point from a search curve
 does not shrink the sample, it changes what the discrete Fourier transform
 computes,
@@ -138,7 +138,7 @@ produce a silent NaN.
 | `M` | the interference factor |
 | `problem`, `invalid` | the problem, and the non-finite report |
 
-There is no `ci`, no `*_conf`, and no `n_bootstrap`. That follows from the
+`result.ci` is always `None`, there is no `*_conf`, and there is no `n_bootstrap`. That follows from the
 design rather than from missing work. The resampling unit would be the search
 curve, and the design holds exactly one curve per parameter, so there is
 nothing to resample. For an interval, draw several designs at different random
@@ -148,7 +148,7 @@ phase shifts and compare the indices across them. That is a change to
 ## indices
 
 ```python
-indices(sampling_result, Y, *, slice_chunk_size=None) -> tuple[Array, Array]
+indices(samples, Y, *, slice_chunk_size=None) -> EFASTIndices            # S1, ST
 ```
 
 `S1` and `ST` as plain arrays, with no checks and no result object, so it runs

@@ -9,6 +9,7 @@ derives one from it.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Literal, overload
 
 import jax.core
 import jax.numpy as jnp
@@ -110,7 +111,17 @@ def pad_rows(A: Array, n_pad: int) -> Array:
     return jnp.concatenate([A, jnp.zeros((n_pad, *A.shape[1:]), dtype=A.dtype)], axis=0)
 
 
-def apply_batched(fn: Callable[[Array], Array], X: Array, batch_size: int) -> Array:
+@overload
+def apply_batched(
+    fn: Callable[[Array], Array], X: Array, batch_size: int, *, to_host: Literal[False] = False
+) -> Array: ...
+@overload
+def apply_batched(
+    fn: Callable[[Array], Array], X: Array, batch_size: int, *, to_host: Literal[True]
+) -> np.ndarray: ...
+def apply_batched(
+    fn: Callable[[Array], Array], X: Array, batch_size: int, *, to_host: bool = False
+) -> Array | np.ndarray:
     """Apply ``fn`` to row batches of ``X``, assembling the rows along axis 0.
 
     ``fn`` must be row-independent: its output for a row may not depend on
@@ -129,14 +140,18 @@ def apply_batched(fn: Callable[[Array], Array], X: Array, batch_size: int) -> Ar
             output batch.
         X: ``(N, ...)`` input rows.
         batch_size: Rows per batch, as returned by ``resolve_batch_size``.
+        to_host: Return the host (NumPy) buffer as it is, and skip the copy
+            back to the device. For callers that need NumPy output anyway.
+            Not valid under ``jax.jit`` tracing.
 
     Returns:
-        ``fn(X)`` as a JAX array, computed at most ``batch_size`` rows at a
-        time.
+        ``fn(X)``, computed at most ``batch_size`` rows at a time: a JAX array,
+        or a NumPy array when ``to_host`` is set.
     """
     n_rows = X.shape[0]
     if batch_size >= n_rows:
-        return fn(X)
+        out = fn(X)
+        return np.asarray(out) if to_host else out
     if isinstance(X, jax.core.Tracer):
         return jnp.concatenate(
             [fn(X[i : i + batch_size]) for i in range(0, n_rows, batch_size)], axis=0
@@ -146,4 +161,4 @@ def apply_batched(fn: Callable[[Array], Array], X: Array, batch_size: int) -> Ar
     out[:batch_size] = np.asarray(first)
     for i in range(batch_size, n_rows, batch_size):
         out[i : i + batch_size] = np.asarray(fn(X[i : i + batch_size]))
-    return jnp.asarray(out)
+    return out if to_host else jnp.asarray(out)

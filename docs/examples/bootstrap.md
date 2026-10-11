@@ -43,7 +43,7 @@ jaxgsa.sobol.sample: D=3, mode=second-order, base_n=1024, requested_runs>=8192, 
 jaxgsa.sobol.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=8192 runs, T=1 x K=1 output slice
     invalid: none found in 1024 Saltelli groups (policy 'raise')
   timing:

@@ -46,6 +46,22 @@ from typing import Any
 
 from baseline_dump import DEFAULT_OUT, build_dump
 
+RENAMED_FIELDS: dict[tuple[str, str], str] = {
+    ("pce", "loo_rmse"): "cv_rmse",
+    ("hsic", "R2_HSIC"): "R2",
+    ("hsic", "T_HSIC"): "T",
+    ("dgsm", "sigma"): "mu",
+    ("dgsm", "sigma_conf"): "mu_conf",
+    ("dgsm", "var_y"): "variance",
+    ("pawn", "n_valid_bins"): "n_valid_classes",
+}
+"""Result fields renamed in 1.1.0, as ``(method, old name) -> new name``.
+
+An older stored baseline holds the old names. ``compare`` renames them before
+the diff, so a rename does not read as one lost and one gained field. The
+values are untouched: a rename must not move a number.
+"""
+
 MAX_REPORTED_ELEMENTS = 10
 """How many differing elements of one array to print before summarizing."""
 
@@ -173,6 +189,34 @@ def _compare_arrays(path: str, old: dict[str, Any], new: dict[str, Any], diffs: 
         )
 
 
+def _migrate_field_names(baseline: dict[str, Any]) -> dict[str, Any]:
+    """Rename 1.0 result fields in a stored baseline to their 1.1 names.
+
+    Args:
+        baseline: The ``results`` mapping loaded from a stored JSON file.
+
+    Returns:
+        A copy with every field in :data:`RENAMED_FIELDS` renamed. Fields that
+        are already new, or that sit under other keys, pass through untouched.
+    """
+    migrated: dict[str, Any] = {}
+    for case_name, case in baseline.items():
+        if not isinstance(case, dict) or not isinstance(case.get("methods"), dict):
+            migrated[case_name] = case
+            continue
+        methods = {}
+        for method, fields in case["methods"].items():
+            if isinstance(fields, dict) and isinstance(fields.get("fields"), dict):
+                renamed = {
+                    RENAMED_FIELDS.get((method, key), key): value
+                    for key, value in fields["fields"].items()
+                }
+                fields = {**fields, "fields": renamed}
+            methods[method] = fields
+        migrated[case_name] = {**case, "methods": methods}
+    return migrated
+
+
 def compare(baseline: dict[str, Any], current: dict[str, Any]) -> Diffs:
     """Diff a stored baseline body against a fresh one.
 
@@ -185,7 +229,7 @@ def compare(baseline: dict[str, Any], current: dict[str, Any]) -> Diffs:
         when the two agree exactly.
     """
     diffs = Diffs()
-    _compare_values("results", baseline, current, diffs)
+    _compare_values("results", _migrate_field_names(baseline), current, diffs)
     return diffs
 
 

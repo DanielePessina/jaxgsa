@@ -8,7 +8,7 @@ Ishigami's top two.
 Use them to decide what to **drop**, fix the negligible parameters, then spend
 the remaining budget on `sobol` for the survivors.
 
-Both refuse a correlated or categorical problem.
+Both refuse a correlated, custom-sampler or categorical problem.
 
 The examples use Ishigami, whose true `ST` is `[0.5576, 0.4424, 0.2437]`:
 
@@ -42,14 +42,14 @@ drop what sits near the origin. Here nothing does: all three parameters matter,
 which is the correct screening answer even though the ranking is wrong. `x2`
 leads on `mu_star` while the true `ST` leads with `x1`.
 
-60 rows, not 200. The default `num_levels=4` grid collides often in low
+60 rows, not 200. The default `n_levels=4` grid collides often in low
 dimensions, and jaxgsa evaluates each distinct row once. Cost is `r(D + 1)`
 model runs before deduplication, against `N(2D + 2)` for Sobol.
 
 Signature:
 
 ```python
-jaxgsa.morris.sample(problem, n_trajectories, *, num_levels=4,
+jaxgsa.morris.sample(problem, n_trajectories, *, n_levels=4,
                      method="trajectory", scramble=True, seed=None,
                      truncation_quantile=1e-4, verbose=True)
 jaxgsa.morris.analyze(samples, Y, *, standardize_outputs=False, n_bootstrap=0,
@@ -124,18 +124,18 @@ your model with JAX, so it needs no design of its own beyond plain Monte Carlo
 points.
 
 ```python
-X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=1024, seed=0))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n_samples=1024, seed=0))
 
 # fn takes ONE sample row, shape (D,), and returns a scalar, (K,) or (T, K).
 result = jaxgsa.dgsm.analyze(
-    PROBLEM, lambda x: ishigami.evaluate(x[None, :])[0], X
+    PROBLEM, X, fn=lambda x: ishigami.evaluate(x[None, :])[0]
 )
 
 result.nu           # [7.7500, 24.4051, 10.2674]   mean squared derivative
-result.sigma        # mean derivative, near zero on a symmetric response
+result.mu           # mean signed derivative, near zero on a symmetric response
 result.lower_bound  # [0.0010, 0.0074, 0.0022]
 result.upper_bound  # [2.3450, 7.3846, 3.1067]
-result.var_y
+result.variance
 ```
 
 Both bounds hold. Neither is usable. The true `ST` is
@@ -149,13 +149,13 @@ A batch model must be wrapped, as above. Passing one unwrapped raises a
 pass it directly and skip `fn`:
 
 ```python
-result = jaxgsa.dgsm.analyze(PROBLEM, Y=Y, dfdx=dfdx)
+result = jaxgsa.dgsm.analyze(PROBLEM, X, Y, dfdx=dfdx)
 ```
 
 Signature:
 
 ```python
-jaxgsa.dgsm.analyze(problem, fn=None, X=None, *, Y=None, dfdx=None,
+jaxgsa.dgsm.analyze(problem, X, Y=None, *, fn=None, dfdx=None,
                     standardize_outputs=False, n_bootstrap=0, conf_level=0.95,
                     ci_method="quantile", key=None, batch_size=None,
                     on_invalid="raise", verbose=True, keep_replicates=False)

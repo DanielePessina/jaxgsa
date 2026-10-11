@@ -22,13 +22,21 @@
 
 import { numpy as np } from "@jax-js/jax";
 import type { ProblemSpec } from "../sampling";
-import { fitPce, type PceFitOptions } from "../pce/analyze";
+import { fitPce, type PceDiagnostics, type PceFitOptions } from "../pce/analyze";
 import { multiIndexColumns, sobolFromCoefficients, type MultiIndex } from "../pce/engine";
 
 export interface ShapleyIndices {
   Sh: Float64Array;
   S1: Float64Array;
   ST: Float64Array;
+}
+
+/** Shapley indices plus the PCE fit they were read from. */
+export interface ShapleyPceResult extends ShapleyIndices {
+  /** Polynomial degree actually fitted (autoOrder may lower the request). */
+  order: number;
+  /** Present when `options.diagnostics` is true. */
+  diagnostics?: PceDiagnostics;
 }
 
 /**
@@ -121,10 +129,16 @@ export function analyzeShapleyPce(
   x: Float64Array | number[],
   y: Float64Array | number[],
   options: PceFitOptions = {},
-): ShapleyIndices {
+): ShapleyPceResult {
   const fit = fitPce(problem, x, y, options);
   const sobol = sobolFromCoefficients(fit.coeffs.ref, fit.mi); // coeffs ref'd; shapley consumes raw
   const shapley = shapleyFromPceCoefficients(fit.coeffs, fit.mi, fit.mi.D);
 
-  return { Sh: shapley.Sh, S1: sobol.S1, ST: sobol.ST };
+  return {
+    Sh: shapley.Sh,
+    S1: sobol.S1,
+    ST: sobol.ST,
+    order: fit.order,
+    diagnostics: fit.diagnostics,
+  };
 }

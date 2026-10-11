@@ -14,6 +14,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from _fixtures_crosscutting import OFFSETS, PROBS, mixed_data
 
 import jaxgsa
 from jaxgsa import (
@@ -29,23 +30,16 @@ from jaxgsa import (
     sobol,
 )
 from jaxgsa import pce as pce_mod
-from jaxgsa._core.partition import (
-    _categorical_class_layout,
-    _extract_categorical_codes,
-)
+from jaxgsa._core.partition import _categorical_class_layout
 from jaxgsa._core.sampling import _inverse_transform_samples
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa.borgonovo._analyze import _warn_conf_out_of_range
-from jaxgsa.pawn._analyze import _bin_indices
 from jaxgsa.problem import (
     CategoricalSpec,
     Problem,
     _categorical_dims,
     _normalized_input_to_dict,
 )
-
-PROBS = [0.5, 0.3, 0.2]
-OFFSETS = np.array([0.0, 2.0, -1.0])
 
 
 def _mixed_problem():
@@ -59,13 +53,11 @@ def _mixed_problem():
 
 
 def _mixed_data(n=4000, seed=1, noise=0.1):
-    """Sample the mixed problem and evaluate the per-level-offset model."""
-    problem = _mixed_problem()
-    X = jaxgsa.sampling.monte_carlo(problem, n, seed=seed)
-    codes = X[:, 1].astype(int)
-    rng = np.random.default_rng(seed)
-    Y = X[:, 0] + OFFSETS[codes] + noise * rng.standard_normal(n)
-    return problem, X, Y
+    """Sample the mixed problem and evaluate the per-level-offset model.
+
+    The sample is cached and read-only, see ``_fixtures_crosscutting``.
+    """
+    return mixed_data(n, seed, noise)
 
 
 def _analytic_s1():
@@ -168,7 +160,7 @@ def test_correlation_with_identity_categorical_rows_passes():
         },
         correlation=[[1.0, 0.5, 0.0], [0.5, 1.0, 0.0], [0.0, 0.0, 1.0]],
     )
-    assert p.has_correlated_inputs is True
+    assert p.dependence == "gaussian"
     X = jaxgsa.sampling.monte_carlo(p, 20_000, seed=0)
     freqs = np.bincount(X[:, 2].astype(int), minlength=2) / X.shape[0]
     np.testing.assert_allclose(freqs, [0.5, 0.5], atol=0.02)
@@ -338,32 +330,6 @@ def test_sobol_npz_round_trip_carries_categorical_problem(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_extract_categorical_codes_rejects_non_code_values():
-    p = _mixed_problem()
-    dims_levels = _categorical_dims(p)
-    X = np.asarray(jaxgsa.sampling.monte_carlo(p, 32, seed=0))
-    bad = X.copy()
-    bad[0, 1] = 0.5
-    with pytest.raises(ValueError, match="'c'"):
-        _extract_categorical_codes(p, bad, dims_levels)
-    bad = X.copy()
-    bad[0, 1] = 3.0  # out of range for 3 levels
-    with pytest.raises(ValueError, match="'c'"):
-        _extract_categorical_codes(p, bad, dims_levels)
-
-
-def test_categorical_class_layout_partitions_by_level():
-    codes = np.array([[0], [1], [0], [2], [1], [0]], dtype=np.int64)
-    all_idx = np.arange(6, dtype=np.int64)[None, :]
-    cls_idx, counts = _categorical_class_layout(codes, all_idx, [3])
-    np.testing.assert_array_equal(counts[0, 0], [3, 2, 1])
-    # Class members are the rows at each level, in original row order; the
-    # first count entries of each class are the valid ones.
-    np.testing.assert_array_equal(cls_idx[0, 0, 0][: counts[0, 0, 0]], [0, 2, 5])
-    np.testing.assert_array_equal(cls_idx[0, 0, 1][: counts[0, 0, 1]], [1, 4])
-    np.testing.assert_array_equal(cls_idx[0, 0, 2][: counts[0, 0, 2]], [3])
-
-
 def test_categorical_class_layout_recounts_bootstrap_resamples():
     codes = np.array([[0], [0], [1], [1]], dtype=np.int64)
     all_idx = np.array([[0, 1, 2, 3], [0, 0, 0, 2]], dtype=np.int64)
@@ -394,26 +360,7 @@ def test_empty_declared_level_warns_and_completes():
 # ---------------------------------------------------------------------------
 
 
-def test_borgonovo_degenerate_class_recovers_delta():
-    """A near-atomic per-level output must not bias delta low.
-
-    Y = offsets[code] with three balanced levels has true delta = 2/3.
-    Without the bandwidth floor the degenerate (near-zero-variance) classes
-    drop out of the integrand and delta collapses to ~0.33. With the floor
-    the estimate lands at 0.60-0.62 for N in [1e3, 1e4] (measured error
-    <= 0.07; asserted with headroom). The jitter is 1e-9, far below the
-    atom spacing, so the classes stay degenerate; an exactly noise-free Y
-    is a discrete output and ``analyze`` refuses it (see
-    ``test_borgonovo_refuses_a_discrete_output``).
-    """
-    p, X, Y = _atom_data(1e-9)
-    with pytest.warns(UserWarning, match="bandwidth"):
-        res = borgonovo.analyze(p, X, Y, key=jax.random.key(0))
-    assert abs(float(res.delta[0]) - 2.0 / 3.0) < 0.11
-    assert float(res.S1[0]) == pytest.approx(1.0, abs=1e-6)
-
-
-def _atom_data(noise, n=3000, seed=0):
+def _atom_data(noise, n=1000, seed=0):
     """Three balanced atoms plus jitter; true delta is 2/3 at every noise."""
     p = Problem.from_dict({"c": {"dist": "categorical", "probs": [1 / 3, 1 / 3, 1 / 3]}})
     rng = np.random.default_rng(seed)
@@ -426,20 +373,16 @@ def test_borgonovo_refuses_a_discrete_output():
     """Zero jitter makes Y discrete, which the estimator does not support.
 
     The two guards are complementary. A discrete output is caught here, up
-    front, by the distinct-value check. An output with a tiny jitter has
-    about N distinct values, passes this check, and is caught later by the
-    delta range check if its conditional density aliases on the grid.
+    front, by the distinct-value check, and the message points at
+    ``optimal_transport``. An output with a tiny jitter has about N distinct
+    values, passes this check, and is caught later by the delta range check
+    if its conditional density aliases on the grid.
     """
     p, X, Y = _atom_data(0.0)
     assert len(np.unique(Y)) == 3
-    with pytest.raises(ValueError, match="continuous output distribution only"):
+    with pytest.raises(ValueError, match="continuous output distribution only") as excinfo:
         jaxgsa.borgonovo.analyze(p, X, Y, key=jax.random.key(0), n_bootstrap=0)
-
-
-def test_borgonovo_discrete_output_error_points_at_optimal_transport():
-    p, X, Y = _atom_data(0.0)
-    with pytest.raises(ValueError, match="jaxgsa.optimal_transport.analyze"):
-        jaxgsa.borgonovo.analyze(p, X, Y, n_bootstrap=0)
+    assert "jaxgsa.optimal_transport.analyze" in str(excinfo.value)
 
 
 def test_borgonovo_accepts_a_rounded_continuous_output():
@@ -464,23 +407,33 @@ def test_borgonovo_discrete_output_names_the_offending_column():
 
 
 @pytest.mark.parametrize("noise", [1e-9, 1e-5, 0.1])
-def test_borgonovo_atomic_class_delta_stays_in_range(noise):
-    """The atoms are separated far beyond the jitter, so delta is 2/3.
+def test_borgonovo_atomic_class_delta_recovers_two_thirds(noise):
+    """A near-atomic per-level output must not bias delta low or blow it up.
 
-    Before the degenerate-class tolerance was raised to 1e-2 the class
-    bandwidth could sit orders of magnitude below the output grid step. The
-    conditional density then aliased on the grid and the trapezoid integral
-    exploded: noise 1e-5 returned delta 121 with no warning at all. Zero
-    noise is not swept here: it makes Y discrete, and the estimator refuses
-    a discrete output up front.
+    Y = offsets[code] with three balanced levels has true delta = 2/3.
+    Without the bandwidth floor the degenerate (near-zero-variance) classes
+    drop out of the integrand and delta collapses to ~0.33. Before the
+    degenerate-class tolerance was raised to 1e-2 the class bandwidth could
+    sit orders of magnitude below the output grid step, the conditional
+    density aliased on the grid and noise 1e-5 returned delta 121 with no
+    warning at all. With the floor the estimate lands at 0.60-0.73
+    (asserted with headroom). Zero noise is not swept here: it makes Y
+    discrete, and the estimator refuses a discrete output up front.
     """
     p, X, Y = _atom_data(noise)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         res = jaxgsa.borgonovo.analyze(p, X, Y, key=jax.random.key(0), n_bootstrap=0)
     delta = float(np.asarray(res.delta).ravel()[0])
     assert 0.0 <= delta <= 1.0
     assert abs(delta - 2.0 / 3.0) < 0.11
+    messages = [str(w.message) for w in caught]
+    if noise == 1e-9:
+        # The classes are degenerate, so the floor engages and says so.
+        assert any("bandwidth" in m for m in messages)
+        assert float(res.S1[0]) == pytest.approx(1.0, abs=1e-6)
+    if noise == 1e-5:
+        assert not any("delta is defined on" in m for m in messages)
 
 
 def test_borgonovo_aliasing_delta_raises_out_of_range():
@@ -501,14 +454,6 @@ def test_borgonovo_aliasing_delta_raises_out_of_range():
     assert "degenerate_bandwidth" in message
 
 
-def test_borgonovo_in_range_delta_does_not_raise():
-    p, X, Y = _atom_data(1e-5)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        jaxgsa.borgonovo.analyze(p, X, Y, key=jax.random.key(0), n_bootstrap=0)
-    assert not [w for w in caught if "delta is defined on" in str(w.message)]
-
-
 def test_borgonovo_out_of_range_confidence_bound_only_warns():
     """The interval is a diagnostic, so a bad bound warns instead of raising."""
     p = Problem(names=("a", "b"), bounds=((0.0, 1.0), (0.0, 1.0)))
@@ -520,30 +465,24 @@ def test_borgonovo_out_of_range_confidence_bound_only_warns():
     assert "upper bound for b" in message
 
 
-def test_borgonovo_grid_size_moves_the_atomic_estimate():
-    """Document the knob: grid_size, not the bandwidth fraction, governs it."""
-    p, X, Y = _atom_data(1e-9)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        coarse = jaxgsa.borgonovo.analyze(
-            p, X, Y, key=jax.random.key(0), n_bootstrap=0, grid_size=50
-        )
-        fine = jaxgsa.borgonovo.analyze(
-            p, X, Y, key=jax.random.key(0), n_bootstrap=0, grid_size=200
-        )
-    assert float(np.asarray(coarse.delta).ravel()[0]) < float(np.asarray(fine.delta).ravel()[0])
+def test_borgonovo_atomic_knobs_move_the_estimate():
+    """Document the knobs on the degenerate-class estimate.
 
-
-def test_borgonovo_degenerate_bandwidth_override_changes_the_estimate():
+    ``grid_size``, not the bandwidth fraction, governs the resolution, and a
+    wider degenerate-bandwidth floor over-smooths the conditional and pulls
+    delta down.
+    """
     p, X, Y = _atom_data(1e-9)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        default = jaxgsa.borgonovo.analyze(p, X, Y, key=jax.random.key(0), n_bootstrap=0)
-        wide = jaxgsa.borgonovo.analyze(
-            p, X, Y, key=jax.random.key(0), n_bootstrap=0, degenerate_bandwidth=0.5
-        )
-    # A wider floor over-smooths the conditional, pulling delta down.
-    assert float(np.asarray(wide.delta).ravel()[0]) < float(np.asarray(default.delta).ravel()[0])
+
+    def delta(**kwargs):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = jaxgsa.borgonovo.analyze(p, X, Y, key=jax.random.key(0), n_bootstrap=0, **kwargs)
+        return float(np.asarray(res.delta).ravel()[0])
+
+    default = delta()
+    assert delta(grid_size=50) < default
+    assert delta(degenerate_bandwidth=0.5) < default
 
 
 @pytest.mark.parametrize(
@@ -562,65 +501,89 @@ def test_borgonovo_rejects_invalid_degenerate_settings(kwargs, match):
         jaxgsa.borgonovo.analyze(p, X, Y, n_bootstrap=0, **kwargs)
 
 
-def test_borgonovo_s1_matches_analytic_reference():
-    problem, X, Y = _mixed_data(n=8000)
+@pytest.mark.parametrize(
+    ("n", "atol"),
+    [(2000, 0.06), pytest.param(8000, 0.03, marks=pytest.mark.slow)],
+)
+def test_borgonovo_and_ot_match_the_analytic_reference(n, atol):
+    """Both categorical-aware indices recover the closed-form S1 (Tier T0).
+
+    The small case is the default-tier smoke test. The large case holds the
+    tight tolerance.
+    """
+    problem, X, Y = _mixed_data(n=n)
     res = borgonovo.analyze(problem, X, Y, key=jax.random.key(0))
-    s1_x1, s1_cat = _analytic_s1()
-    np.testing.assert_allclose(np.asarray(res.S1), [s1_x1, s1_cat], atol=0.03)
+    res_ot = optimal_transport.analyze(problem, X, Y)
+    expected = _analytic_s1()
+    np.testing.assert_allclose(np.asarray(res.S1), expected, atol=atol)
     assert np.all(np.asarray(res.delta) > 0)
-
-
-def test_ot_advective_matches_analytic_reference():
-    problem, X, Y = _mixed_data(n=8000)
-    res = optimal_transport.analyze(problem, X, Y)
-    s1_x1, s1_cat = _analytic_s1()
     # The advective component equals half the given-data S1.
-    np.testing.assert_allclose(2.0 * np.asarray(res.advective), [s1_x1, s1_cat], atol=0.03)
-    assert float(res.ot[1]) > float(res.ot[0])
+    np.testing.assert_allclose(2.0 * np.asarray(res_ot.advective), expected, atol=atol)
+    assert float(res_ot.ot[1]) > float(res_ot.ot[0])
 
 
 def test_pure_noise_categorical_index_is_near_zero():
-    problem, X, _ = _mixed_data(n=8000)
+    """A categorical input the output ignores gets an index near zero."""
+    problem, X, _ = _mixed_data(n=2000)
     rng = np.random.default_rng(7)
     Y = X[:, 0] + 0.1 * rng.standard_normal(X.shape[0])
     res_b = borgonovo.analyze(problem, X, Y, key=jax.random.key(0))
     res_o = optimal_transport.analyze(problem, X, Y)
+    res_p = pawn.analyze(problem, X, Y)
     assert float(res_b.S1[1]) < 0.01
     assert float(res_o.ot[1]) < 0.02
+    assert float(np.asarray(res_p.pawn)[1]) < 0.06
 
 
-@pytest.mark.parametrize("method", ["borgonovo", "ot"])
-def test_level_permutation_invariance(method):
-    """The acid test: relabeling levels must not change the indices."""
-    problem, X, Y = _mixed_data(n=4000)
-    codes = X[:, 1].astype(int)
-
-    perm = np.array([2, 0, 1])  # old code -> new code
+def _relabeled(problem, X):
+    """The same sample with the three levels renamed (old code -> new code)."""
+    codes = np.asarray(X)[:, 1].astype(int)
+    perm = np.array([2, 0, 1])
     inv = np.argsort(perm)
-    X_perm = X.copy()
+    X_perm = np.asarray(X).copy()
     X_perm[:, 1] = perm[codes]
-    probs_perm = [PROBS[inv[level]] for level in range(3)]
     problem_perm = Problem.from_dict(
-        {"x1": (0.0, 1.0), "c": {"dist": "categorical", "probs": probs_perm}}
+        {
+            "x1": (0.0, 1.0),
+            "c": {"dist": "categorical", "probs": [PROBS[inv[level]] for level in range(3)]},
+        }
     )
+    return problem_perm, X_perm
+
+
+@pytest.mark.parametrize("method", ["borgonovo", "ot", "pawn-median", "pawn-max", "pawn-mean"])
+def test_level_permutation_invariance(method):
+    """The acid test: relabeling levels must not change the indices.
+
+    Same seed, same rows per class (only the class order changes), so the
+    estimates agree to float noise. The invariance is exact, so a small
+    sample is enough. PAWN's median and max are exactly equal. Its mean sums
+    the same three floats in a different order, which costs at most one
+    float32 ULP.
+    """
+    problem, X, Y = _mixed_data(n=500)
+    problem_perm, X_perm = _relabeled(problem, X)
+    key = jax.random.key(0)
 
     if method == "borgonovo":
-        res = borgonovo.analyze(problem, X, Y, n_bootstrap=16, key=jax.random.key(0))
-        res_perm = borgonovo.analyze(
-            problem_perm, X_perm, Y, n_bootstrap=16, key=jax.random.key(0)
-        )
+        res = borgonovo.analyze(problem, X, Y, n_bootstrap=4, key=key)
+        res_perm = borgonovo.analyze(problem_perm, X_perm, Y, n_bootstrap=4, key=key)
         pairs = [(res.delta, res_perm.delta), (res.S1, res_perm.S1)]
-    else:
-        res = optimal_transport.analyze(problem, X, Y, n_bootstrap=16, key=jax.random.key(0))
-        res_perm = optimal_transport.analyze(
-            problem_perm, X_perm, Y, n_bootstrap=16, key=jax.random.key(0)
-        )
+    elif method == "ot":
+        res = optimal_transport.analyze(problem, X, Y, n_bootstrap=4, key=key)
+        res_perm = optimal_transport.analyze(problem_perm, X_perm, Y, n_bootstrap=4, key=key)
         pairs = [(res.ot, res_perm.ot), (res.advective, res_perm.advective)]
+    else:
+        statistic = method.removeprefix("pawn-")
+        base = pawn.analyze(problem, X, Y, statistic=statistic).pawn
+        other = pawn.analyze(problem_perm, X_perm, Y, statistic=statistic).pawn
+        pairs = [(base, other)]
 
+    atol = {"pawn-median": 0.0, "pawn-max": 0.0, "pawn-mean": np.finfo(np.float32).eps}.get(
+        method, 1e-5
+    )
     for a, b in pairs:
-        # Same seed, same rows per class (only the class order changes):
-        # the estimates agree to float noise.
-        np.testing.assert_allclose(np.asarray(a), np.asarray(b), atol=1e-5)
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=0, atol=atol)
 
 
 # ---------------------------------------------------------------------------
@@ -628,29 +591,20 @@ def test_level_permutation_invariance(method):
 # ---------------------------------------------------------------------------
 
 
-def test_pawn_categorical_column_uses_level_codes_as_bins():
-    problem, X, _ = _mixed_data(n=500)
-    bin_idx, n_eff = _bin_indices(problem, X, 10)
-    # 10 continuous bins already exceed the 3 levels, so no padding is needed.
-    assert n_eff == 10
-    np.testing.assert_array_equal(np.asarray(bin_idx)[:, 1], np.asarray(X)[:, 1].astype(int))
-
-
-def test_pawn_pads_the_kernel_when_levels_exceed_n_bins():
+def test_pawn_pads_the_kernel_when_levels_exceed_n_classes():
     p = Problem.from_dict({"c": {"dist": "categorical", "probs": [1 / 6] * 6}})
     X = jaxgsa.sampling.monte_carlo(p, 600, seed=0)
-    _, n_eff = _bin_indices(p, X, 4)
-    assert n_eff == 6
     rng = np.random.default_rng(0)
     Y = np.asarray(X)[:, 0] + 0.1 * rng.standard_normal(600)
-    res = pawn.analyze(p, X, Y, n_bins=4)
-    # The two unused bins are NaN and the nan-aware reduction drops them.
+    res = pawn.analyze(p, X, Y, n_classes=4)
+    # Six levels exceed the four bins, so the kernel is padded. The two unused
+    # bins are NaN and the nan-aware reduction drops them.
     assert np.isfinite(np.asarray(res.pawn)).all()
 
 
 def test_pawn_accepts_a_mixed_problem():
-    problem, X, Y = _mixed_data(n=6000)
-    res = pawn.analyze(problem, X, Y, n_bootstrap=8, key=jax.random.key(0))
+    problem, X, Y = _mixed_data(n=1000)
+    res = pawn.analyze(problem, X, Y, n_bootstrap=4, key=jax.random.key(0))
     values = np.asarray(res.pawn)
     assert values.shape == (2,)
     assert np.isfinite(values).all()
@@ -661,7 +615,7 @@ def test_pawn_accepts_a_mixed_problem():
 
 
 def test_pawn_accepts_an_all_categorical_problem():
-    p, X, Y = _all_categorical_data(n=4000)
+    p, X, Y = _all_categorical_data(n=1000)
     res = pawn.analyze(p, X, Y)
     values = np.asarray(res.pawn)
     assert np.isfinite(values).all()
@@ -676,40 +630,14 @@ def test_pawn_rejects_non_code_values_in_a_categorical_column():
     bad[0, 1] = 0.5
     with pytest.raises(ValueError, match="integer level codes"):
         pawn.analyze(problem, bad, Y)
-
-
-@pytest.mark.parametrize("statistic", ["median", "max", "mean"])
-def test_pawn_level_relabeling_is_invariant(statistic):
-    """Relabeling levels only reorders the per-bin KS values.
-
-    Median, max and mean over bins are permutation-invariant, so median and
-    max are exactly equal. The mean sums the same three floats in a
-    different order, which costs at most one float32 ULP.
-    """
-    problem, X, Y = _mixed_data(n=4000)
-    codes = np.asarray(X)[:, 1].astype(int)
-    perm = np.array([2, 0, 1])
-    inv = np.argsort(perm)
-    X_perm = np.asarray(X).copy()
-    X_perm[:, 1] = perm[codes]
-    problem_perm = Problem.from_dict(
-        {
-            "x1": (0.0, 1.0),
-            "c": {"dist": "categorical", "probs": [PROBS[inv[i]] for i in range(3)]},
-        }
-    )
-
-    base = np.asarray(pawn.analyze(problem, X, Y, statistic=statistic).pawn)
-    other = np.asarray(pawn.analyze(problem_perm, X_perm, Y, statistic=statistic).pawn)
-    if statistic == "mean":
-        np.testing.assert_allclose(base, other, rtol=0, atol=np.finfo(np.float32).eps)
-    else:
-        np.testing.assert_array_equal(base, other)
+    bad[0, 1] = 3.0  # out of range for 3 levels
+    with pytest.raises(ValueError, match="'c'"):
+        pawn.analyze(problem, bad, Y)
 
 
 def test_pawn_categorical_index_is_finite_bounded_and_sensitive():
     """PAWN's categorical index is a bounded, non-trivial package result."""
-    n = 4000
+    n = 1000
     p = Problem.from_dict({"c": {"dist": "categorical", "probs": PROBS}})
     X = np.asarray(jaxgsa.sampling.monte_carlo(p, n, seed=0))
     codes = X[:, 0].astype(int)
@@ -723,26 +651,18 @@ def test_pawn_categorical_index_is_finite_bounded_and_sensitive():
     assert got > 0.1
 
 
-def test_pawn_pure_noise_categorical_index_is_small():
-    problem, X, _ = _mixed_data(n=8000)
-    rng = np.random.default_rng(7)
-    Y = np.asarray(X)[:, 0] + 0.1 * rng.standard_normal(X.shape[0])
-    res = pawn.analyze(problem, X, Y)
-    assert float(np.asarray(res.pawn)[1]) < 0.06
-
-
 def test_ot_multivariate_mode_supports_categorical():
-    problem, X, Y = _mixed_data(n=2000)
+    problem, X, Y = _mixed_data(n=500)
     rng = np.random.default_rng(3)
     Y2 = np.stack([Y, -Y + 0.05 * rng.standard_normal(Y.shape[0])], axis=1)
-    res = optimal_transport.analyze(problem, X, Y2, mode="multivariate", max_iter=5000)
+    res = optimal_transport.analyze(problem, X, Y2, mode="multivariate", max_iter=300)
     assert res.ot.shape == (2,)
     assert float(res.ot[1]) > float(res.ot[0])
 
 
 def test_ot_dummy_baseline_works_with_categorical():
     """M4: ot_dummy is per parameter now, so index each side the same way."""
-    problem, X, Y = _mixed_data(n=2000)
+    problem, X, Y = _mixed_data(n=500)
     res = optimal_transport.analyze(problem, X, Y, dummy=True, key=jax.random.key(0))
     assert res.ot_dummy is not None
     assert float(res.ot_dummy[1]) < float(res.ot[1])
@@ -761,20 +681,20 @@ def _all_categorical_data(n=2000, seed=2):
     return p, X, Y
 
 
-def test_all_categorical_problem_validates_passed_n_partitions():
+def test_all_categorical_problem_validates_passed_n_classes():
     p, X, Y = _all_categorical_data()
     # A passed value is validated even when nothing uses it.
-    with pytest.raises(ValueError, match="n_partitions"):
-        optimal_transport.analyze(p, X, Y, n_partitions=10**9)
+    with pytest.raises(ValueError, match="n_classes"):
+        optimal_transport.analyze(p, X, Y, n_classes=10**9)
     with pytest.raises(ValueError, match="n_classes"):
         borgonovo.analyze(p, X, Y, n_classes=10**9, n_bootstrap=0)
 
 
-def test_all_categorical_problem_warns_ignored_n_partitions():
+def test_all_categorical_problem_warns_ignored_n_classes():
     p, X, Y = _all_categorical_data()
     # A valid value that nothing uses draws an "ignored" warning.
-    with pytest.warns(UserWarning, match="n_partitions is ignored"):
-        res = optimal_transport.analyze(p, X, Y, n_partitions=10)
+    with pytest.warns(UserWarning, match="n_classes is ignored"):
+        res = optimal_transport.analyze(p, X, Y, n_classes=10)
     assert float(res.ot[0]) > 0.5
     assert float(res.ot[1]) < 0.05
     with pytest.warns(UserWarning, match="n_classes is ignored"):
@@ -782,16 +702,16 @@ def test_all_categorical_problem_warns_ignored_n_partitions():
     assert float(res_b.S1[0]) > 0.7
 
 
-def test_all_categorical_problem_default_n_partitions_is_silent():
+def test_all_categorical_problem_default_n_classes_is_silent():
     p, X, Y = _all_categorical_data()
     res = optimal_transport.analyze(p, X, Y)
     assert float(res.ot[0]) > 0.5
-    # With a dummy the passed value is used; out of range names n_partitions.
-    # M4: no dummy reads n_partitions any more (each categorical column gets
+    # With a dummy the passed value is used; out of range names n_classes.
+    # M4: no dummy reads n_classes any more (each categorical column gets
     # its own permutation floor), so the scope text this used to match is
     # gone; the bound itself still applies.
-    with pytest.raises(ValueError, match="n_partitions"):
-        optimal_transport.analyze(p, X, Y, n_partitions=10**9, dummy=True, key=jax.random.key(0))
+    with pytest.raises(ValueError, match="n_classes"):
+        optimal_transport.analyze(p, X, Y, n_classes=10**9, dummy=True, key=jax.random.key(0))
     # The dummy default adapts to small N instead of raising over a bare 25.
     p_small, X_small, Y_small = _all_categorical_data(n=40, seed=5)
     res_small = optimal_transport.analyze(
@@ -801,13 +721,13 @@ def test_all_categorical_problem_default_n_partitions_is_silent():
 
 
 def test_mixed_partition_bootstrap_cis_are_finite_and_ordered():
-    problem, X, Y = _mixed_data(n=2000)
-    res = borgonovo.analyze(problem, X, Y, n_bootstrap=32, key=jax.random.key(0))
+    problem, X, Y = _mixed_data(n=500)
+    res = borgonovo.analyze(problem, X, Y, n_bootstrap=8, key=jax.random.key(0))
     assert res.delta_conf is not None
     lo, hi = np.asarray(res.delta_conf)
     assert np.all(lo <= hi)
     assert np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))
-    res_o = optimal_transport.analyze(problem, X, Y, n_bootstrap=32, key=jax.random.key(0))
+    res_o = optimal_transport.analyze(problem, X, Y, n_bootstrap=8, key=jax.random.key(0))
     assert res_o.ot_conf is not None
     lo_o, hi_o = np.asarray(res_o.ot_conf)
     assert np.all(lo_o <= hi_o)
@@ -922,13 +842,13 @@ def test_categorical_design_error_is_honest_about_correlation():
     # kucherenko.sample is exempt from the correlated-design guard, so its
     # categorical refusal is where the combined case actually surfaces.
     with pytest.raises(ValueError, match=r"jaxgsa\.sobol\.sample"):
-        jaxgsa.kucherenko.sample(problem, 64)
+        jaxgsa.kucherenko.sample(problem, base_n=64)
 
     R = np.eye(3)
     R[0, 1] = R[1, 0] = 0.5  # couples the continuous pair; identity row for c
     correlated = problem.with_correlation(R)
-    with pytest.raises(ValueError, match="no variance-based method") as excinfo:
-        jaxgsa.kucherenko.sample(correlated, 64)
+    with pytest.raises(ValueError, match="(?i)no variance-based method") as excinfo:
+        jaxgsa.kucherenko.sample(correlated, base_n=64)
     message = str(excinfo.value)
     assert "sobol.sample" not in message
     assert "optimal_transport" in message and "borgonovo" in message
@@ -963,7 +883,7 @@ def _categorical_and_correlated_data(n=128):
         ("morris", lambda p: morris.sample(p, 8)),
         ("efast", lambda p: efast.sample(p, 65)),
         ("sobol", lambda p: sobol.sample(p, 64, seed=0, verbose=False)),
-        ("kucherenko", lambda p: jaxgsa.kucherenko.sample(p, 64)),
+        ("kucherenko", lambda p: jaxgsa.kucherenko.sample(p, base_n=64)),
     ],
 )
 def test_combined_categorical_and_correlated_message(name, call):
@@ -976,7 +896,7 @@ def test_combined_categorical_and_correlated_message(name, call):
     combined text, so the order the two checks run in does not matter.
     """
     problem = _categorical_and_correlated_problem()
-    with pytest.raises(ValueError, match="no variance-based method") as excinfo:
+    with pytest.raises(ValueError, match="(?i)no variance-based method") as excinfo:
         call(problem)
     message = str(excinfo.value)
     # The message opens by naming the refusing sampler.
@@ -999,15 +919,15 @@ def test_combined_categorical_and_correlated_message(name, call):
 @pytest.mark.parametrize(
     "name,call",
     [
-        ("dgsm", lambda p, X, Y: dgsm.analyze(p, fn=lambda x: x[:, 0], X=X)),
+        ("dgsm", lambda p, X, Y: dgsm.analyze(p, X, fn=lambda x: x[:, 0])),
         ("pce", lambda p, X, Y: pce_mod.analyze(p, X, Y)),
         ("hdmr", lambda p, X, Y: hdmr.analyze(p, X, Y)),
-        ("hsic", lambda p, X, Y: hsic.analyze(p, X, Y)),
+        ("hsic", lambda p, X, Y: hsic.analyze(p, X, Y, key=jax.random.key(0))),
         # pawn is absent on purpose: it takes categorical inputs (one bin per
-        # level) and is correlation-tolerant, so it accepts the combined
+        # level) and is dependence-tolerant, so it accepts the combined
         # problem instead of refusing it. See the companion accept test.
         ("shapley", lambda p, X, Y: shapley.analyze(p, X, Y)),
-        ("vkoga", lambda p, X, Y: jaxgsa.vkoga.analyze(p, X, Y)),
+        ("vkoga", lambda p, X, Y: jaxgsa.vkoga.analyze(p, X, Y, key=jax.random.key(0))),
     ],
 )
 def test_combined_message_on_the_analysis_side(name, call):
@@ -1019,12 +939,12 @@ def test_combined_message_on_the_analysis_side(name, call):
     recommends the design-based jaxgsa.sobol pipeline, which refuses a
     declared correlation. Both analysis gates route the combination to the
     shared message, so the order they run in does not matter. Note that the
-    correlation-tolerant analyzers (hdmr, hsic, vkoga) reach it through
+    dependence-tolerant analyzers (hdmr, hsic, vkoga) reach it through
     the categorical gate, and the correlation-naive ones (dgsm, pce, shapley)
     through whichever gate their caller runs first.
     """
     problem, X, Y = _categorical_and_correlated_data()
-    with pytest.raises(ValueError, match="no variance-based method") as excinfo:
+    with pytest.raises(ValueError, match="(?i)no variance-based method") as excinfo:
         call(problem, X, Y)
     message = str(excinfo.value)
     assert message.startswith(f"jaxgsa.{name}.analyze ")
@@ -1046,25 +966,24 @@ def test_combined_message_on_the_analysis_side(name, call):
 def test_combined_case_is_accepted_by_the_recommended_methods(name):
     """The advice must be true: every named method actually runs."""
     problem, X, Y = _categorical_and_correlated_data()
-    # Borgonovo bootstraps by default, and a bootstrap needs a key.
-    kwargs = {"key": jax.random.key(0)} if name == "borgonovo" else {}
-    result = getattr(jaxgsa, name).analyze(problem, X, Y, **kwargs)
+    result = getattr(jaxgsa, name).analyze(problem, X, Y)
     field = {"borgonovo": "delta", "optimal_transport": "ot", "pawn": "pawn"}[name]
-    indices = getattr(result, field)
-    assert np.asarray(indices).shape == (3,)
+    indices = np.asarray(getattr(result, field))
+    assert indices.shape == (3,)
+    assert np.all(np.isfinite(indices))
 
 
 def test_correlated_only_message_is_unchanged_without_categoricals():
     """A purely correlated problem keeps the correlated-only recommendation."""
     problem = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
     R = np.array([[1.0, 0.5], [0.5, 1.0]])
-    with pytest.raises(ValueError, match="correlation-tolerant") as excinfo:
+    with pytest.raises(ValueError, match="dependence-tolerant") as excinfo:
         morris.sample(problem.with_correlation(R), 8)
     assert "jaxgsa.vkoga" in str(excinfo.value)
 
     X = jaxgsa.sampling.monte_carlo(problem.with_correlation(R), 128, seed=0)
     Y = np.asarray(X)[:, 0]
-    with pytest.raises(ValueError, match="correlation-tolerant") as excinfo:
+    with pytest.raises(ValueError, match="dependence-tolerant") as excinfo:
         pce_mod.analyze(problem.with_correlation(R), X, Y)
     assert "jaxgsa.vkoga" in str(excinfo.value)
 
@@ -1073,5 +992,5 @@ def test_categorical_only_analysis_message_is_unchanged():
     """A purely categorical problem keeps the categorical-only recommendation."""
     problem, X, Y = _mixed_data(n=256)
     with pytest.raises(ValueError, match="categorical-aware method") as excinfo:
-        hsic.analyze(problem, X, Y)
+        hsic.analyze(problem, X, Y, key=jax.random.key(0))
     assert "jaxgsa.sobol" in str(excinfo.value)

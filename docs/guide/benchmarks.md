@@ -63,7 +63,7 @@ process-isolation policy.
 | VKOGA | $D=3$, $N=512$, scalar | 348.29 ms | 27.15 ms | 12.8x | 328 → 202 MiB |
 
 The 27 cases deliberately include small problems, high $N$, high $D$,
-multi-output/time-series arrays, and bootstrap workloads across all thirteen
+multi-output/time-series arrays, and bootstrap workloads across all fourteen
 methods. The complete machine-readable results are available for the
 [baseline](/benchmarks/master-94a4043.json) and
 [performance branch](/benchmarks/performance-pr-80.json).
@@ -120,7 +120,7 @@ the first/total-only design contains 7,168.
 
 ### HDMR
 
-`maxorder=2`, `m=2`, 1,024 random samples, no bootstrap.
+`order=2`, `n_intervals=2`, 1,024 random samples, no bootstrap.
 
 | Output shape | jaxgsa | SALib | Ratio |
 | --- | ---: | ---: | ---: |
@@ -182,7 +182,7 @@ uv run .auto/bench_gsa.py --repeats 9 --out benchmark.json
 Run the correctness-checked Sobol and HDMR comparison:
 
 ```bash
-uv run --extra dev benchmark_salib.py
+uv run --extra dev scripts/benchmark_salib.py
 ```
 
 Regenerate the four-method cache and figures:

@@ -213,14 +213,14 @@ the analytical values (x15: 0.1761 vs 0.1549).
 
 **RS-HDMR: existing samples, no structured design.** RS-HDMR works from
 plain i.i.d. draws: 3000 Gaussian samples, second-order component functions
-(`maxorder=2`), and `m=2` basis functions per dimension.
+(`order=2`), and `n_intervals=2` basis functions per dimension.
 
 ```python
 key = jax.random.key(0)
-X_hd = jax.random.normal(key, (3000, problem.num_vars))
+X_hd = jax.random.normal(key, (3000, problem.n_params))
 Y_hd = oakley_ohagan.evaluate(jnp.asarray(X_hd))
 
-hdmr_result = jaxgsa.hdmr.analyze(problem, X_hd, Y_hd, maxorder=2, m=2)
+hdmr_result = jaxgsa.hdmr.analyze(problem, X_hd, Y_hd, order=2, n_intervals=2)
 print(hdmr_result)
 ```
 
@@ -237,7 +237,7 @@ def oakley_fn(x):
     """Unbatched Oakley & O'Hagan: (15,) -> ()."""
     return oakley_ohagan.evaluate(x[None, :])[0]
 
-X_dg = jaxgsa.sampling.monte_carlo(problem, n=10_000, seed=42)
+X_dg = jaxgsa.sampling.monte_carlo(problem, n_samples=10_000, seed=42)
 dgsm_result = jaxgsa.dgsm.analyze(problem, oakley_fn, jnp.asarray(X_dg))
 print(dgsm_result)
 ```

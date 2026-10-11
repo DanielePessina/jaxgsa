@@ -76,13 +76,12 @@ The steps:
 
 1. Declare the marginal distribution of each input with `Problem.from_dict`.
 2. Build the training design with `sampling.monte_carlo` and evaluate the
-   model on it. The training design is independent even though the analysis is
-   correlated. See
-   [the training design must be independent](#the-training-design-must-be-independent)
-   for why.
+   model on it. This example uses an independent design for broad coverage.
+   Rows drawn from the analysis distribution also work. See
+   [training data](#training-data-must-cover-the-analysis-distribution).
 3. Declare the dependency structure with `with_correlation`. `analyze` reads
-   `problem.correlation` by default. Passing a `(D, D)` matrix as
-   `correlation=` overrides the declaration for one call.
+   `problem.correlation`. It has no `correlation=` argument, so the problem is
+   the only place the dependence lives.
 4. Call `vkoga.analyze` with the problem, the inputs, the outputs, and a JAX
    `key`. The key is required: the index estimate is Monte-Carlo against the
    surrogate, so there is randomness to seed.
@@ -105,7 +104,7 @@ problem = jaxgsa.Problem.from_dict(
     }
 )
 
-# Independent, space-filling training design. Any (X, Y) pairs work.
+# Independent training design for broad coverage of the input space.
 X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, 2048, seed=0))
 Y = X @ jnp.array([2.0, 1.0, 0.5])
 
@@ -132,24 +131,24 @@ print("S_IU:", np.round(result.S_IU, 3))
 jaxgsa.vkoga.analyze
   problem: D=3 (x1, x2, x3)
     marginals: gaussian=3
-    correlation: correlated (Gaussian copula)
+    dependence: gaussian copula
     output: N=2048 runs, T=1 x K=1 output slice
     invalid: none found in 2048 rows (policy 'raise')
   timing:
-    fit + compute: 5.96 s
+    fit + compute: 14.7 s
     n_centers: 300
     gamma: 7.533
     ridge: 5.995e-05
     batch_size: auto (resolved from the memory budget)
   results: top 3 of 3 parameters by S_TC
-    1. x1  S_TC=0.8824
-    2. x2  S_TC=0.6307
+    1. x1  S_TC=0.8827
+    2. x2  S_TC=0.6311
     3. x3  S_TC=0.03245
-S_TC: [0.882 0.631 0.032]
-S_TU: [0.341 0.085 0.034]
+S_TC: [0.883 0.631 0.032]
+S_TU: [0.34  0.085 0.034]
 S_U:  [0.337 0.083 0.033]
 S_C:  [ 0.546  0.548 -0.   ]
-S_IU: [0.004 0.002 0.001]
+S_IU: [0.003 0.002 0.001]
 ```
 
 Almost all of that time is the hyperparameter search. The default run
@@ -162,7 +161,7 @@ the next call and the search disappears.
 ## Reading the five indices
 
 - `x1` and `x2` both look important (`S_TC` 0.88 and 0.63), but neither is
-  individually necessary (`S_TU` 0.34 and 0.08). They share correlated
+  individually necessary (`S_TU` 0.34 and 0.09). They share correlated
   variance. Each explains a large slice of the output, but most of that slice
   is also reachable through the other. So measuring either one more accurately
   pays off, while fixing either one and leaving the other free does not.
@@ -170,7 +169,7 @@ the next call and the search disappears.
   correlation-borne part. It is symmetric here because the correlation is what
   carries it. `x3` is uncorrelated, so it has none. A negative `S_C` is a valid
   reading, not a bug: it is a correlation working against a direct effect.
-- `S_IU` is at most 0.004, near zero for every parameter, as it must be. The
+- `S_IU` is at most 0.003, near zero for every parameter, as it must be. The
   model is additive, so there are no independent interactions to find. `S_IU`
   is never negative, because it is `S_TU - S_U` and `S_U` is clipped to `S_TU`
   (see below).
@@ -198,89 +197,38 @@ matches. The residual gap is surrogate error plus Monte-Carlo noise. Raise
 `n_outer`, `n_inner` or `n_variance`, which only touch the cheap surrogate, or
 raise the training sample size, to shrink it.
 
-## The training design must be independent
+<a id="train-on-an-independent-design"></a>
+<a id="the-training-design-must-be-independent"></a>
+<a id="training-data-must-cover-the-target-distribution"></a>
 
-This is the mistake that costs the most, and the reason is worth spelling out.
+## Training data must cover the analysis distribution
 
-`S_TU` conditions on the other parameters and then resamples `X_i` across its
-whole marginal. Those resampled points are, by construction, off the ridge that
-a correlated sample concentrates on. If the surrogate only ever saw correlated
-data, it has no information there and is extrapolating at exactly the points
-the estimator leans on hardest. Every index then inherits that extrapolation
-error.
+The analysis distribution is the one in `problem`: independent, a Gaussian
+copula, or a custom sampler. The surrogate must be accurate wherever that
+distribution puts its mass. The training rows are a separate choice.
 
-`analyze` checks the training design and warns:
+Both nested estimators draw from conditionals of the joint distribution.
+`S_TU` redraws an input given the others, and `S_TC` redraws the others given
+one input. Neither one draws an input from its whole marginal while the others
+stay fixed. So every surrogate query lies where the joint distribution puts
+mass. Training rows drawn from the analysis distribution therefore work.
 
-```python
-ridge_problem = jaxgsa.Problem.from_dict(
-    {
-        "x1": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
-        "x2": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
-    }
-).with_correlation([[1.0, 0.99], [0.99, 1.0]])
-X_ridge = jnp.asarray(jaxgsa.sampling.monte_carlo(ridge_problem, 4096, seed=0))
-Y_ridge = (X_ridge[:, 0] - X_ridge[:, 1]) ** 2
+An independent design is a safe default in two cases. Use it when the
+correlation is not fixed yet. Use it also when you reuse one fit under several
+correlations. Avoid training data that misses regions the analysis covers. For
+example, do not train under a correlation of +0.8 and analyse under -0.8.
 
-bad = jaxgsa.vkoga.analyze(
-    ridge_problem, X_ridge, Y_ridge, key=jax.random.key(0), verbose=False
-)
-print("cv_rmse:", round(float(bad.cv_rmse), 4), " std(Y):", round(float(np.std(Y_ridge)), 4))
-print("S_TU:", np.round(bad.S_TU, 3))
-```
+One measured case: the Ishigami function, a Gaussian copula with
+`rho_ab = 0.8` and `rho_bc = -0.4`, 400 training rows, 4 seeds. The reference
+was Kucherenko at 2^16 base points. The RMSE of the indices was 0.007 when the
+surrogate trained on copula draws and 0.010 when it trained on independent
+draws.
 
-```
-JaxgsaWarning: jaxgsa.vkoga: the training X is itself correlated (fitted latent
-correlation between 'x1' and 'x2' is 0.99). The estimator needs an independent,
-space-filling training design even for a correlated analysis: S_TU conditions on
-the other parameters and then resamples each X_i across its whole marginal, so a
-surrogate trained only on correlated data extrapolates for exactly those
-conditional draws. Train on an independent design; the dependence structure
-belongs in problem.correlation (or the correlation= argument), not in the
-training data.
-
-cv_rmse: 0.007  std(Y): 0.0276
-S_TU: [1.008 1.001]
-```
-
-`S_TU` is a variance fraction, so 1.008 and 1.001 are impossible. That is the
-useful part of this example: the failure is loud only because the true answer
-happens to sit near the boundary. Note what did *not* catch it. `cv_rmse` is
-0.007, well inside the surrogate warning threshold, because the held-out folds
-come from the same correlated ridge as the training rows. Cross-validation
-scores the surrogate where the data is, and the problem is where the data is
-not.
-
-Kucherenko, which runs the model rather than a surrogate, gives the reference:
-
-```python
-ks = jaxgsa.kucherenko.sample(ridge_problem, 65536, seed=0, verbose=False)
-kr = jaxgsa.kucherenko.analyze(ks, (ks.samples[:, 0] - ks.samples[:, 1]) ** 2, verbose=False)
-print("S1:", np.round(kr.S1, 3), " ST:", np.round(kr.ST, 3))
-```
-
-```
-S1: [0. 0.]  ST: [0.999 1.   ]
-```
-
-The fix is to train on an independent design and put the dependence in the
-problem, not in the data:
-
-```python
-X_indep = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, 2048, seed=0))
-Y_indep = X_indep @ jnp.array([2.0, 1.0, 0.5])
-good = jaxgsa.vkoga.analyze(problem_corr, X_indep, Y_indep, key=jax.random.key(0), verbose=False)
-print("S_TU:", np.round(good.S_TU, 3))
-```
-
-```
-S_TU: [0.341 0.085 0.034]
-```
-
-That is the scalar example from the top of this page, and it matches the closed
-form. If your data is observational and you cannot re-run the model, VKOGA is
-being asked a question it cannot answer from that sample. Use
-[Kucherenko](/examples/kucherenko) instead, or read only `S_TC`, which is
-evaluated on the correlated measure the training data already covers.
+Cross-validation on the training rows can miss a mismatch between the training
+and analysis distributions. Check the accuracy where the integration places its
+mass. Finite integration estimates can slightly leave `[0, 1]`. That alone does
+not show extrapolation. Raise the integration sizes and assess the surrogate
+error separately.
 
 ## Two more things that can go wrong
 
@@ -367,36 +315,31 @@ R_fit = jaxgsa.sampling.fit_correlation(problem, X_corr)
 emp = jaxgsa.vkoga.analyze(
     problem.with_correlation(R_fit), X_corr, Y_corr, key=jax.random.key(0), verbose=False
 )
-print(np.round(emp.correlation, 3))
+print(np.round(emp.problem.correlation, 3))
 print("S_TC:", np.round(emp.S_TC, 3))
 print("S_TU:", np.round(emp.S_TU, 3))
 ```
 
 ```
-JaxgsaWarning: jaxgsa.vkoga: the training X is itself correlated (fitted latent
-correlation between 'x1' and 'x2' is 0.61). ...
-
 [[1.    0.609 0.041]
  [0.609 1.    0.003]
  [0.041 0.003 1.   ]]
-S_TC: [0.889 0.632 0.044]
-S_TU: [0.328 0.082 0.033]
+S_TC: [0.889 0.633 0.044]
+S_TU: [0.328 0.082 0.032]
 ```
 
 The fit recovers `rho_12 = 0.6` as 0.609, and the two entries that should be
 zero come out at 0.041 and 0.003. That is sampling scatter at N=2048.
 
-This run trips the training-design warning, and it should: the training sample
-and the copula are the same correlated data. `S_TC` is still meaningful,
-because it is evaluated on the measure the sample covers. `S_TU` lands within
-0.007 of the closed form here, which is luck you should not count on: the model
-is linear, and a linear response is the one case where extrapolating off the
-ridge costs nothing. Treat `S_TU`, `S_U` and `S_IU` from a run like this as
-unverified, or move to [Kucherenko](/examples/kucherenko).
+The training rows follow the same correlated distribution used for
+integration. Both `S_TC` and `S_TU` agree with the closed form to within 0.011
+here. As with any surrogate estimate, check predictive accuracy over the
+analysis support and integration convergence. Correlation in the training data
+alone does not invalidate these indices.
 
 ## Independent inputs collapse to S1 / ST
 
-When neither the problem nor the call declares a correlation, the five indices
+When the problem declares no correlation, the five indices
 reduce to the familiar picture. `S_TC` is the first-order Sobol' index, `S_TU`
 is the total index, and `S_C` vanishes.
 
@@ -407,7 +350,7 @@ print("S_TC:", np.round(indep.S_TC, 3))
 print("S_TU:", np.round(indep.S_TU, 3))
 print("S_C: ", np.round(indep.S_C, 4))
 print("analytical S1 = ST:", np.round(a**2 / (a**2).sum(), 3))
-print("is_correlated:", indep.is_correlated)
+print("dependence:", indep.dependence)
 ```
 
 ```
@@ -415,7 +358,7 @@ S_TC: [0.762 0.189 0.047]
 S_TU: [0.77  0.192 0.049]
 S_C:  [0.0008 0.0003 0.    ]
 analytical S1 = ST: [0.762 0.19  0.048]
-is_correlated: False
+dependence: independent
 ```
 
 `S_TC` and `S_TU` now agree with each other and with the analytic answer to
@@ -464,41 +407,37 @@ training design.
 
 ## xarray export
 
-`VKOGAResult.to_dataset()` converts results to a labeled `xarray.Dataset`,
-including the copula matrix on its own pair of parameter dimensions.
+`VKOGAResult.to_dataset()` converts results to a labeled `xarray.Dataset`.
 
 ```python
 print(result.to_dataset())
 ```
 
 ```
-<xarray.Dataset> Size: 280B
-Dimensions:      (param: 3, param_i: 3, param_j: 3)
+<xarray.Dataset> Size: 176B
+Dimensions:             (param: 3)
 Coordinates:
-  * param        (param) <U2 24B 'x1' 'x2' 'x3'
-  * param_i      (param_i) <U2 24B 'x1' 'x2' 'x3'
-  * param_j      (param_j) <U2 24B 'x1' 'x2' 'x3'
+  * param               (param) <U2 24B 'x1' 'x2' 'x3'
 Data variables:
-    S_TC         (param) float64 24B 0.8824 0.6307 0.03245
-    S_TU         (param) float64 24B 0.3406 0.08459 0.03393
-    S_U          (param) float64 24B 0.3368 0.08298 0.03268
-    S_C          (param) float64 24B 0.5456 0.5477 -0.0002319
-    S_IU         (param) float64 24B 0.00376 0.001608 0.001243
-    variance     float64 8B 7.462
-    rmse         float64 8B 0.1596
-    correlation  (param_i, param_j) float64 72B 1.0 0.6 0.0 0.6 ... 0.0 0.0 1.0
+    S_TC                (param) float64 24B 0.8827 0.6311 0.03245
+    S_TU                (param) float64 24B 0.3401 0.0846 0.03391
+    S_U                 (param) float64 24B 0.3366 0.08286 0.03268
+    S_C                 (param) float64 24B 0.5462 0.5482 -0.0002369
+    S_IU                (param) float64 24B 0.003461 0.001739 0.001227
+    variance            float64 8B 7.462
+    rmse                float64 8B 0.1596
+    cv_rmse             float64 8B 0.2133
+    explained_variance  float64 8B 0.9952
 Attributes:
-    n_centers:      300
-    gamma:          7.533150951473334
-    ridge:          5.994842503189409e-05
-    is_correlated:  True
-    cv_rmse:        0.2133223694760349
+    n_centers:   300
+    gamma:       7.533150951473334
+    ridge:       5.994842503189409e-05
+    dependence:  gaussian
 ```
 
 The indices sit on the `param` dimension, so you can select by parameter name
 instead of by position (`ds.S_TC.sel(param="x1")`). The correlation matrix
-needs two parameter axes, which is why `param_i` and `param_j` appear alongside
-`param`. For time-series results, pass `time_coords` to label the time
+is not in the dataset. Read it from `result.problem.correlation`. For time-series results, pass `time_coords` to label the time
 dimension.
 
 ## Multi-output
@@ -527,21 +466,21 @@ print("S_TC:", np.round(multi.S_TC, 3))
 jaxgsa.vkoga.analyze
   problem: D=3 (x1, x2, x3)
     marginals: gaussian=3
-    correlation: correlated (Gaussian copula)
+    dependence: gaussian copula
     output: N=2048 runs, T=1 x K=2 output slices
     invalid: none found in 2048 rows (policy 'raise')
   timing:
-    fit + compute: 4.65 s
+    fit + compute: 12.32 s
     n_centers: 300
     gamma: 7.533
     ridge: 0.001292
     batch_size: auto (resolved from the memory budget)
   results: top 3 of 3 parameters by S_TC, mean over 2 output slices
-    1. x1  S_TC=0.6766
-    2. x2  S_TC=0.5451
-    3. x3  S_TC=0.1571
-S_TC: [[0.882 0.631 0.032]
- [0.471 0.459 0.282]]
+    1. x1  S_TC=0.6773
+    2. x2  S_TC=0.5457
+    3. x3  S_TC=0.157
+S_TC: [[0.883 0.631 0.032]
+ [0.472 0.46  0.282]]
 ```
 
 Two outputs give a `(2, 3)` index array: one row of three parameter indices per
@@ -553,39 +492,29 @@ index. Read the rows.
 
 ## No Shapley effects
 
-`VKOGAResult.shapley()` raises `NotImplementedError` on purpose:
-
-```python
-result.shapley()
-```
-
-```
-NotImplementedError: VKOGAResult has no term-wise variance decomposition, so
-Shapley effects are undefined for it; use jaxgsa.hdmr or jaxgsa.pce instead
-```
-
-Shapley effects allocate variance across parameter subsets. A kernel expansion
-is a sum over centres instead, and every centre involves every parameter, so
-there is no membership matrix to allocate from. Use
-[`jaxgsa.hdmr`](/examples/hdmr), whose ANCOVA terms are labelled and which
-supports `shapley(include_correlative=True)` for dependent inputs, or
-[`jaxgsa.pce`](/examples/pce).
+`VKOGAResult` has no `shapley()` method. Shapley effects allocate variance
+across parameter subsets. A kernel expansion is a sum over centres instead,
+and every centre involves every parameter, so there is no membership matrix to
+allocate from. Use [`jaxgsa.hdmr`](/examples/hdmr), whose ANCOVA terms are
+labelled and which supports `shapley(include_correlative=True)` for dependent
+inputs, or [`jaxgsa.pce`](/examples/pce).
 
 ## Shape rules
 
-| `Y` shape | `S_TC` / `S_TU` / `S_U` / `S_C` / `S_IU` | `variance` / `rmse` |
+| `Y` shape | `S_TC` / `S_TU` / `S_U` / `S_C` / `S_IU` | `variance` / `rmse` / `cv_rmse` / `explained_variance` |
 |---|---|---|
 | `(N,)` | `(D,)` | `()` |
 | `(N, K)` | `(K, D)` | `(K,)` |
 | `(N, T, K)` | `(T, K, D)` | `(T, K)` |
 
-D is always the last axis of the index arrays. `correlation` is a property of
-the input model, not of any output slice, so it stays `(D, D)` throughout.
+D is always the last axis of the index arrays. `S1` and `ST` are read-only
+aliases of `S_TC` and `S_TU`.
 
 ## Practical caveats
 
-- Train on an independent, space-filling design, even when the analysis is
-  correlated. See [above](#the-training-design-must-be-independent).
+- Training data must cover the analysis distribution well enough for accurate
+  surrogate predictions. Independent and correlated designs are both allowed;
+  see [above](#training-data-must-cover-the-analysis-distribution).
 - Use float64. The normal equations square the condition number of the cross
   kernel, which float32 cannot carry for small `gamma`. Cross validation
   partly self-corrects, since the scores are computed in the same arithmetic

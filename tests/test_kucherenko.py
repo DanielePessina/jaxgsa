@@ -13,6 +13,7 @@ Tolerances are set from the measured estimator error at the test sample sizes
 
 from __future__ import annotations
 
+import functools
 import warnings
 
 import jax
@@ -22,11 +23,10 @@ import pytest
 import jaxgsa
 from jaxgsa import JaxgsaWarning
 from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa.benchmarks import ishigami
 from jaxgsa.problem import Problem
 
-# Closed-form linear-Gaussian reference, shared with test_vkoga.py and
-# test_correlated_agreement.py.
+# Closed-form linear-Gaussian reference, shared with test_vkoga.py. The
+# correlated and Ishigami designs are session fixtures (``_fixtures_dependence``).
 from _linear_gaussian import (  # isort: skip
     A_COEF,
     A_COEF_ASYM,
@@ -39,26 +39,17 @@ from _linear_gaussian import (  # isort: skip
 )
 
 
-@pytest.fixture(scope="module")
-def correlated_result():
-    """Kucherenko analysis of the correlated linear-Gaussian model."""
-    problem = GAUSS_PROBLEM.with_correlation(R_GAUSS)
-    ks = jaxgsa.kucherenko.sample(problem, 4096, seed=1)
-    Y = ks.samples @ A_COEF
-    return jaxgsa.kucherenko.analyze(ks, Y)
-
-
 # --- closed-form validation --------------------------------------------------
 
 
-def test_closed_form_linear_gaussian(correlated_result):
+def test_closed_form_linear_gaussian(lg_corr_kucherenko):
     S1_true, ST_true, var_y = analytic_indices(A_COEF, R_GAUSS)
-    np.testing.assert_allclose(np.asarray(correlated_result.S1), S1_true, atol=5e-3)
-    np.testing.assert_allclose(np.asarray(correlated_result.ST), ST_true, atol=5e-3)
-    np.testing.assert_allclose(float(np.asarray(correlated_result.variance)), var_y, rtol=2e-2)
-    assert correlated_result.is_correlated
+    np.testing.assert_allclose(np.asarray(lg_corr_kucherenko.S1), S1_true, atol=5e-3)
+    np.testing.assert_allclose(np.asarray(lg_corr_kucherenko.ST), ST_true, atol=5e-3)
+    np.testing.assert_allclose(float(np.asarray(lg_corr_kucherenko.variance)), var_y, rtol=2e-2)
+    assert lg_corr_kucherenko.dependence == "gaussian"
     # Under correlation ST < S1 is the expected picture for coupled inputs.
-    assert float(correlated_result.ST[0]) < float(correlated_result.S1[0])
+    assert float(lg_corr_kucherenko.ST[0]) < float(lg_corr_kucherenko.S1[0])
 
 
 def test_asymmetric_correlation_structure():
@@ -69,7 +60,7 @@ def test_asymmetric_correlation_structure():
     permuted onto itself, so any index landing on the wrong parameter shows.
     """
     S1_true, ST_true, var_y = analytic_indices(A_COEF_ASYM, R_ASYM)
-    ks = jaxgsa.kucherenko.sample(ASYM_PROBLEM.with_correlation(R_ASYM), 4096, seed=1)
+    ks = jaxgsa.kucherenko.sample(ASYM_PROBLEM.with_correlation(R_ASYM), base_n=4096, seed=1)
     result = jaxgsa.kucherenko.analyze(ks, ks.samples @ A_COEF_ASYM)
     # Measured errors are 7e-4 (S1) and 2e-5 (ST); the budgets keep headroom.
     np.testing.assert_allclose(np.asarray(result.S1), S1_true, atol=5e-3)
@@ -88,7 +79,7 @@ def test_large_output_mean_does_not_corrupt_the_indices():
     representation of Y + 1e8 does not mask the estimator behaviour.
     """
     problem = GAUSS_PROBLEM.with_correlation(R_GAUSS)
-    ks = jaxgsa.kucherenko.sample(problem, 2048, seed=1)
+    ks = jaxgsa.kucherenko.sample(problem, base_n=2048, seed=1)
     Y = np.asarray(ks.samples @ A_COEF, dtype=np.float64)
     with jax.enable_x64():
         base = jaxgsa.kucherenko.analyze(ks, Y)
@@ -104,7 +95,7 @@ def test_large_output_mean_does_not_corrupt_the_indices():
 def test_design_block_structure():
     """The joint block is shared; each conditional block keeps its fixed part."""
     problem = GAUSS_PROBLEM.with_correlation(R_GAUSS)
-    ks = jaxgsa.kucherenko.sample(problem, 256, seed=0)
+    ks = jaxgsa.kucherenko.sample(problem, base_n=256, seed=0)
     n, D = ks.base_n, ks.n_params
     assert ks.n_runs == n * (2 * D + 1)
     assert ks.n_expanded == ks.n_runs
@@ -127,7 +118,7 @@ def test_design_block_structure():
 def test_conditional_blocks_follow_the_copula():
     """Redrawn columns must reproduce the declared conditional correlation."""
     problem = GAUSS_PROBLEM.with_correlation(R_GAUSS)
-    ks = jaxgsa.kucherenko.sample(problem, 8192, seed=5)
+    ks = jaxgsa.kucherenko.sample(problem, base_n=8192, seed=5)
     n = ks.base_n
     X = ks.samples
     # In the first-order block for x1, x2 is redrawn given x1: the pair
@@ -141,16 +132,65 @@ def test_conditional_blocks_follow_the_copula():
     np.testing.assert_allclose(first_x1.std(axis=0), 1.0, atol=0.05)
 
 
-def test_sample_size_rounds_up_to_power_of_two():
-    ks = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 1000, seed=0)
-    assert ks.base_n == 1024
+def test_n_samples_is_a_run_budget_rounded_up_to_a_power_of_two_base():
+    """n_samples is the minimum number of runs, as in sobol.sample."""
+    ks = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 1000, seed=0, verbose=False)
+    # D=3 gives 7 blocks: 143 base points needed, rounded up to 256.
+    assert ks.base_n == 256
+    assert ks.n_runs == 256 * 7 >= 1000
+    exact = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 256 * 7, seed=0, verbose=False)
+    assert exact.base_n == 256
+    one_more = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 256 * 7 + 1, seed=0, verbose=False)
+    assert one_more.base_n == 512
+
+
+def test_base_n_sets_the_base_points_exactly_and_gives_the_same_design():
+    by_budget = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 1000, seed=3, verbose=False)
+    by_base = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, base_n=256, seed=3, verbose=False)
+    np.testing.assert_array_equal(by_budget.samples, by_base.samples)
+
+
+@pytest.mark.parametrize("sampler", ["kucherenko", "sobol"])
+def test_exactly_one_of_n_samples_and_base_n(sampler):
+    sample = getattr(jaxgsa, sampler).sample
+    with pytest.raises(ValueError, match="n_samples.*base_n"):
+        sample(GAUSS_PROBLEM, verbose=False)
+    with pytest.raises(ValueError, match="n_samples.*base_n"):
+        sample(GAUSS_PROBLEM, 1024, base_n=128, verbose=False)
+
+
+def test_base_n_must_be_a_power_of_two():
+    with pytest.raises(ValueError, match="power of 2"):
+        jaxgsa.kucherenko.sample(GAUSS_PROBLEM, base_n=100, verbose=False)
+
+
+def test_tiny_base_n_warns_about_the_floor():
+    with pytest.warns(JaxgsaWarning, match="floor of 16"):
+        jaxgsa.kucherenko.sample(GAUSS_PROBLEM, base_n=8, seed=0, verbose=False)
+
+
+def test_verbose_line_names_the_request_only_for_a_budget(monkeypatch):
+    from jaxgsa._core import verbose as _verbose
+
+    lines: list[str] = []
+    monkeypatch.setattr(_verbose, "emit", lines.append)
+    correlated = GAUSS_PROBLEM.with_correlation(R_GAUSS)
+    jaxgsa.kucherenko.sample(correlated, 1000, seed=0)
+    assert "requested_runs>=1000" in lines[-1]
+    jaxgsa.kucherenko.sample(correlated, base_n=256, seed=0)
+    assert "requested_runs" not in lines[-1]
+
+
+def test_analyze_refuses_a_problem_with_a_pointer_to_given_data_methods():
+    with pytest.raises(TypeError, match="KucherenkoSamples.*not a Problem.*jaxgsa.rank"):
+        jaxgsa.kucherenko.analyze(GAUSS_PROBLEM, np.zeros(8))  # type: ignore[arg-type]
 
 
 def test_correlated_problem_is_accepted():
     """kucherenko.sample is exempt from the correlated-design guard."""
     problem = GAUSS_PROBLEM.with_correlation(R_GAUSS)
-    ks = jaxgsa.kucherenko.sample(problem, 64, seed=0)
-    assert ks.problem.has_correlated_inputs
+    ks = jaxgsa.kucherenko.sample(problem, base_n=64, seed=0)
+    assert ks.problem.dependence == "gaussian"
     # The guarded samplers refuse the same problem.
     with pytest.raises(ValueError, match="independent"):
         jaxgsa.sobol.sample(problem, 64, verbose=False)
@@ -164,10 +204,10 @@ def test_an_independent_problem_warns_and_quotes_the_cheaper_design():
     base_n(D+2). The warning must carry all three run counts, because the
     point of it is the budget comparison rather than the fact itself.
     """
-    D = GAUSS_PROBLEM.num_vars
+    D = GAUSS_PROBLEM.n_params
     base_n = 64
-    with pytest.warns(JaxgsaWarning, match="problem.correlation is None") as caught:
-        jaxgsa.kucherenko.sample(GAUSS_PROBLEM, base_n, seed=0)
+    with pytest.warns(JaxgsaWarning, match="the problem declares no dependence") as caught:
+        jaxgsa.kucherenko.sample(GAUSS_PROBLEM, base_n=base_n, seed=0)
     message = str(caught[0].message)
     assert f"{base_n * (2 * D + 1)} runs" in message
     assert f"{base_n * (D + 2)} runs" in message
@@ -177,33 +217,33 @@ def test_an_independent_problem_warns_and_quotes_the_cheaper_design():
     correlated = GAUSS_PROBLEM.with_correlation(R_GAUSS)
     with warnings.catch_warnings(record=True) as quiet:
         warnings.simplefilter("always")
-        jaxgsa.kucherenko.sample(correlated, base_n, seed=0)
-    assert [w for w in quiet if "problem.correlation is None" in str(w.message)] == []
+        jaxgsa.kucherenko.sample(correlated, base_n=base_n, seed=0)
+    assert [w for w in quiet if "the problem declares no dependence" in str(w.message)] == []
 
 
-def test_sampler_validation_errors():
-    with pytest.raises(ValueError, match="at least 2 parameters"):
-        jaxgsa.kucherenko.sample(Problem(names=("x",), bounds=((0.0, 1.0),)), 64)
-    with pytest.raises(ValueError, match="n_samples"):
-        jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 1)
-
-
-def test_seed_with_scramble_false_raises():
-    """Tier T4: the inert seed/scramble combination is refused.
-
-    The unscrambled Sobol' sequence is deterministic, so a seed passed with
-    ``scramble=False`` would do nothing. The policy is to raise on a setting
-    that cannot do what it says, never to ignore it silently.
-    """
-    with pytest.raises(ValueError, match="scramble=False"):
-        jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, scramble=False, seed=0)
+@pytest.mark.parametrize(
+    "problem, kwargs, message",
+    [
+        (Problem(names=("x",), bounds=((0.0, 1.0),)), {"n_samples": 64}, "at least 2 parameters"),
+        (GAUSS_PROBLEM, {"n_samples": 1}, "n_samples"),
+        # Tier T4: the inert seed/scramble combination is refused. The
+        # unscrambled Sobol' sequence is deterministic, so a seed passed with
+        # ``scramble=False`` would do nothing. The policy is to raise on a
+        # setting that cannot do what it says, never to ignore it silently.
+        (GAUSS_PROBLEM, {"n_samples": 64, "scramble": False, "seed": 0}, "scramble=False"),
+    ],
+    ids=["one-parameter", "too-few-samples", "seed-with-scramble-false"],
+)
+def test_sampler_guards(problem, kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        jaxgsa.kucherenko.sample(problem, **kwargs, verbose=False)
 
 
 # --- analyze contracts --------------------------------------------------------
 
 
 def test_output_shape_contract():
-    ks = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 128, seed=0)
+    ks = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, base_n=128, seed=0)
     y0 = ks.samples @ A_COEF
     Y2 = np.stack([y0, 2.0 * y0, 1.0 - y0], axis=-1)  # (N, K=3)
     Y3 = np.stack([Y2, Y2 + 0.5], axis=1)  # (N, T=2, K=3)
@@ -216,19 +256,28 @@ def test_output_shape_contract():
 
 
 def test_row_count_mismatch_raises():
-    ks = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 128, seed=0)
+    ks = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, base_n=128, seed=0)
     with pytest.raises(ValueError):
         jaxgsa.kucherenko.analyze(ks, np.zeros(ks.n_runs - 1))
 
 
 def test_zero_variance_slice_warns_and_yields_nan():
-    ks = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 128, seed=0)
+    ks = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, base_n=128, seed=0)
     Y = np.stack([ks.samples @ A_COEF, np.ones(ks.n_runs)], axis=-1)
     with pytest.warns(UserWarning, match="zero variance"):
         result = jaxgsa.kucherenko.analyze(ks, Y)
     assert np.all(np.isfinite(np.asarray(result.S1)[0]))
     assert np.all(np.isnan(np.asarray(result.S1)[1]))
     assert np.all(np.isnan(np.asarray(result.ST)[1]))
+
+
+@functools.cache
+def _linear_gaussian_design(n: int):
+    """A linear-Gaussian design and its finite outputs, one row per run (read-only)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", JaxgsaWarning)
+        ks = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, base_n=n, seed=0, verbose=False)
+    return ks, np.asarray(ks.samples @ A_COEF, dtype=np.float64)
 
 
 class TestOnInvalidPolicy:
@@ -244,9 +293,9 @@ class TestOnInvalidPolicy:
     N = 128
 
     def _design_and_Y(self):
-        """A linear-Gaussian design plus its finite outputs, one row per run."""
-        ks = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, self.N, seed=0)
-        return ks, np.asarray(ks.samples @ A_COEF, dtype=np.float64)
+        """A linear-Gaussian design plus a fresh copy of its finite outputs."""
+        ks, Y = _linear_gaussian_design(self.N)
+        return ks, Y.copy()
 
     def _rows_of(self, ks, base_point: int) -> list[int]:
         """Return every row that the given base point occupies."""
@@ -328,7 +377,7 @@ class TestOnInvalidPolicy:
 
 def test_save_load_round_trip(tmp_path):
     problem = GAUSS_PROBLEM.with_correlation(R_GAUSS)
-    ks = jaxgsa.kucherenko.sample(problem, 128, seed=0)
+    ks = jaxgsa.kucherenko.sample(problem, base_n=128, seed=0)
     path = tmp_path / "design.npz"
     ks.save(path)
     loaded = jaxgsa.kucherenko.KucherenkoSamples.load(path)
@@ -346,19 +395,12 @@ def test_save_load_round_trip(tmp_path):
 # --- bootstrap confidence intervals ------------------------------------------
 
 
-def _small_design(n=512, seed=2):
-    """Return an evaluated Ishigami design, small enough to resample quickly."""
-    problem = ishigami.PROBLEM
-    ks = jaxgsa.kucherenko.sample(problem, n, seed=seed)
-    return ks, ishigami.evaluate(ks.samples)
-
-
 class TestBootstrap:
     """Base-point resampling, the one unit this design can drop safely."""
 
-    def test_no_bootstrap_leaves_every_interval_unset_and_key_is_required(self):
+    def test_no_bootstrap_leaves_every_interval_unset_and_key_is_required(self, kuch_ishigami_512):
         """The plainest call reports no interval and no CI record."""
-        ks, Y = _small_design()
+        ks, Y = kuch_ishigami_512
         result = jaxgsa.kucherenko.analyze(ks, Y)
         assert result.ci is None
         assert result.S1_conf is None
@@ -366,9 +408,9 @@ class TestBootstrap:
         with pytest.raises(ValueError, match="key is required"):
             jaxgsa.kucherenko.analyze(ks, Y, n_bootstrap=8)
 
-    def test_intervals_bracket_the_estimate_and_variance_has_none(self):
+    def test_intervals_bracket_the_estimate_and_variance_has_none(self, kuch_ishigami_512):
         """Both indices get an interval; the denominator deliberately does not."""
-        ks, Y = _small_design()
+        ks, Y = kuch_ishigami_512
         result = jaxgsa.kucherenko.analyze(ks, Y, n_bootstrap=64, key=jax.random.key(1))
         assert result.ci.n_bootstrap == 64
         assert result.ci.level == 0.95
@@ -381,7 +423,9 @@ class TestBootstrap:
             assert (conf[0] <= point + 1e-5).all()
             assert (point <= conf[1] + 1e-5).all()
 
-    def test_a_replicate_keeps_each_conditional_block_beside_its_base_point(self):
+    def test_a_replicate_keeps_each_conditional_block_beside_its_base_point(
+        self, kuch_ishigami_512
+    ):
         """The unit is the base point, and this is what says so numerically.
 
         A replicate that resampled rows independently in each block would
@@ -390,7 +434,7 @@ class TestBootstrap:
         pair, so a misaligned replicate inflates it towards
         ``2 * V(Y) / V(Y) = 2``. Every replicate here stays in range.
         """
-        ks, Y = _small_design()
+        ks, Y = kuch_ishigami_512
         result = jaxgsa.kucherenko.analyze(
             ks, Y, n_bootstrap=32, key=jax.random.key(2), keep_replicates=True
         )
@@ -399,9 +443,9 @@ class TestBootstrap:
         assert (ST_draws >= -0.05).all()
         assert (ST_draws <= 1.2).all()
 
-    def test_gaussian_endpoints_are_symmetric_about_the_estimate(self):
+    def test_gaussian_endpoints_are_symmetric_about_the_estimate(self, kuch_ishigami_512):
         """T0: the normal-approximation interval is ``estimate +/- z*sd``."""
-        ks, Y = _small_design()
+        ks, Y = kuch_ishigami_512
         result = jaxgsa.kucherenko.analyze(
             ks, Y, n_bootstrap=64, ci_method="gaussian", key=jax.random.key(4)
         )
@@ -409,17 +453,17 @@ class TestBootstrap:
         point = np.asarray(result.S1)
         np.testing.assert_allclose(conf[1] - point, point - conf[0], rtol=1e-5)
 
-    def test_a_time_series_keeps_its_layout(self):
+    def test_a_time_series_keeps_its_layout(self, kuch_ishigami_512):
         """T4: an interval mirrors the output rank the caller passed."""
-        ks, Y = _small_design(n=256)
+        ks, Y = kuch_ishigami_512
         Y_ts = np.stack([Y, 2.0 * Y], axis=-1)[:, None, :]  # (n_runs, 1, 2)
         result = jaxgsa.kucherenko.analyze(ks, Y_ts, n_bootstrap=16, key=jax.random.key(6))
         assert np.asarray(result.S1).shape == (1, 2, ks.n_params)
         assert np.asarray(result.S1_conf).shape == (2, 1, 2, ks.n_params)
 
-    def test_the_dataset_carries_the_endpoints(self):
+    def test_the_dataset_carries_the_endpoints(self, kuch_ishigami_512):
         """An interval is only reported if it also exports."""
-        ks, Y = _small_design(n=256)
+        ks, Y = kuch_ishigami_512
         result = jaxgsa.kucherenko.analyze(ks, Y, n_bootstrap=8, key=jax.random.key(7))
         ds = result.to_dataset()
         for name in ("S1", "ST"):

@@ -23,7 +23,7 @@ Example::
     from jaxgsa import optimal_transport
     from jaxgsa.sampling import monte_carlo
 
-    X = monte_carlo(problem, n=5000, seed=42)
+    X = monte_carlo(problem, n_samples=5000, seed=42)
     Y = model(X)
     result = optimal_transport.analyze(problem, X, Y)
 
@@ -33,15 +33,16 @@ References:
     Science 71(5):3809-3828. doi:10.1287/mnsc.2023.01796.
 """
 
-from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.optimal_transport._analyze import analyze, indices
+from jaxgsa._core.invalid import InvalidUnit as _InvalidUnit
+from jaxgsa._core.registry import MethodSpec as _MethodSpec
+from jaxgsa._core.registry import register as _register
+from jaxgsa.optimal_transport._analyze import OTIndices, analyze, indices
 from jaxgsa.optimal_transport._result import OTResult
 
-__all__ = ["OTResult", "analyze", "indices"]
+__all__ = ["OTIndices", "OTResult", "analyze", "indices"]
 
-SPEC = register(
-    MethodSpec(
+_SPEC = _register(
+    _MethodSpec(
         name="optimal_transport",
         analyze=analyze,
         sample=None,
@@ -49,6 +50,6 @@ SPEC = register(
         correlation="accepts",
         categorical="accepts",
         bootstrap="n_bootstrap",
-        invalid_unit=InvalidUnit.ROW,
+        invalid_unit=_InvalidUnit.ROW,
     )
 )

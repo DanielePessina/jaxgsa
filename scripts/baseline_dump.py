@@ -45,6 +45,7 @@ from jaxgsa import (
     optimal_transport,
     pawn,
     pce,
+    rank,
     shapley,
     sobol,
     vkoga,
@@ -58,7 +59,7 @@ from jaxgsa.benchmarks import ishigami, sobol_g
 SEED = 20260818
 """The one seed used by every sampler, bootstrap and permutation test."""
 
-DEFAULT_OUT = Path(__file__).resolve().parent / "baseline" / "baseline-1.0.0.json"
+DEFAULT_OUT = Path(__file__).resolve().parent / "baseline" / "baseline-1.1.0.json"
 
 INLINE_ARRAY_LIMIT = 1024
 """Arrays with at most this many elements are written out element by element.
@@ -340,7 +341,7 @@ def _m_efast(case: Case) -> Any:
 
 
 def _m_kucherenko(case: Case) -> Any:
-    sr = kucherenko.sample(case.problem, n_samples=case.n, seed=SEED, verbose=False)
+    sr = kucherenko.sample(case.problem, base_n=case.n, seed=SEED, verbose=False)
     Y = case.model(jnp.asarray(sr.samples))
     return kucherenko.analyze(sr, Y, verbose=False)
 
@@ -353,7 +354,13 @@ def _m_borgonovo(case: Case, X: jax.Array, Y: jax.Array) -> Any:
 
 def _m_pawn(case: Case, X: jax.Array, Y: jax.Array) -> Any:
     return pawn.analyze(
-        case.problem, X, Y, n_bins=8, n_bootstrap=20, key=jax.random.key(SEED), verbose=False
+        case.problem, X, Y, n_classes=8, n_bootstrap=20, key=jax.random.key(SEED), verbose=False
+    )
+
+
+def _m_rank(case: Case, X: jax.Array, Y: jax.Array) -> Any:
+    return rank.analyze(
+        case.problem, X, Y, n_bootstrap=20, key=jax.random.key(SEED), verbose=False
     )
 
 
@@ -366,7 +373,7 @@ def _m_optimal_transport(case: Case, X: jax.Array, Y: jax.Array) -> Any:
         case.problem,
         X,
         Y,
-        n_partitions=8,
+        n_classes=8,
         n_bootstrap=10,
         dummy=True,
         key=jax.random.key(SEED),
@@ -388,7 +395,7 @@ def _m_optimal_transport_multivariate(case: Case, X: jax.Array, Y: jax.Array) ->
         X,
         Y,
         mode="multivariate",
-        n_partitions=8,
+        n_classes=8,
         n_bootstrap=10,
         dummy=True,
         key=jax.random.key(SEED),
@@ -407,7 +414,7 @@ def _m_optimal_transport_trajectory(case: Case, X: jax.Array, Y: jax.Array) -> A
         X,
         Y,
         mode="trajectory",
-        n_partitions=8,
+        n_classes=8,
         n_bootstrap=10,
         dummy=True,
         key=jax.random.key(SEED),
@@ -420,7 +427,7 @@ def _m_pce(case: Case, X: jax.Array, Y: jax.Array) -> Any:
 
 
 def _m_hdmr(case: Case, X: jax.Array, Y: jax.Array) -> Any:
-    return hdmr.analyze(case.problem, X, Y, maxorder=2, maxiter=50, verbose=False)
+    return hdmr.analyze(case.problem, X, Y, order=2, max_iter=50, verbose=False)
 
 
 def _m_shapley(case: Case, X: jax.Array, Y: jax.Array) -> Any:
@@ -444,7 +451,7 @@ def _m_vkoga(case: Case, X: jax.Array, Y: jax.Array) -> Any:
 
 def _m_dgsm(case: Case, X: jax.Array, _Y: jax.Array) -> Any:
     # dgsm.analyze differentiates a one-sample function, not a batch one.
-    return dgsm.analyze(case.problem, _as_point_model(case.model), X, verbose=False)
+    return dgsm.analyze(case.problem, X, fn=_as_point_model(case.model), verbose=False)
 
 
 DESIGN_METHODS: dict[str, Callable[[Case], Any]] = {
@@ -474,6 +481,7 @@ GIVEN_DATA_METHODS: dict[str, Callable[[Case, jax.Array, jax.Array], Any]] = {
     "optimal_transport_trajectory": _m_optimal_transport_trajectory,
     "pawn": _m_pawn,
     "pce": _m_pce,
+    "rank": _m_rank,
     "shapley": _m_shapley,
     "vkoga": _m_vkoga,
 }
@@ -528,7 +536,7 @@ def build_dump(verbose: bool = True) -> dict[str, Any]:
             "output_shape": case.shape,
             "n": case.n,
             "names": list(case.problem.names),
-            "has_correlated_inputs": bool(case.problem.has_correlated_inputs),
+            "has_correlated_inputs": case.problem.dependence != "independent",
             "has_categorical_inputs": bool(case.problem.has_categorical_inputs),
             "methods": {},
         }

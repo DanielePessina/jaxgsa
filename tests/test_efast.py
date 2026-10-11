@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from typing import Any, cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -10,7 +11,7 @@ import pytest
 
 from jaxgsa import JaxgsaWarning
 from jaxgsa.benchmarks import ishigami, linear
-from jaxgsa.efast import analyze, indices, sample
+from jaxgsa.efast import EFASTIndices, analyze, indices, sample
 from jaxgsa.problem import Problem
 
 
@@ -28,28 +29,24 @@ def test_linear_fixture_has_equal_first_and_total_indices():
     np.testing.assert_allclose(result.ST, result.S1, atol=0.05)
 
 
-def test_sampler_is_reproducible_and_respects_bounds():
+def test_sampler_bounds_multi_output_shapes_and_m():
+    """One M=6 design: reproducible, in bounds, multi-output, ``M`` carried into analysis."""
     problem = Problem(("a", "b"), ((2.0, 5.0), (-1.0, 3.0)))
-    first = sample(problem, n_per_curve=257, M=4, seed=4, verbose=False)
-    second = sample(problem, n_per_curve=257, M=4, seed=4, verbose=False)
-    np.testing.assert_array_equal(first.samples, second.samples)
-    assert np.all(np.asarray(first.samples[:, 0]) >= 2.0)
-    assert np.all(np.asarray(first.samples[:, 0]) <= 5.0)
+    design = sample(problem, n_per_curve=257, M=6, seed=4, verbose=False)
+    again = sample(problem, n_per_curve=257, M=6, seed=4, verbose=False)
+    np.testing.assert_array_equal(design.samples, again.samples)
+    assert np.all(np.asarray(design.samples[:, 0]) >= 2.0)
+    assert np.all(np.asarray(design.samples[:, 0]) <= 5.0)
+    assert np.all(np.asarray(design.samples[:, 1]) >= -1.0)
+    assert np.all(np.asarray(design.samples[:, 1]) <= 3.0)
 
-
-def test_multi_output_and_time_series_shapes():
-    design = sample(linear.PROBLEM, n_per_curve=257, M=4, seed=5, verbose=False)
-    y = linear.evaluate(jnp.asarray(design.samples))
+    X = jnp.asarray(design.samples)
+    y = X[:, 0] + 2.0 * X[:, 1]
     outputs = jnp.stack([y, 2.0 * y], axis=-1)
     series = jnp.stack([outputs, outputs + 1.0], axis=1)
     result = analyze(design, series, verbose=False)
-    assert result.S1.shape == (2, 2, 3)
-    assert result.ST.shape == (2, 2, 3)
-
-
-def test_design_carries_m_into_analysis():
-    design = sample(ishigami.PROBLEM, n_per_curve=1024, M=6, seed=6, verbose=False)
-    result = analyze(design, ishigami.evaluate(jnp.asarray(design.samples)), verbose=False)
+    assert result.S1.shape == (2, 2, 2)
+    assert result.ST.shape == (2, 2, 2)
     assert result.M == 6
     assert result.omega_0 > 0
 
@@ -82,3 +79,20 @@ def test_traceable_core_matches_public_result():
     core = indices(design, outputs)
     np.testing.assert_allclose(result.S1, core[0], atol=1e-6)
     np.testing.assert_allclose(result.ST, core[1], atol=1e-6)
+
+
+def test_first_argument_must_be_efast_samples():
+    for fn in (analyze, indices):
+        with pytest.raises(TypeError, match="takes the EFASTSamples.*not a Problem"):
+            fn(cast(Any, linear.PROBLEM), jnp.zeros(8))
+
+
+def test_indices_named_tuple_ci_and_repr():
+    design = sample(linear.PROBLEM, n_per_curve=1024, M=4, seed=3, verbose=False)
+    Y = jnp.asarray(design.samples) @ jnp.asarray([1.0, 2.0, 3.0])
+    out = indices(design, Y)
+    assert isinstance(out, EFASTIndices)
+    result = analyze(design, Y, verbose=False)
+    assert result.ci is None
+    text = repr(design)
+    assert "n_per_curve=1024" in text and "M=4" in text and len(text) < 200

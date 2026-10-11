@@ -50,10 +50,16 @@ def _irregular(result: Any) -> IrregularResult:
     return result
 
 
-def test_sobol_ragged_output_is_bucketed_and_exported_without_padding():
-    """The primary feature path preserves each channel's own coordinate grid."""
+@pytest.fixture(scope="module")
+def ragged_sobol():
+    """One ragged Sobol analysis, shared by every test that only reads it."""
     design = _sobol_design()
-    result = _irregular(jaxgsa.sobol.analyze(design, _ragged_y(design.n_runs)))
+    return design, _irregular(jaxgsa.sobol.analyze(design, _ragged_y(design.n_runs)))
+
+
+def test_sobol_ragged_output_is_bucketed_and_exported_without_padding(ragged_sobol):
+    """The primary feature path preserves each channel's own coordinate grid."""
+    _, result = ragged_sobol
 
     assert list(result.channels) == list(OUTPUT_NAMES)
     dataset = result.to_dataset()
@@ -64,21 +70,30 @@ def test_sobol_ragged_output_is_bucketed_and_exported_without_padding():
     np.testing.assert_array_equal(dataset["time_d43"], T_D43)
 
 
-def test_named_channels_follow_problem_output_order():
-    """A mapping may be supplied in any order but result labels stay stable."""
-    design = _sobol_design()
+@pytest.mark.parametrize(
+    "form", ["reordered_dict", "list_of_python_pairs", "tuple_of_python_pairs"]
+)
+def test_equivalent_channel_spellings_give_the_same_result(ragged_sobol, form):
+    """A mapping in any order, or plain Python lists, route to the same channels."""
+    design, expected = ragged_sobol
     ragged = _ragged_y(design.n_runs)
-    named = {"d43": ragged[1], "conc": ragged[0]}
+    spelled = {
+        "reordered_dict": {"d43": ragged[1], "conc": ragged[0]},
+        "list_of_python_pairs": [(t.tolist(), v.tolist()) for t, v in ragged],
+        "tuple_of_python_pairs": tuple((t.tolist(), v.tolist()) for t, v in ragged),
+    }[form]
 
-    result = _irregular(jaxgsa.sobol.analyze(design, named))
+    result = _irregular(jaxgsa.sobol.analyze(design, spelled))
 
-    assert list(result.channels) == ["conc", "d43"]
+    assert list(result.channels) == list(OUTPUT_NAMES)
     np.testing.assert_array_equal(result.times["conc"], T_CONC)
+    np.testing.assert_array_equal(result.times["d43"], T_D43)
+    np.testing.assert_allclose(result.channels["conc"].S1, expected.channels["conc"].S1, atol=1e-5)
 
 
 def test_unsorted_times_and_single_time_values_are_normalized_publicly():
     """The public path sorts time/value columns and accepts a one-point series."""
-    X = jnp.asarray(monte_carlo(UNLABELED, n=N, seed=1))
+    X = jnp.asarray(monte_carlo(UNLABELED, n_samples=N, seed=1))
     rng = np.random.default_rng(0)
     values = jnp.asarray(rng.normal(size=(N, 3)))
     single = jnp.asarray(rng.normal(size=N))
@@ -94,7 +109,7 @@ def test_unsorted_times_and_single_time_values_are_normalized_publicly():
 
     np.testing.assert_array_equal(result.times["y0"], [0.0, 1.0, 2.0])
     np.testing.assert_array_equal(result.times["y1"], [4.0])
-    assert result.channels["y1"].R2_HSIC.shape == (1, 1, 2)
+    assert result.channels["y1"].R2.shape == (1, 1, 2)
 
 
 def test_shared_grid_matches_the_regular_analysis():
@@ -119,7 +134,7 @@ def test_shared_grid_matches_the_regular_analysis():
 
 def test_given_data_channel_matches_direct_regular_analysis():
     """One representative given-data method checks per-channel routing."""
-    X = jnp.asarray(monte_carlo(PROBLEM, n=N, seed=1))
+    X = jnp.asarray(monte_carlo(PROBLEM, n_samples=N, seed=1))
     ragged = _ragged_y(N)
     key = jax.random.key(0)
     irregular = _irregular(jaxgsa.hsic.analyze(PROBLEM, X, ragged, n_perms=20, key=key))
@@ -127,8 +142,8 @@ def test_given_data_channel_matches_direct_regular_analysis():
         PROBLEM.with_output_names(("conc",)), X, ragged[0][1][:, :, None], n_perms=20, key=key
     )
     assert not isinstance(direct, IrregularResult)
-    np.testing.assert_allclose(irregular.channels["conc"].R2_HSIC, direct.R2_HSIC)
-    np.testing.assert_allclose(irregular.channels["conc"].T_HSIC, direct.T_HSIC)
+    np.testing.assert_allclose(irregular.channels["conc"].R2, direct.R2)
+    np.testing.assert_allclose(irregular.channels["conc"].T, direct.T)
 
 
 def test_bootstrap_is_forwarded_per_channel_and_keeps_replicates():
@@ -183,33 +198,19 @@ def test_regular_array_stays_on_the_regular_path():
     assert not isinstance(result, IrregularResult)
 
 
-@pytest.mark.parametrize("container", [list, tuple])
-def test_nested_two_time_outputs_match_regular_array(container):
+def test_nested_two_time_outputs_match_regular_array():
     """Two time slices are output data, even when their rows look like pairs."""
     design = _sobol_design()
     X = np.asarray(design.samples)
     values = np.stack((X[:, :2], X[:, :2] ** 2), axis=1)
     regular = jaxgsa.sobol.analyze(design, jnp.asarray(values))
-    nested = jaxgsa.sobol.analyze(design, container(values.tolist()))
+    nested = jaxgsa.sobol.analyze(design, values.tolist())
 
     assert not isinstance(regular, IrregularResult)
     assert not isinstance(nested, IrregularResult)
     np.testing.assert_array_equal(nested.S1, regular.S1)
     np.testing.assert_array_equal(nested.ST, regular.ST)
     np.testing.assert_array_equal(nested.S2, regular.S2)
-
-
-@pytest.mark.parametrize("container", [list, tuple])
-def test_python_channel_pairs_remain_irregular(container):
-    """Explicit channels need no NumPy/JAX arrays to route correctly."""
-    design = _sobol_design()
-    ragged = _ragged_y(design.n_runs)
-    pairs = container([(times.tolist(), values.tolist()) for times, values in ragged])
-    result = _irregular(jaxgsa.sobol.analyze(design, pairs))
-
-    assert list(result.channels) == list(OUTPUT_NAMES)
-    np.testing.assert_array_equal(result.times["conc"], T_CONC)
-    np.testing.assert_array_equal(result.times["d43"], T_D43)
 
 
 def test_irregular_values_warn_before_float32_downcast():
@@ -224,9 +225,9 @@ def test_irregular_values_warn_before_float32_downcast():
 
 
 def test_dgsm_explicitly_rejects_irregular_outputs():
-    X = jnp.asarray(monte_carlo(PROBLEM, n=N, seed=1))
+    X = jnp.asarray(monte_carlo(PROBLEM, n_samples=N, seed=1))
     with pytest.raises(NotImplementedError, match="irregular"):
-        jaxgsa.dgsm.analyze(PROBLEM, X=X, Y=_ragged_y(N))
+        jaxgsa.dgsm.analyze(PROBLEM, X, _ragged_y(N))
 
 
 def test_removed_selector_is_not_part_of_the_public_contract():
@@ -248,16 +249,23 @@ def test_verbose_summary_mentions_each_channel(capsys):
 
 
 _GIVEN_DATA: dict[str, tuple[Callable[..., Any], dict[str, Any], int]] = {
-    "borgonovo": (jaxgsa.borgonovo.analyze, {}, N),
-    "hdmr": (jaxgsa.hdmr.analyze, {"maxorder": 1, "maxiter": 10}, 320),
+    "borgonovo": (jaxgsa.borgonovo.analyze, {"grid_size": 24}, N),
+    "hdmr": (jaxgsa.hdmr.analyze, {"order": 1, "max_iter": 3}, 320),
     "hsic": (jaxgsa.hsic.analyze, {"n_perms": 10, "key": jax.random.key(0)}, N),
-    "optimal_transport": (jaxgsa.optimal_transport.analyze, {}, N),
+    "optimal_transport": (jaxgsa.optimal_transport.analyze, {"max_iter": 50}, N),
     "pawn": (jaxgsa.pawn.analyze, {}, N),
     "pce": (jaxgsa.pce.analyze, {"order": 2}, N),
-    "shapley": (jaxgsa.shapley.analyze, {"backend": "pce"}, N),
+    "shapley": (jaxgsa.shapley.analyze, {"backend": "pce", "order": 2}, N),
     "vkoga": (
         jaxgsa.vkoga.analyze,
-        {"n_outer": 32, "n_inner": 16, "n_variance": 64, "key": jax.random.key(0)},
+        {
+            "max_centers": 4,
+            "n_folds": 2,
+            "n_outer": 4,
+            "n_inner": 4,
+            "n_variance": 16,
+            "key": jax.random.key(0),
+        },
         N,
     ),
 }
@@ -266,7 +274,7 @@ _GIVEN_DATA: dict[str, tuple[Callable[..., Any], dict[str, Any], int]] = {
 @pytest.mark.parametrize("name", sorted(_GIVEN_DATA))
 def test_every_given_data_method_supports_ragged_outputs(name):
     analyze, kwargs, n = _GIVEN_DATA[name]
-    X = jnp.asarray(monte_carlo(PROBLEM, n=n, seed=1))
+    X = jnp.asarray(monte_carlo(PROBLEM, n_samples=n, seed=1))
     result = _irregular(analyze(PROBLEM, X, _ragged_y(n), **kwargs))
     assert list(result.channels) == list(OUTPUT_NAMES)
 

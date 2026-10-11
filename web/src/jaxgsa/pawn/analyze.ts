@@ -10,7 +10,7 @@
  * by the median (default) into one index per parameter.
  *
  * The Python `searchsorted` binning is replaced by the exact equal-width
- * formula `idx = clip(floor(X_u01 * n_bins), 0, n_bins-1)`; the median
+ * formula `idx = clip(floor(X_u01 * n_classes), 0, n_classes-1)`; the median
  * aggregation and the KS kernel run as host JS loops.
  */
 
@@ -21,7 +21,7 @@ const UNIT_CLIP = 1e-12;
 
 export interface PawnOptions {
   /** Number of equal-width bins (default 10). */
-  nBins?: number;
+  nClasses?: number;
   /** Aggregation over bins: "median" (default), "max", or "mean". */
   statistic?: "median" | "max" | "mean";
 }
@@ -73,12 +73,12 @@ function cdfToUnitInterval(col: Float64Array, spec: MarginalSpec): Float64Array 
   return out;
 }
 
-/** The KS kernel for one output column, returning (D, n_bins) KS values. */
+/** The KS kernel for one output column, returning (D, n_classes) KS values. */
 function pawnKs(
   y: Float64Array,
   binIdx: Int32Array,
   D: number,
-  nBins: number,
+  nClasses: number,
 ): Float64Array {
   const N = y.length;
 
@@ -98,10 +98,10 @@ function pawnKs(
     isGroupEnd[i] = i === N - 1 || y[order[i]] !== y[order[i + 1]] ? 1 : 0;
   }
 
-  const ks = new Float64Array(D * nBins);
+  const ks = new Float64Array(D * nClasses);
 
   for (let d = 0; d < D; d++) {
-    const cnt = new Float64Array(nBins);
+    const cnt = new Float64Array(nClasses);
 
     for (let i = 0; i < N; i++) {
       const b = binSorted[i * D + d];
@@ -109,7 +109,7 @@ function pawnKs(
       if (b >= 0) cnt[b] += 1;
     }
 
-    const cum = new Float64Array(nBins);
+    const cum = new Float64Array(nClasses);
 
     for (let i = 0; i < N; i++) {
       const b = binSorted[i * D + d];
@@ -119,18 +119,18 @@ function pawnKs(
       if (isGroupEnd[i] === 1) {
         const uncond = (i + 1) / N;
 
-        for (let bin = 0; bin < nBins; bin++) {
+        for (let bin = 0; bin < nClasses; bin++) {
           const ccdf = cnt[bin] > 0 ? cum[bin] / cnt[bin] : 0;
           const diff = Math.abs(uncond - ccdf);
 
-          if (diff > ks[d * nBins + bin]) ks[d * nBins + bin] = diff;
+          if (diff > ks[d * nClasses + bin]) ks[d * nClasses + bin] = diff;
         }
       }
     }
 
     // Bins with fewer than 2 members are NaN (dropped from aggregation).
-    for (let bin = 0; bin < nBins; bin++) {
-      if (cnt[bin] < 2) ks[d * nBins + bin] = Number.NaN;
+    for (let bin = 0; bin < nClasses; bin++) {
+      if (cnt[bin] < 2) ks[d * nClasses + bin] = Number.NaN;
     }
   }
 
@@ -138,14 +138,14 @@ function pawnKs(
 }
 
 /** Aggregate bin KS values per parameter (`_aggregate_ks`). */
-function aggregate(ks: Float64Array, D: number, nBins: number, statistic: PawnOptions["statistic"]): Float64Array {
+function aggregate(ks: Float64Array, D: number, nClasses: number, statistic: PawnOptions["statistic"]): Float64Array {
   const out = new Float64Array(D);
 
   for (let d = 0; d < D; d++) {
     const vals: number[] = [];
 
-    for (let bin = 0; bin < nBins; bin++) {
-      const v = ks[d * nBins + bin];
+    for (let bin = 0; bin < nClasses; bin++) {
+      const v = ks[d * nClasses + bin];
 
       if (!Number.isNaN(v)) vals.push(v);
     }
@@ -179,7 +179,7 @@ function aggregate(ks: Float64Array, D: number, nBins: number, statistic: PawnOp
 
 /**
  * PAWN index for a scalar output. `x` is (N, D) row-major; `y` is (N,).
- * Mirrors `jaxgsa.pawn.analyze` with the defaults (`n_bins=10`,
+ * Mirrors `jaxgsa.pawn.analyze` with the defaults (`n_classes=10`,
  * `statistic="median"`, `n_bootstrap=0`).
  */
 export function analyzePawn(
@@ -192,7 +192,7 @@ export function analyzePawn(
   const yf = y instanceof Float64Array ? y : Float64Array.from(y);
   const D = problem.names.length;
   const N = xf.length / D;
-  const nBins = options.nBins ?? 10;
+  const nClasses = options.nClasses ?? 10;
   const statistic = options.statistic ?? "median";
 
   if (!Number.isInteger(N) || N === 0) {
@@ -203,8 +203,8 @@ export function analyzePawn(
     throw new Error(`pawn: x has ${N} rows but y has ${yf.length} values`);
   }
 
-  if (nBins < 2) {
-    throw new Error(`pawn: n_bins must be >= 2, got ${nBins}`);
+  if (nClasses < 2) {
+    throw new Error(`pawn: n_classes must be >= 2, got ${nClasses}`);
   }
 
   // Equal-width binning on the CDF-transformed unit interval.
@@ -219,15 +219,15 @@ export function analyzePawn(
 
     for (let i = 0; i < N; i++) {
       const inRange = u[i] >= 0 && u[i] <= 1;
-      const idx = Math.floor(u[i] * nBins);
-      const clipped = Math.min(Math.max(idx, 0), nBins - 1);
+      const idx = Math.floor(u[i] * nClasses);
+      const clipped = Math.min(Math.max(idx, 0), nClasses - 1);
 
       binIdx[i * D + d] = inRange ? clipped : -1;
     }
   }
 
-  const ks = pawnKs(yf, binIdx, D, nBins);
-  const pawn = aggregate(ks, D, nBins, statistic);
+  const ks = pawnKs(yf, binIdx, D, nClasses);
+  const pawn = aggregate(ks, D, nClasses, statistic);
 
   return { pawn };
 }

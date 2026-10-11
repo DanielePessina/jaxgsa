@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import warnings
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 
 import jax
 import jax.numpy as jnp
@@ -93,7 +93,7 @@ def _validate_x(problem: Problem, X: Array) -> None:
     """Validate the shared ``(N, D)`` input-matrix contract.
 
     Args:
-        problem: Problem definition with ``num_vars`` parameters.
+        problem: Problem definition with ``n_params`` parameters.
         X: Input sample matrix, expected shape ``(N, D)``.
 
     Raises:
@@ -104,16 +104,42 @@ def _validate_x(problem: Problem, X: Array) -> None:
         raise ValueError(f"X must be 2-D (N, D), got ndim={X.ndim}")
     if X.shape[0] == 0:
         raise ValueError("X must have at least one row, got 0")
-    if X.shape[1] != problem.num_vars:
+    if X.shape[1] != problem.n_params:
         raise ValueError(
-            f"X has {X.shape[1]} columns but problem has {problem.num_vars} parameters"
+            f"X has {X.shape[1]} columns but problem has {problem.n_params} parameters"
         )
+
+
+def to_device(a: object) -> Array:
+    """Bring an array-like onto the device without compiling a copy.
+
+    ``jnp.asarray`` on a NumPy float array stages a small compiled program
+    for every new shape, which is a first-call compile. ``jax.device_put``
+    moves the same bytes with no compile. With x64 off a float64 array is
+    cast on the host first, which gives the same float32 values (both round
+    to nearest even).
+
+    Args:
+        a: Anything ``jnp.asarray`` accepts.
+
+    Returns:
+        The array on the device, in the dtype ``jnp.asarray`` would give it.
+    """
+    # Only a plain ndarray: subclasses such as masked arrays keep the
+    # jnp.asarray path, which refuses them instead of dropping the mask.
+    if type(a) is np.ndarray and a.dtype.kind == "f":
+        target = jax.dtypes.canonicalize_dtype(a.dtype)
+        if target != a.dtype:
+            a = np.asarray(a, dtype=target)
+        return jax.device_put(a)
+    return jnp.asarray(a)
 
 
 def _validate_output(
     Y: Array,
     n_expected: int | None,
     problem: Problem | None = None,
+    expected_from: str = "X",
 ) -> Array:
     """Validate a model output using the canonical jaxgsa axis layouts.
 
@@ -125,6 +151,10 @@ def _validate_output(
         n_expected: Expected sample count, or ``None`` when it is derived by
             the calling method.
         problem: Optional problem definition used to validate output labels.
+        expected_from: What fixes ``n_expected``. ``"X"`` (the default) means
+            the caller's input matrix. Any other value names the design
+            attribute to evaluate, such as ``"samples.samples"``, and the
+            error then talks about the design.
 
     Returns:
         The validated JAX array.
@@ -132,15 +162,20 @@ def _validate_output(
     Raises:
         ValueError: If the rank or leading sample dimension is invalid.
     """
-    Y = jnp.asarray(Y)
+    Y = to_device(Y)
     if Y.ndim not in (1, 2, 3):
         raise ValueError(f"Y must be 1-D (N,), 2-D (N, K), or 3-D (N, T, K), got ndim={Y.ndim}")
     if Y.shape[0] == 0:
         raise ValueError("Y must have at least one row, got 0")
     if n_expected is not None and Y.shape[0] != n_expected:
+        if expected_from == "X":
+            raise ValueError(
+                f"Y has {Y.shape[0]} rows but X has {n_expected}; "
+                "pass one row of Y for each row of X, as (N,), (N, K), or (N, T, K)"
+            )
         raise ValueError(
-            f"Y has {Y.shape[0]} sample rows but {n_expected} were expected; "
-            "pass Y as (N,), (N, K), or (N, T, K)"
+            f"Y has {Y.shape[0]} rows but the design has {n_expected}; "
+            f"evaluate the model once per row of {expected_from}"
         )
     if problem is not None and problem.output_names is not None:
         n_outputs = 1 if Y.ndim == 1 else Y.shape[-1]
@@ -158,7 +193,7 @@ def _validate_output(
 # listed here sorts after these, alphabetically. The value is the hand-kept
 # parenthetical for that route, or "" for a route that needs none. Keying
 # order and note together in one dict is what stops the list drifting: a new
-# correlation-tolerant method appears in the message the moment it registers,
+# dependence-tolerant method appears in the message the moment it registers,
 # note or no note.
 _CORRELATION_ROUTES: dict[str, str] = {
     "vkoga": " (variance-based indices from given data, through a kernel surrogate)",
@@ -212,8 +247,8 @@ def _tolerant_names(kind: str, order: tuple[str, ...]) -> list[tuple[str, bool]]
     return [(spec.name, spec.is_design_based) for spec in accepting]
 
 
-def _correlation_tolerant_methods() -> str:
-    """Name every correlation-tolerant route, for a rejection message."""
+def _dependence_tolerant_methods() -> str:
+    """Name every dependence-tolerant route, for a rejection message."""
     named = _tolerant_names("correlation", tuple(_CORRELATION_ROUTES))
     items = [f"jaxgsa.{n}{_CORRELATION_ROUTES.get(n, '')}" for n, _ in named]
     items.append(_EXTRA_CORRELATION_ROUTE)
@@ -244,7 +279,7 @@ def _raise_categorical_and_correlated(method: str, names: list[str], *, design: 
 
     This combination has no variance-based route. The categorical-tolerant
     variance-based method (``jaxgsa.sobol``) refuses a declared correlation.
-    The correlation-tolerant variance-based methods (``jaxgsa.vkoga``,
+    The dependence-tolerant variance-based methods (``jaxgsa.vkoga``,
     ``jaxgsa.kucherenko``) refuse a categorical parameter. Naming only one of
     the two faults would send the user to a method that then refuses the
     other. All four gates therefore route the combined case here: design and
@@ -269,7 +304,7 @@ def _raise_categorical_and_correlated(method: str, names: list[str], *, design: 
     lead = "cannot build a design for" if design else "cannot analyze"
     if design:
         action = (
-            "Draw correlated samples with jaxgsa.sampling.monte_carlo and "
+            "Draw dependent samples with jaxgsa.sampling.monte_carlo and "
             "analyze them with jaxgsa.optimal_transport, jaxgsa.borgonovo or "
             "jaxgsa.pawn, which handle both."
         )
@@ -280,155 +315,136 @@ def _raise_categorical_and_correlated(method: str, names: list[str], *, design: 
         )
     raise ValueError(
         f"{method} {lead} this problem: parameters {names} "
-        "are categorical and problem.correlation declares a dependence "
-        "structure, and no variance-based method supports categorical plus "
-        "correlated inputs yet. The categorical-tolerant methods refuse a "
-        "correlation, and the correlation-tolerant ones refuse a categorical "
-        "parameter, so naming either route alone would send you in a circle. "
-        f"{action} To drop one of the two constraints, use "
-        "problem.with_correlation(None) or declare the parameter continuous."
+        "are categorical and the problem declares dependent inputs "
+        "(problem.correlation or problem.sampler). No variance-based method "
+        "supports categorical plus dependent inputs yet. The "
+        "categorical-tolerant methods refuse a dependence, and the "
+        "dependence-tolerant ones refuse a categorical parameter, so naming "
+        f"either route alone would send you in a circle. {action} To drop one "
+        "of the two constraints, use problem.with_correlation(None) or "
+        "problem.with_sampler(None), or declare the parameter continuous."
     )
 
 
-def _raise_correlated_design(problem: Problem, method: str) -> None:
-    """Reject a correlated problem in a structured design sampler.
-
-    A structured design places its points assuming independent marginals.
-    Under a declared correlation the downstream estimators are undefined, not
-    merely approximate. Sampling therefore refuses up front, rather than
-    handing back a design whose analysis would be silently wrong. ``method``
-    names the sampler, so this text does not have to list the callers.
-
-    A problem that is also categorical gets the combined message instead. The
-    correlated-only text would recommend methods that then refuse it for being
-    categorical. This check therefore does not depend on being ordered before
-    or after :func:`_raise_categorical_design`.
+def _drop_dependence_hint(problem: Problem) -> str:
+    """Name the call that removes a problem's declared dependence.
 
     Args:
-        problem: Problem the design was requested for.
-        method: Fully qualified sampler name for the error message.
+        problem: A problem that declares dependent inputs.
 
-    Raises:
-        ValueError: If ``problem`` declares a non-identity correlation. The
-            message names the combined dead end when ``problem`` also declares
-            a categorical parameter.
+    Returns:
+        ``"problem.with_sampler(None)"`` for a custom sampler, otherwise
+        ``"problem.with_correlation(None)"``.
     """
-    if not problem.has_correlated_inputs:
-        return
-    names = _categorical_param_names(problem)
-    if names:
-        _raise_categorical_and_correlated(method, names, design=True)
-    raise ValueError(
-        f"{method} builds a structured design whose sensitivity indices assume "
-        "independent inputs, but problem.correlation declares a dependence "
-        "structure. Draw correlated samples with jaxgsa.sampling.monte_carlo "
-        "(which honors problem.correlation) and analyze them with a "
-        f"correlation-tolerant given-data method: {_correlation_tolerant_methods()}. "
-        "To analyze the independent problem instead, drop the matrix with "
-        "problem.with_correlation(None)."
-    )
+    if problem.dependence == "custom":
+        return "problem.with_sampler(None)"
+    return "problem.with_correlation(None)"
 
 
-def _raise_correlated_analysis(problem: Problem, method: str) -> None:
-    """Reject a correlated problem in a correlation-naive analyzer.
-
-    The indices such a method computes are invalid, not merely approximate,
-    once ``problem.correlation`` declares a dependence structure, so the gate
-    raises instead of warning.
-
-    A problem that is also categorical gets the combined message instead. The
-    correlated-only text would recommend methods that then refuse it for being
-    categorical. This check therefore does not depend on being ordered before
-    or after :func:`_raise_categorical_analysis`.
+def _unsupported_message(
+    problem: Problem, method: str, kind: str, design: bool, names: list[str]
+) -> str:
+    """Build the single-cause rejection text for one gate.
 
     Args:
-        problem: Problem the analysis was requested for.
-        method: Fully qualified analyzer name for the error message.
+        problem: Problem being rejected.
+        method: Fully qualified method name for the message.
+        kind: ``"correlated"`` or ``"categorical"``.
+        design: True for a design sampler, False for an analyzer.
+        names: Names of the categorical parameters.
 
-    Raises:
-        ValueError: If ``problem`` declares a non-identity correlation. The
-            message names the combined dead end when ``problem`` also declares
-            a categorical parameter.
+    Returns:
+        The error message.
     """
-    if not problem.has_correlated_inputs:
-        return
-    names = _categorical_param_names(problem)
-    if names:
-        _raise_categorical_and_correlated(method, names, design=False)
-    raise ValueError(
-        f"{method} computes indices that assume independent inputs, and they are "
-        "invalid — not merely approximate — when problem.correlation declares a "
-        "dependence structure. Use a correlation-tolerant given-data method "
-        f"instead: {_correlation_tolerant_methods()}. To analyze the independent "
-        "problem instead, drop the matrix with problem.with_correlation(None)."
-    )
-
-
-def _raise_categorical_design(problem: Problem, method: str) -> None:
-    """Reject a categorical problem in an incompatible design sampler.
-
-    The Morris and eFAST designs walk or sweep a continuous input space. An
-    unordered categorical axis has no meaningful step or frequency, so
-    sampling refuses up front. The copula conditionals of
-    ``jaxgsa.kucherenko.sample`` refuse it for a different reason: they need a
-    continuous marginal CDF on every coordinate.
-
-    A problem that is also correlated gets the combined message instead, so
-    this check does not depend on being ordered before or after
-    :func:`_raise_correlated_design`.
-
-    Args:
-        problem: Problem the design was requested for.
-        method: Fully qualified sampler name for the error message.
-
-    Raises:
-        ValueError: If ``problem`` declares any categorical parameter. The
-            message names the combined dead end when ``problem`` also declares
-            a non-identity correlation.
-    """
-    names = _categorical_param_names(problem)
-    if not names:
-        return
-    if problem.has_correlated_inputs:
-        _raise_categorical_and_correlated(method, names, design=True)
-    raise ValueError(
-        f"{method} requires continuous (orderable) inputs, but parameters "
-        f"{names} are categorical. Use jaxgsa.sobol.sample (the Saltelli "
-        "column-swap scheme is distribution-agnostic; it requires a problem "
-        "with no declared correlation), or analyze given data with "
-        "jaxgsa.optimal_transport, jaxgsa.borgonovo or jaxgsa.pawn."
-    )
-
-
-def _raise_categorical_analysis(problem: Problem, method: str) -> None:
-    """Reject a categorical problem in a categorical-naive analyzer.
-
-    A problem that is also correlated gets the combined message instead. The
-    categorical-only text recommends the design-based ``jaxgsa.sobol``
-    pipeline, which refuses a declared correlation, so it would send the user
-    in a circle. This check therefore does not depend on being ordered before
-    or after :func:`_raise_correlated_analysis`.
-
-    Args:
-        problem: Problem the analysis was requested for.
-        method: Fully qualified analyzer name for the error message.
-
-    Raises:
-        ValueError: If ``problem`` declares any categorical parameter. The
-            message names the combined dead end when ``problem`` also declares
-            a non-identity correlation.
-    """
-    names = _categorical_param_names(problem)
-    if not names:
-        return
-    if problem.has_correlated_inputs:
-        _raise_categorical_and_correlated(method, names, design=False)
-    raise ValueError(
+    if kind == "correlated" and design:
+        return (
+            f"{method} builds a structured design whose sensitivity indices assume "
+            "independent inputs. This problem declares dependent inputs "
+            "(problem.correlation or problem.sampler). Draw dependent samples with "
+            "jaxgsa.sampling.monte_carlo (it honors both) and analyze them with a "
+            f"dependence-tolerant given-data method: {_dependence_tolerant_methods()}. "
+            f"To analyze the independent problem instead, drop the dependence with "
+            f"{_drop_dependence_hint(problem)}."
+        )
+    if kind == "correlated":
+        return (
+            f"{method} computes indices that assume independent inputs. They are "
+            "invalid, not merely approximate, when the problem declares dependent "
+            "inputs (problem.correlation or problem.sampler). Use a "
+            f"dependence-tolerant given-data method instead: {_dependence_tolerant_methods()}. "
+            f"To analyze the independent problem instead, drop the dependence with "
+            f"{_drop_dependence_hint(problem)}."
+        )
+    if design:
+        return (
+            f"{method} requires continuous (orderable) inputs, but parameters "
+            f"{names} are categorical. Use a categorical-aware method instead: "
+            f"{_categorical_tolerant_methods()}. The Saltelli design comes from "
+            "jaxgsa.sobol.sample and needs a problem with no declared correlation."
+        )
+    return (
         f"{method} treats every input as continuous, but parameters {names} "
         "are categorical (unordered level codes); its indices would depend on "
         "the arbitrary code order. Use a categorical-aware method instead: "
         f"{_categorical_tolerant_methods()}."
     )
+
+
+def _raise_unsupported(problem: Problem, method: str, *, kind: str, design: bool) -> None:
+    """Reject a problem whose dependence or categorical inputs a method cannot handle.
+
+    A structured design places its points assuming independent marginals, and
+    a correlation-naive analyzer computes indices that are invalid, not merely
+    approximate, under a declared dependence. The Morris and eFAST designs walk
+    or sweep a continuous space, so an unordered categorical axis has no
+    meaningful step or frequency. The copula conditionals of
+    ``jaxgsa.kucherenko.sample`` need a continuous marginal CDF on every
+    coordinate. Each gate therefore refuses up front instead of returning
+    something silently wrong.
+
+    A problem that is both correlated and categorical gets the combined message
+    from either gate. Either single-cause text would recommend methods that
+    then refuse the other cause, so the result does not depend on the order in
+    which the two gates run.
+
+    Args:
+        problem: Problem the design or analysis was requested for.
+        method: Fully qualified sampler or analyzer name for the error message.
+        kind: ``"correlated"`` to reject a declared dependence, or
+            ``"categorical"`` to reject any categorical parameter.
+        design: True when ``method`` is a design sampler, False for an analyzer.
+
+    Raises:
+        ValueError: If ``problem`` has the rejected property. The message names
+            the combined dead end when it also has the other one.
+    """
+    names = _categorical_param_names(problem)
+    correlated = problem.dependence != "independent"
+    if not (correlated if kind == "correlated" else names):
+        return
+    if names and correlated:
+        _raise_categorical_and_correlated(method, names, design=design)
+    raise ValueError(_unsupported_message(problem, method, kind, design, names))
+
+
+def _raise_correlated_design(problem: Problem, method: str) -> None:
+    """Reject a correlated problem in a structured design sampler."""
+    _raise_unsupported(problem, method, kind="correlated", design=True)
+
+
+def _raise_correlated_analysis(problem: Problem, method: str) -> None:
+    """Reject a correlated problem in a correlation-naive analyzer."""
+    _raise_unsupported(problem, method, kind="correlated", design=False)
+
+
+def _raise_categorical_design(problem: Problem, method: str) -> None:
+    """Reject a categorical problem in an incompatible design sampler."""
+    _raise_unsupported(problem, method, kind="categorical", design=True)
+
+
+def _raise_categorical_analysis(problem: Problem, method: str) -> None:
+    """Reject a categorical problem in a categorical-naive analyzer."""
+    _raise_unsupported(problem, method, kind="categorical", design=False)
 
 
 def _dims_and_coords(
@@ -454,7 +470,8 @@ def _dims_and_coords(
         ``xr.Dataset``.
 
     Raises:
-        ValueError: If ``ndim`` is not 1, 2, or 3.
+        ValueError: If ``ndim`` is not 1, 2, or 3, or if ``time_coords`` does
+            not have one value per time step.
     """
     param_names = list(problem.names)
     if ndim == 1:
@@ -468,11 +485,25 @@ def _dims_and_coords(
         K = shape[1]
         onames = _default_output_names(K, problem)
         tcoords = list(time_coords) if time_coords is not None else list(range(T))
+        if len(tcoords) != T:
+            raise ValueError(
+                f"time_coords has {len(tcoords)} values but the result has {T} time steps; "
+                "pass one coordinate per time step"
+            )
         return (
             ("time", "output", "param"),
             {"time": tcoords, "output": onames, "param": param_names},
         )
     raise ValueError(f"Unexpected index array ndim={ndim}")
+
+
+def _layout_of(Y: Array) -> YLayout:
+    """Name the layout :func:`_prepare_Y` would record for ``Y``."""
+    if Y.ndim == 1:
+        return YLayout.SCALAR
+    if Y.ndim == 2:
+        return YLayout.MULTI_OUTPUT
+    return YLayout.TIME_SERIES
 
 
 def _prepare_Y(Y: Array) -> tuple[Array, YLayout]:
@@ -555,6 +586,42 @@ def _zero_variance_mask(flat: Array) -> Array:
     return _is_constant_slice(flat) | (jnp.var(flat, axis=0) == 0)
 
 
+@jax.jit
+def _zero_variance_stats(flat: Array) -> tuple[Array, Array]:
+    """The zero-variance mask and how many slices it flags, in one program.
+
+    Args:
+        flat: ``(N, S)`` array, one column per output slice.
+
+    Returns:
+        The mask of :func:`_zero_variance_mask` and its sum.
+    """
+    mask = _zero_variance_mask(flat)
+    return mask, jnp.sum(mask)
+
+
+@jax.jit
+def _promote_with_zero_stats(Y: Array) -> tuple[Array | None, Array, Array]:
+    """Promote ``Y`` to ``(N, T, K)`` and compute its zero-variance stats at once.
+
+    Fuses what :func:`_prepare_Y` and the zero-variance check would each
+    compile on their own. A rank-3 ``Y`` is not returned, so the caller keeps
+    the array it has instead of receiving a copy.
+
+    Args:
+        Y: Model output with 1, 2 or 3 dimensions.
+
+    Returns:
+        ``(Y3, mask, count)``. ``Y3`` is ``None`` when ``Y`` is already rank 3.
+    """
+    mask, count = _zero_variance_stats(Y.reshape(Y.shape[0], -1))
+    if Y.ndim == 1:
+        return Y[:, None, None], mask, count
+    if Y.ndim == 2:
+        return Y[:, None, :], mask, count
+    return None, mask, count
+
+
 def _join_capped(labels: list[str], *, limit: int = 5) -> str:
     """Join warning labels, capping the list so a long warning stays readable.
 
@@ -580,6 +647,7 @@ def _warn_zero_variance_slices(
     outcome: str = "nan",
     stacklevel: int = 2,
     method: str = "jaxgsa",
+    zero_stats: tuple[Array, Array] | None = None,
 ) -> None:
     """Check for zero-variance output slices before analysis and warn.
 
@@ -604,11 +672,13 @@ def _warn_zero_variance_slices(
         stacklevel: Frames to skip so the warning points at the user's
             ``analyze()`` call rather than at this helper.
         method: Fully qualified analyzer name to prefix the warning with.
+        zero_stats: The ``(mask, count)`` pair :func:`_zero_variance_stats`
+            returns for ``Y``, when the caller already computed it inside a
+            larger jitted program. ``None`` computes it here.
     """
     single_tail, plural_tail = _ZERO_VARIANCE_OUTCOMES[outcome]
     # Collapse trailing dims so variance is computed per (t, k) slice.
-    flat = Y.reshape(Y.shape[0], -1)
-    n_outputs = flat.shape[1]
+    n_outputs = int(np.prod(Y.shape[1:], dtype=np.int64))
 
     # Recover K from the original shape to map flat indices back to named outputs.
     trailing = Y.shape[1:]
@@ -633,8 +703,11 @@ def _warn_zero_variance_slices(
     # because a constant float32 slice rarely has a bit-exact zero variance.
     # A slice that does vary, but so little that its variance underflows to
     # zero in the working dtype: only the variance test sees that one.
-    zero_mask = _zero_variance_mask(flat)
-    n_zero = int(jnp.sum(zero_mask))
+    if zero_stats is None:
+        zero_mask, n_zero_dev = _zero_variance_stats(Y.reshape(Y.shape[0], -1))
+    else:
+        zero_mask, n_zero_dev = zero_stats
+    n_zero = int(n_zero_dev)
 
     if n_zero == 0:
         return
@@ -701,3 +774,46 @@ def _standardize_outputs(Y: Array) -> tuple[Array, Array, Array, Array]:
     safe_scale = jnp.where(constant | (y_std == 0), jnp.ones_like(y_std), y_std)
     Y_norm = (Y - y_mean) / safe_scale
     return Y_norm, y_mean, y_std, safe_scale
+
+
+@overload
+def as_key(key: None, method: str) -> None: ...
+
+
+@overload
+def as_key(key: Array | int, method: str) -> Array: ...
+
+
+@overload
+def as_key(key: object, method: str) -> Array | None: ...
+
+
+def as_key(key: object, method: str) -> Array | None:
+    """Coerce a user-supplied ``key`` to a JAX PRNG key.
+
+    An ``int`` becomes ``jax.random.key(int)``. A typed key, or a raw
+    ``uint32`` key array, passes through unchanged. ``None`` stays ``None``,
+    so the caller keeps deciding whether a key is required.
+
+    Args:
+        key: The value the user passed as ``key=``.
+        method: Method name for the error message, such as ``"pawn"``.
+
+    Returns:
+        A JAX PRNG key, or ``None`` when ``key`` is ``None``.
+
+    Raises:
+        TypeError: If ``key`` is not ``None``, an ``int``, or a JAX key
+            (a ``bool``, a float, a NumPy ``Generator`` and similar).
+    """
+    if key is None:
+        return None
+    if isinstance(key, int | np.integer) and not isinstance(key, bool | np.bool_):
+        return jax.random.key(int(key))
+    dtype = getattr(key, "dtype", None)
+    if isinstance(key, jax.Array | np.ndarray) and dtype is not None:
+        if jnp.issubdtype(dtype, jax.dtypes.prng_key) or dtype == np.uint32:
+            return key if isinstance(key, jax.Array) else jnp.asarray(key)
+    raise TypeError(
+        f"jaxgsa.{method}: key must be a jax.random.key(...) or an int, got {type(key).__name__}"
+    )

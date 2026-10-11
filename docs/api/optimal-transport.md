@@ -4,9 +4,9 @@
 jaxgsa.optimal_transport.analyze(
     problem, X, Y, *,
     mode="univariate",
-    n_partitions=None,
+    n_classes=None,
     standardize_outputs=True,
-    epsilon=0.01,
+    epsilon=0.03,
     max_iter=2000,
     tol=None,
     dummy=False,
@@ -58,7 +58,7 @@ print("ot_dummy    ", np.asarray(res.ot_dummy).round(4))
 jaxgsa.optimal_transport.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=4000 runs, T=1 x K=1 output slice
     invalid: none found in 4000 rows (policy 'raise')
   timing:
@@ -194,13 +194,13 @@ Borgonovo et al.
 
 | Argument | Default | What it changes |
 | --- | --- | --- |
-| `n_partitions` | `None` | Equal-frequency conditioning classes per continuous parameter. More classes localize the conditioning and cut the discretization bias, but leave fewer samples per class and raise the noise. About 25 is customary at `N >= 2500`. `None` selects `min(25, N // 2)`. A passed value is validated against `[2, N // 2]`. Categorical parameters ignore it and use one class per level, and so does the dummy floor each of them is measured against. If every parameter is categorical, nothing uses the value and a `JaxgsaWarning` says it is ignored. |
+| `n_classes` | `None` | Equal-frequency conditioning classes per continuous parameter. More classes localize the conditioning and cut the discretization bias, but leave fewer samples per class and raise the noise. About 25 is customary at `N >= 2500`. `None` selects `min(25, N // 2)`. A passed value is validated against `[2, N // 2]`. Categorical parameters ignore it and use one class per level, and so does the dummy floor each of them is measured against. If every parameter is categorical, nothing uses the value and a `JaxgsaWarning` says it is ignored. |
 | `standardize_outputs` | `True` | Joint modes only. Divides each output column by its standard deviation before the transport cost is built, so no single output dominates the joint distance through its units. In `"trajectory"` mode a "column" is one time step, so this standardizes every time step to unit variance on its own; the default therefore never computes a plain-units L2 trajectory transport, because it discards the trajectory's own relative shape over time. Pass `False` for that. Ignored in `"univariate"` mode, where each column is normalized by its own variance anyway. |
 | `epsilon` | `0.03` | Joint modes only. Entropic regularization strength, relative to `V`, the index's own normalizer (`2 * Var` or `2 * tr(Cov)`) -- the same fixed scale every parameter and class shares, so the regularization is comparable across them. Smaller values approach exact transport and need more iterations. Against POT's exact `emd2` on Ishigami (N=1000, 10 classes) the default reads 7.3 per cent high, `0.02` reads 4.8 per cent high, `0.05` reads 12.1 per cent high; because one `V` scales every cost, the offset is close to uniform across parameters and does not change their ranking. It also sets the entropic part of the dummy floor, so lowering it lowers `ot_dummy`. |
 | `max_iter` | `2000` | Joint modes only. Sinkhorn iteration cap per solve. |
 | `tol` | `None` | Joint modes only. Stopping tolerance on the L1 target-marginal violation. `None` selects `1e-9` in float64 and `1e-6` in float32, where anything tighter is unresolvable. One warning is emitted if any solve fails to converge. In float32 the residual can stop falling a little above `1e-6` for a large cloud, because it is a sum over `N` rounded terms. The cost is converged there, so raising `max_iter` does not clear the warning; raise `tol` or enable float64 instead. |
 | `dummy` | `False` | See above. Requires `key`. |
-| `n_bootstrap` | `0` | Row resamples. `0` leaves every `*_conf` at `None`. The joint modes solve `n_bootstrap * D * n_partitions` transport problems, so keep it modest there. |
+| `n_bootstrap` | `0` | Row resamples. `0` leaves every `*_conf` at `None`. The joint modes solve `n_bootstrap * D * n_classes` transport problems, so keep it modest there. |
 | `key` | `None` | A `jax.random` key. It feeds two independent consumers, the bootstrap and the synthetic dummy parameter, so it is required when either `n_bootstrap > 0` or `dummy=True`. |
 | `slice_chunk_size` | `None` | `"univariate"` only. Flattened `T*K` output columns per kernel call. `None` picks a memory-aware default. The point-cloud modes accept it and ignore it, because one `(N, N/M)` cost block per solve already bounds their peak memory. |
 | `on_invalid` | `"raise"` | Policy for non-finite rows. The check reads the real `X` and `Y` you passed, not the synthetic dummy column, and reads them together, so a bad input takes its output with it. |
@@ -256,7 +256,7 @@ the advective component.
 
 `ValueError` for a non-2-D `X`, a column count that disagrees with the problem,
 a `Y` that is not 1-D/2-D/3-D, mismatched row counts, an unknown `mode`,
-`mode="trajectory"` with a non-3-D `Y`, an `n_partitions` outside
+`mode="trajectory"` with a non-3-D `Y`, an `n_classes` outside
 `[2, N // 2]`, a categorical column holding values other than its level codes,
 `epsilon <= 0`, `max_iter < 1`, `tol <= 0`, `n_bootstrap < 0`, an unknown
 `ci_method`, a missing `key` while `n_bootstrap > 0` or `dummy=True`,
@@ -269,10 +269,12 @@ distribution equals the unconditional one and the indices are an exact 0.
 ## Traceable core
 
 `jaxgsa.optimal_transport.indices(problem, X, Y, *, mode="univariate",
-n_partitions=None, standardize_outputs=True, epsilon=0.01, max_iter=2000,
-tol=None, slice_chunk_size=None)` returns `(ot, advective, diffusive)` as bare
-arrays with none of the checks, so it composes with `jit`, `vmap` and `jacrev`.
-`S1`, `above_dummy` and the intervals live on the result object only.
+n_classes=None, standardize_outputs=True, epsilon=0.03, max_iter=2000,
+tol=None, slice_chunk_size=None)` returns an `OTIndices` named tuple
+`(ot, advective, diffusive, S1)` of bare arrays with none of the checks, so it
+composes with `jit`, `vmap` and `jacrev`. `S1` comes last, so unpacking the
+first three fields still works. `above_dummy` and the intervals live on the
+result object only.
 
 ## References
 

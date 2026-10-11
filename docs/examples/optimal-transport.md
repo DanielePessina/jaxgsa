@@ -43,7 +43,7 @@ import jax.numpy as jnp
 import jaxgsa
 from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=8192, seed=42))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n_samples=8192, seed=42))
 Y = evaluate(X)
 
 result = jaxgsa.optimal_transport.analyze(PROBLEM, X, Y)
@@ -59,7 +59,7 @@ print("above_dummy:", result.above_dummy)
 jaxgsa.optimal_transport.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=8192 runs, T=1 x K=1 output slice
     invalid: none found in 8192 rows (policy 'raise')
   timing:
@@ -173,7 +173,7 @@ def curves(X):
     tissue = 0.4 * dose * (1.0 - jnp.exp(-ke * t))
     return jnp.stack([plasma, tissue], axis=-1)      # (N, T=12, K=2)
 
-Xpk = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n=2048, seed=7))
+Xpk = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n_samples=2048, seed=7))
 Ypk = curves(Xpk)
 
 r_tr = jaxgsa.optimal_transport.analyze(problem, Xpk, Ypk, mode="trajectory")
@@ -184,7 +184,7 @@ print(r_tr.ot)
 jaxgsa.optimal_transport.analyze
   problem: D=3 (dose, k_abs, k_elim)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=2048 runs, T=12 x K=2 output slices
     invalid: none found in 2048 rows (policy 'raise')
   timing:
@@ -254,7 +254,7 @@ problem = jaxgsa.Problem.from_dict(
      "inert": (0.0, 1.0)},
     output_names=("plasma", "tissue"),
 )
-X4 = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n=2048, seed=7))
+X4 = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n_samples=2048, seed=7))
 Y4 = curves(X4)[:, -1, :]      # (N, K=2), the 24 h pair
 
 result = jaxgsa.optimal_transport.analyze(
@@ -269,7 +269,7 @@ print("above_dummy:", result.above_dummy)
 jaxgsa.optimal_transport.analyze
   problem: D=4 (dose, k_abs, k_elim, inert)
     marginals: uniform=4
-    correlation: independent
+    dependence: independent
     output: N=2048 runs, T=1 x K=2 output slices
     invalid: none found in 2048 rows (policy 'raise')
   timing:
@@ -403,12 +403,12 @@ input, same rows, and the two intervals disagree because they are measuring
 different things.
 
 Keep `n_bootstrap` modest in the point-cloud modes. Each replicate re-solves
-`D * n_partitions` transport problems, so 200 replicates on 4 inputs and 25
+`D * n_classes` transport problems, so 200 replicates on 4 inputs and 25
 classes is 20000 Sinkhorn solves.
 
 ## Conditioning classes
 
-`n_partitions` sets how many equal-frequency conditioning classes each
+`n_classes` sets how many equal-frequency conditioning classes each
 continuous input gets. `None` (the default) picks `min(25, N // 2)`. About 25
 is customary for this index at N >= 2500.
 
@@ -416,7 +416,7 @@ More classes localize the conditioning and lower the discretization bias, but
 leave fewer samples per class and raise the noise. The classes come from the
 inputs' ordinal ranks, so the estimator is distribution-free in X: uniform,
 Gaussian, truncated Gaussian and mixed marginals all work unchanged, and no
-CDF transform is applied. Categorical inputs ignore `n_partitions` and use one
+CDF transform is applied. Categorical inputs ignore `n_classes` and use one
 class per level, so the index depends only on the level partition and never on
 the arbitrary code order.
 

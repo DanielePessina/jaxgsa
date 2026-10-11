@@ -21,20 +21,28 @@ Example::
     from jaxgsa import dgsm
     from jaxgsa.sampling import monte_carlo
 
-    X = monte_carlo(problem, n=10000, seed=42)
-    result = dgsm.analyze(problem, fn, X)
+    X = monte_carlo(problem, n_samples=10000, seed=42)
+    result = dgsm.analyze(problem, X, fn=fn)
 """
 
-from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.dgsm._analyze import analyze, indices
+from jaxgsa._core.invalid import InvalidUnit as _InvalidUnit
+from jaxgsa._core.registry import MethodSpec as _MethodSpec
+from jaxgsa._core.registry import register as _register
+from jaxgsa.dgsm._analyze import DGSMIndices, analyze, indices
 from jaxgsa.dgsm._poincare import axis_constants, poincare_constant
 from jaxgsa.dgsm._result import DGSMResult
 
-__all__ = ["DGSMResult", "analyze", "axis_constants", "indices", "poincare_constant"]
+__all__ = [
+    "DGSMIndices",
+    "DGSMResult",
+    "analyze",
+    "axis_constants",
+    "indices",
+    "poincare_constant",
+]
 
-SPEC = register(
-    MethodSpec(
+_SPEC = _register(
+    _MethodSpec(
         name="dgsm",
         analyze=analyze,
         # Not design-based: it takes any X, or a precomputed Jacobian.
@@ -45,6 +53,6 @@ SPEC = register(
         correlation="refuses",
         categorical="refuses",
         bootstrap="n_bootstrap",
-        invalid_unit=InvalidUnit.ROW,
+        invalid_unit=_InvalidUnit.ROW,
     )
 )

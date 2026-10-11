@@ -16,6 +16,8 @@ import { ALL_METHODS, METHOD_META, type MethodKey } from "./methods";
 import { ErrorBanner } from "./primitives";
 import { PanelHeading } from "./PanelHeading";
 import { useBusyAction } from "./hooks";
+import { createRunGuard, parseOrder } from "./analysisGuards";
+import { usePersistentState } from "./session";
 import type { ProblemSpec } from "@/jaxgsa/sampling";
 
 interface MethodAvailability {
@@ -36,39 +38,57 @@ const DEFAULT_SELECTION: Record<MethodKey, boolean> = {
   pawn: false,
 };
 
+/** Methods that fit a polynomial expansion and so share the order field. */
+const ORDER_METHODS: MethodKey[] = ["pce", "shapley"];
+
+/** True when a marginal is a Gaussian cut off at one or both ends. */
+function hasTruncatedGaussian(problem: ProblemSpec | null): boolean {
+  return (
+    problem?.marginals.some(
+      (m) => m.kind === "gaussian" && (m.low !== undefined || m.high !== undefined),
+    ) ?? false
+  );
+}
+
 export function availability(
   x: XSource | null,
   problem: ProblemSpec | null,
 ): Record<MethodKey, MethodAvailability> {
   const dedicated = (method: DesignMethod): MethodAvailability => {
-    const available = x?.kind === "design" && x.method === method;
+    if (x?.kind === "design" && x.method === method) {
+      return { available: true, reason: null };
+    }
+
+    if (!x) {
+      return { available: false, reason: `Needs a ${method} design. Choose the data in step 02 first.` };
+    }
 
     return {
-      available,
-      reason: available ? null : `Requires its own ${method} design.`,
+      available: false,
+      reason:
+        x.kind === "design"
+          ? `Needs a ${method} design. The X you chose comes from a ${x.method} design.`
+          : `Needs a ${method} design. Uploaded X cannot be used with it.`,
     };
   };
 
-  const given = (): MethodAvailability => {
+  const given = (method: MethodKey): MethodAvailability => {
     if (!x) {
-      return { available: false, reason: "Load X before choosing this method." };
+      return { available: false, reason: "Needs X and Y. Choose the data in step 02 first." };
     }
 
-    const truncated = problem?.marginals.find(
-      (m) => m.kind === "gaussian" && (m.low !== undefined || m.high !== undefined),
-    );
-
-    if (truncated) {
+    // Only the polynomial methods need an orthogonal basis. PAWN and
+    // Borgonovo work on ranks and distributions, so truncation does not
+    // matter to them.
+    if (ORDER_METHODS.includes(method) && hasTruncatedGaussian(problem)) {
       return {
         available: false,
-        reason: "Browser PCE does not yet support truncated Gaussian inputs.",
+        reason:
+          "Needs Uniform or untruncated Gaussian inputs. The browser does not support truncated Gaussian inputs for this method yet.",
       };
     }
 
-    return {
-      available: true,
-      reason: null,
-    };
+    return { available: true, reason: null };
   };
 
   return {
@@ -76,10 +96,10 @@ export function availability(
     morris: dedicated("morris"),
     kucherenko: dedicated("kucherenko"),
     efast: dedicated("efast"),
-    pce: given(),
-    shapley: given(),
-    borgonovo: given(),
-    pawn: given(),
+    pce: given("pce"),
+    shapley: given("shapley"),
+    borgonovo: given("borgonovo"),
+    pawn: given("pawn"),
   };
 }
 
@@ -102,11 +122,18 @@ export function AnalyzePanel({
   givenX: Float64Array | null;
   onGoResults: () => void;
 }) {
-  const [order, setOrder] = useState("3");
+  const [order, setOrder] = usePersistentState("analyze-order", "3");
 
-  const [selected, setSelected] = useState<Record<MethodKey, boolean>>({
-    ...DEFAULT_SELECTION,
-  });
+  const [storedSelection, setSelected] = usePersistentState<Record<MethodKey, boolean>>(
+    "analyze-methods",
+    DEFAULT_SELECTION,
+  );
+
+  // A stored selection from an older build may lack newer methods.
+  const selected = { ...DEFAULT_SELECTION, ...storedSelection };
+
+  // One token per run: a change to the data cancels the loop below.
+  const [runGuard] = useState(createRunGuard);
 
   const [running, setRunning] = useState<{
     current: number;
@@ -115,6 +142,7 @@ export function AnalyzePanel({
   } | null>(null);
 
   const { busy, error, setError } = useBusyAction();
+  const [done, setDone] = useState<string | null>(null);
 
   const avail = availability(xSource, problem);
 
@@ -146,11 +174,28 @@ export function AnalyzePanel({
     }
   }, [xSource]);
 
+  // Any change to the inputs of a run makes that run stale. Its loop drops
+  // the results it has not stored yet. Panels stay mounted, so leaving the
+  // stage does not cancel a run: it keeps going and stores its results.
+  // The same change clears the old error and "done" message, which describe
+  // a run on the old inputs.
+  useEffect(() => () => runGuard.cancel(), [runGuard, yData, xSource, designs, givenX, problem]);
+
+  useEffect(() => {
+    setError(null);
+    setDone(null);
+  }, [yData, xSource, designs, givenX, problem, setError]);
+
   const selectedAvailable = ALL_METHODS.filter(
     (m) => selected[m] && avail[m].available,
   );
 
   const compatibleMethods = ALL_METHODS.filter((m) => avail[m].available);
+
+  const usesOrder = ORDER_METHODS.some((m) => selected[m] && avail[m].available);
+  const orderParse = parseOrder(order);
+  const orderError = usesOrder && !orderParse.ok ? orderParse.message : null;
+  const locked = running !== null || busy;
 
   const onRun = async () => {
     const methods = ALL_METHODS.filter((m) => selected[m] && avail[m].available);
@@ -161,12 +206,23 @@ export function AnalyzePanel({
       return;
     }
 
+    if (usesOrder && !orderParse.ok) {
+      setError(orderParse.message);
+
+      return;
+    }
+
+    // The order is only read by the PCE methods, so a bad field cannot reach
+    // them: the guard above returned already.
+    const orderValue = orderParse.ok ? orderParse.value : 3;
     const design = xSource?.kind === "design" ? designs[xSource.method] : null;
     const x = design ? design.samples : givenX;
 
     if (!x || !yData) return;
 
+    const token = runGuard.start();
     setError(null);
+    setDone(null);
     setRunning({ current: 0, total: methods.length, label: methods[0] });
 
     for (let i = 0; i < methods.length; i++) {
@@ -174,11 +230,28 @@ export function AnalyzePanel({
       setRunning({ current: i, total: methods.length, label: m });
       await new Promise((r) => setTimeout(r, 30)); // let the progress label paint
 
+      if (!runGuard.isCurrent(token)) {
+        setRunning(null);
+        setError("The run stopped because the data changed. Run it again.");
+
+        return;
+      }
+
       try {
         if (m === "pce" || m === "shapley" || m === "borgonovo" || m === "pawn") {
-          appendResult(analyzeCloud(m, problem, x, yData, Number(order)));
+          appendResult(analyzeCloud(m, problem, x, yData, orderValue));
         } else if (design) {
-          appendResult(await analyzeGenerated(design, yData));
+          const result = await analyzeGenerated(design, yData);
+
+          // The await can outlast a change to Y: drop the old Y's result.
+          if (!runGuard.isCurrent(token)) {
+            setRunning(null);
+            setError("The run stopped because the data changed. Run it again.");
+
+            return;
+          }
+
+          appendResult(result);
         }
       } catch (err) {
         setError(
@@ -191,6 +264,7 @@ export function AnalyzePanel({
     }
 
     setRunning(null);
+    setDone(`Finished ${methods.length} method${methods.length === 1 ? "" : "s"}.`);
     onGoResults();
   };
 
@@ -215,7 +289,7 @@ export function AnalyzePanel({
         <p className="font-mono text-xs text-muted-foreground">{xLabel}</p>
 
         <div>
-          {xSource?.kind === "uploaded" && (
+          {usesOrder && (
             <div className="mb-3 flex flex-wrap items-end gap-4 rounded-sm border border-border/60 bg-muted/20 p-3">
               <div className="space-y-1.5">
                 <Label htmlFor="order" className="font-mono text-xs">
@@ -224,17 +298,29 @@ export function AnalyzePanel({
                 <Input
                   id="order"
                   type="number"
+                  inputMode="numeric"
                   min={1}
                   step={1}
                   value={order}
+                  disabled={locked}
+                  aria-invalid={orderError !== null}
+                  aria-describedby={orderError ? "order-error order-help" : "order-help"}
                   onChange={(e) => setOrder(e.target.value)}
                   className="w-28 font-mono"
                 />
               </div>
-              <p className="max-w-sm pb-1 text-xs leading-relaxed text-muted-foreground">
-                Shared by PCE and PCE-backed Shapley. Higher orders add basis
-                terms quickly as the parameter count grows.
-              </p>
+              <div className="max-w-sm space-y-1 pb-1">
+                <p id="order-help" className="text-xs leading-relaxed text-muted-foreground">
+                  Shared by PCE and PCE-backed Shapley. Higher orders add basis
+                  terms quickly as the parameter count grows. The fit lowers the
+                  order when there are too few runs.
+                </p>
+                {orderError && (
+                  <p id="order-error" role="alert" className="text-xs text-destructive">
+                    {orderError}
+                  </p>
+                )}
+              </div>
             </div>
           )}
           {xSource === null ? (
@@ -262,9 +348,11 @@ export function AnalyzePanel({
                       <input
                         type="checkbox"
                         checked={on}
-                        disabled={!enabled}
+                        disabled={!enabled || locked}
+                        aria-label={m}
+                        aria-describedby={`method-${m}-desc`}
                         onChange={(e) =>
-                          setSelected((s) => ({ ...s, [m]: e.target.checked }))
+                          setSelected({ ...selected, [m]: e.target.checked })
                         }
                         className="size-4 accent-primary"
                       />
@@ -288,7 +376,10 @@ export function AnalyzePanel({
                         </span>
                       </span>
                     </div>
-                    <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+                    <p
+                      id={`method-${m}-desc`}
+                      className="mt-1.5 text-xs leading-relaxed text-muted-foreground"
+                    >
                       {enabled ? METHOD_META[m].blurb : avail[m].reason}
                     </p>
                   </label>
@@ -306,7 +397,9 @@ export function AnalyzePanel({
           </p>
           <Button
             type="button"
-            disabled={!yData || busy || running !== null || selectedAvailable.length === 0}
+            disabled={
+              !yData || locked || selectedAvailable.length === 0 || orderError !== null
+            }
             onClick={() => void onRun()}
           >
             {running
@@ -316,6 +409,13 @@ export function AnalyzePanel({
                 : `Run selected (${selectedAvailable.length})`}
           </Button>
         </div>
+
+        {/* Always mounted, so screen readers announce each change. */}
+        <p role="status" aria-live="polite" className="sr-only">
+          {running
+            ? `Running ${running.label}, method ${running.current + 1} of ${running.total}.`
+            : (done ?? "")}
+        </p>
 
         {error && <ErrorBanner title="analysis error" message={error} />}
       </CardContent>

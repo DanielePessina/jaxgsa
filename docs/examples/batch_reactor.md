@@ -34,7 +34,7 @@ output shape: (4096, 40, 1)  (N, T, K)
 jaxgsa.sobol.analyze
   problem: D=3 (Ca0, temperature_C, pH)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=4096 runs, T=40 x K=1 output slices
     invalid: none found in 512 Saltelli groups (policy 'raise')
   timing:
