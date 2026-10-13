@@ -183,7 +183,7 @@ wheels = [
 
 [[package]]
 name = "jaxgsa"
-version = "1.1.0"
+version = "1.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "jax" },
@@ -208,15 +208,15 @@ examples = [
 
 [package.metadata]
 requires-dist = [
-    { name = "jax", specifier = ">=0.6" },
-    { name = "jaxlib", specifier = ">=0.6" },
+    { name = "jax", specifier = ">=0.8" },
+    { name = "jaxlib", specifier = ">=0.8" },
     { name = "matplotlib", marker = "extra == 'examples'", specifier = ">=3.10.8" },
     { name = "numpy", specifier = ">=2" },
     { name = "pot", marker = "extra == 'dev'", specifier = ">=0.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.8.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
-    { name = "salib", marker = "extra == 'dev'", specifier = ">=1.4" },
+    { name = "salib", marker = "extra == 'dev'", specifier = ">=1.5" },
     { name = "scipy", specifier = ">=1.15" },
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.21" },
     { name = "xarray", specifier = ">=2026.2.0" },

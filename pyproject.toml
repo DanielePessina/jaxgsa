@@ -1,6 +1,6 @@
 [project]
 name = "jaxgsa"
-version = "1.1.0"
+version = "1.1.1"
 description = "Global Sensitivity Analysis in JAX"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -35,8 +35,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "jax>=0.6",
-    "jaxlib>=0.6",
+    "jax>=0.8",
+    "jaxlib>=0.8",
     "numpy>=2",
     "scipy>=1.15",
     "xarray>=2026.2.0",
@@ -54,7 +54,7 @@ dev = [
     "pytest>=8",
     "ruff>=0.4",
     "ty>=0.0.21",
-    "SALib>=1.4",
+    "salib>=1.5",
     "pot>=0.9",
     "pytest-xdist>=3.8.0",
 ]
