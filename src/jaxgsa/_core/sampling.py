@@ -609,7 +609,7 @@ def _stable_unique_rows(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
     # ``setdefault`` numbers the rows in first-appearance order: the label of a
     # new row is the number of distinct rows seen before it.
-    seen: dict[bytes, int] = {}
+    seen: dict[object, int] = {}
     setdefault = seen.setdefault
     expanded_to_unique = np.fromiter(
         (setdefault(key, len(seen)) for key in keys),

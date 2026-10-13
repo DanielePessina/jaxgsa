@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.1.1
+
+This release changes no API and no results. It corrects the minimum versions
+in the package metadata.
+
+### Fixed
+
+- jaxgsa now requires `jax>=0.8` and `jaxlib>=0.8`. The metadata said 0.6,
+  but no CI job tested that version. On jax 0.7, `jaxgsa.hdmr` fails with an
+  `UnexpectedTracerError`, and on jax 0.6 most of the test suite fails. If
+  your environment has jax 0.6 or 0.7, pip now upgrades it.
+- The `dev` extra now requires `SALib>=1.5`. SALib 1.4.0 does not build on a
+  current Python.
+
+### Docs and CI
+
+- A new `lowest-versions` CI job installs the lowest version of every
+  dependency that `pyproject.toml` allows, on Python 3.12, and runs the
+  default test tier. A minimum version that is too low now fails CI.
+- `ruff format` no longer formats Markdown files. Ruff 0.16 started to format
+  Python code blocks in Markdown, which removed the aligned comments in the
+  docs and changed old CHANGELOG entries.
+
 ## 1.1.0
 
 jaxgsa 1.0.x had no users. This release therefore removes and renames some API
