@@ -3,3 +3,8 @@ target-version = "py312"
 
 [lint]
 select = ["E", "F", "I", "W"]
+
+[format]
+# Ruff 0.16 also formats Python code blocks in Markdown. The docs keep their
+# hand-aligned comments and the CHANGELOG keeps its old entries as written.
+exclude = ["*.md"]
