@@ -96,6 +96,32 @@ jobs:
       - name: Run all ordinary numerical regressions
         run: uv run pytest -m "not slow" -q -n auto
 
+  # The default tier at the lowest versions that pyproject.toml allows, on the
+  # lowest supported Python. uv.lock pins recent versions, so the other jobs
+  # never test a declared floor. This job fails when a floor is too low.
+  #
+  # test_slices_share_nothing asks for bitwise equality between a mapped
+  # slice and the same slice alone. Older XLA versions round those two
+  # paths differently in float32 (about 3e-6), so it runs only on the
+  # locked versions.
+  lowest-versions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - name: Install the lowest allowed versions
+        run: |
+          uv venv
+          uv pip install --resolution lowest-direct -e ".[dev]"
+          uv pip list | grep -iE "^(jax|jaxlib|numpy|scipy|xarray) "
+      - name: Run all ordinary numerical regressions
+        run: >-
+          .venv/bin/python -m pytest -m "not slow" -q -n auto
+          --deselect tests/test_hsic.py::TestSliceIndependence::test_slices_share_nothing
+
   # The oracle and convergence tests at full sample size (SALib, POT and
   # closed-form references). `addopts = "-m 'not slow'"` in pyproject.toml
   # keeps them out of every ordinary run, because together they cost more than
