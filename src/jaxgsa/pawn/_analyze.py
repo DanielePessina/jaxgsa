@@ -438,8 +438,10 @@ def _bootstrap_subkeys(key: Array, n_bootstrap: int) -> Array:
     """Return the per-replicate keys of the sequential ``split`` chain.
 
     Replicate ``i`` draws its rows from the second key of the ``i``-th
-    ``jax.random.split`` applied to the running key, which is the chain
-    :func:`jaxgsa._core.bootstrap.bootstrap_draws` walks.
+    ``jax.random.split`` applied to the running key. A ``lax.scan`` builds
+    this chain. It is the same chain that
+    :func:`jaxgsa._core.bootstrap.bootstrap_draws` uses, but pawn does not
+    call that function.
 
     Args:
         key: PRNG key.
@@ -635,9 +637,12 @@ def _pawn_bootstrap(
 ) -> Array:
     """Compute PAWN indices on ``n_bootstrap`` row-resamples.
 
-    The resamples are the ones :func:`jaxgsa._core.bootstrap.bootstrap_draws`
-    would draw from ``key``. Each chunk of output columns runs all replicates
-    in one jitted call. Chunking and the memory estimate match
+    :func:`_bootstrap_subkeys` makes one key per replicate from ``key``.
+    Inside the jitted kernel, ``lax.map`` runs the replicates one after
+    another. Each replicate draws ``N`` row indices with replacement by
+    ``jax.random.choice``. The same row indices apply to every output column
+    of the chunk. Each chunk of output columns runs all replicates in one
+    jitted call. Chunking and the memory estimate match
     :func:`_pawn_core`, because a replicate has the same working set as one
     point-estimate call.
 
