@@ -378,6 +378,40 @@ class TestMedianBandwidth:
         dists_sq = (x[:, None] - x[None, :]) ** 2
         assert float(jnp.median(dists_sq)) < 0.99 * float(_median_bandwidth_sq(x))
 
+    @pytest.mark.slow
+    def test_float32_median_survives_more_than_two_to_the_31_pairs(self):
+        """Tier T1 (reference implementation): no 32-bit overflow in the pair count.
+
+        The selection counts all ``N^2`` pairs. Without x64 that count once
+        lived in ``int32``, which overflows past ``N = 46,340``, and the
+        median came back NaN. ``N = 65,535`` is the largest size the 32-bit
+        count holds. Marked slow: compiling the selection at this N takes
+        minutes on CPU.
+
+        The reference is the exact median of the ``N (N - 1) / 2`` pairwise
+        distances, found by bisection in float64 NumPy. Each step counts the
+        pairs within a distance ``s`` from the sorted sample with
+        ``searchsorted``, so no pair is ever formed.
+        """
+        n = 65_535
+        x32 = np.random.default_rng(n).uniform(size=n).astype(np.float32)
+        with jax.enable_x64(False):
+            actual = float(_median_bandwidth_sq(jnp.asarray(x32)))
+
+        y = np.sort(x32.astype(np.float64))
+        n_pairs = n * (n - 1) // 2
+
+        def pairs_within(s: float) -> int:
+            ordered = np.searchsorted(y, y + s, "right") - np.searchsorted(y, y - s, "left")
+            return (int(ordered.sum()) - n) // 2
+
+        lo, hi = 0.0, 1.0
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            lo, hi = (lo, mid) if pairs_within(mid) >= n_pairs / 2 else (mid, hi)
+        assert np.isfinite(actual)
+        np.testing.assert_allclose(actual, hi**2, rtol=1e-5)
+
 
 class TestSliceIndependence:
     """Analysing many slices together must not disturb any one of them."""
@@ -466,6 +500,21 @@ class TestValidation:
         X = jnp.asarray(np.random.default_rng(0).uniform(size=(n_rows, 1)))
         with pytest.raises(ValueError, match=match):
             analyze(problem, X, X[:, 0] * 2.0, **kwargs)
+
+    @pytest.mark.parametrize("entry", [analyze, indices], ids=["analyze", "indices"])
+    def test_float32_refuses_more_samples_than_the_pair_count_holds(self, entry):
+        """Without x64, N above 65,535 is refused before any kernel is built.
+
+        The median heuristic counts all ``N^2`` pairs in 32 bits. The kernels
+        at this N would need about 17 GB per matrix, so this test would run
+        out of memory, not fail cleanly, if the check came late.
+        """
+        n = 65_536
+        problem = Problem(names=("x",), bounds=((0, 1),))
+        with jax.enable_x64(False):
+            X = jnp.asarray(np.random.default_rng(0).uniform(size=(n, 1)), dtype=jnp.float32)
+            with pytest.raises(ValueError, match="jax_enable_x64"):
+                entry(problem, X, X[:, 0], key=0)
 
 
 class TestSinglePrecisionWarning:
