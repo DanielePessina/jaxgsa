@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.1.2
+
+This release changes no API and no correct index value. It fixes two bugs
+and corrects several docs.
+
+### Fixed
+
+- `jax.grad` and `jax.jacrev` now work through
+  `jaxgsa.optimal_transport.indices` in the `"multivariate"` and
+  `"trajectory"` modes. Before, they raised `ValueError: Reverse-mode
+  differentiation does not work for lax.while_loop`, although the docs said
+  that reverse mode worked. The Sinkhorn solver keeps its loop, so every index
+  value is bitwise unchanged. The derivative now comes from the implicit
+  function theorem at the solver's fixed point. Forward-mode derivatives
+  therefore change slightly: they are now the derivative of the converged
+  solution, not of the iterate where the loop stopped. GMRES solves the
+  linear system of the derivative. Second derivatives run, but they are not
+  tested.
+- `jaxgsa.hsic` no longer returns NaN indices for more than 46,340 samples
+  when JAX runs in single precision (`jax_enable_x64` off). The median
+  bandwidth counted sample pairs in a 32-bit signed integer, which
+  overflowed. It now counts in an unsigned 32-bit integer, which is exact up
+  to 65,535 samples. Above that, single-precision HSIC raises a `ValueError`
+  that tells you to enable x64. Double precision is unchanged.
+
+### Docs
+
+- The differentiation guide and the `optimal_transport.indices` docstring
+  now describe how the point-cloud modes are differentiated.
+- The bootstrap helper docstrings now name the methods that really call
+  `bootstrap_draws` (pce and hdmr). pawn and shapley use their own loops.
+- The dependent-inputs skill reference and the Shapley example no longer
+  claim "two decimals" of agreement where the gap is up to 0.010 and 0.015.
+
+### Internal
+
+- The test helper for correlated Gaussian-linear indices now accepts any
+  covariance matrix, not only a correlation matrix.
+
 ## 1.1.1
 
 This release changes no API and no results. It corrects the minimum versions
