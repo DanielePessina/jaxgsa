@@ -626,12 +626,19 @@ def _joint_kernel(
             # scale=V, not this class's own max cost: see _sinkhorn_w2's
             # docstring (M3) for why the regularization must be relative to
             # one fixed, class-independent normalizer.
-            cost, err = _sinkhorn_w2(C, log_b_all[g, m], epsilon, max_iter, tol, V)
+            # An empty class has no valid column, so its log_b is all -inf
+            # and the solve returns NaN. jnp.where below discards that value,
+            # but a NaN still leaks into a reverse-mode gradient through
+            # the discarded branch. So give an empty class one dummy column
+            # of mass 1: the solve stays finite and is discarded anyway.
+            empty = ~(count_dm > 0)
+            dummy_log_b = jnp.full((P,), -jnp.inf, dtype).at[0].set(0.0)
+            log_b = jnp.where(empty, dummy_log_b, log_b_all[g, m])
+            cost, err = _sinkhorn_w2(C, log_b, epsilon, max_iter, tol, V)
             cls_mean = (Z_c * mask_dm[:, None]).sum(axis=0) / jnp.maximum(count_dm, 1.0)
             adv = ((cls_mean - mean_all) ** 2).sum()
             # An empty class carries zero weight; discard its (junk) solve
             # so it neither poisons the sum nor counts as a failure.
-            empty = ~(count_dm > 0)
             zero = jnp.zeros((), dtype)
             return (
                 jnp.where(empty, zero, cost),
@@ -1590,9 +1597,13 @@ def indices(
     static at trace time: one mode is traced per concrete value, exactly as
     ``analyze`` compiles one. The point-cloud modes go through the
     entropic solver, whose stopping rule is a ``while_loop`` on the
-    marginal residual; that is differentiable but the derivative is of the
-    iterate the loop stopped at, so tighten ``tol`` before trusting a
-    gradient through them.
+    marginal residual. The derivative does not go through that loop. It
+    comes from the implicit function theorem at the solver's fixed point,
+    so reverse mode (``jax.grad``, ``jax.jacrev``) and forward mode both
+    work. The derivative is that of the converged solution: if a solve
+    stops at ``max_iter`` before it reaches ``tol``, the derivative is as
+    unreliable as the value. Second derivatives run, but they are not
+    tested.
 
     There is no ``n_bootstrap``, no ``key`` and no ``dummy``. All three are
     policy: the bootstrap and the dummy baseline draw randomness and return

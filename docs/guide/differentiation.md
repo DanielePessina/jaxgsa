@@ -66,7 +66,7 @@ and `jax.jacrev`.
 | HSIC | `jaxgsa.hsic.indices` | Reverse and forward mode |
 | PAWN | `jaxgsa.pawn.indices` | Traceable, but gradients need care |
 | Borgonovo | `jaxgsa.borgonovo.indices` | Reverse and forward mode |
-| Optimal transport | `jaxgsa.optimal_transport.indices` | Reverse and forward mode |
+| Optimal transport | `jaxgsa.optimal_transport.indices` | Reverse and forward mode. Point-cloud modes differentiate the converged Sinkhorn solution (implicit function theorem). Second derivatives run but are not tested |
 | Rank | `jaxgsa.rank.indices` | Traces. The index is piecewise constant in `X`, so `d/dX` is 0. `d/dY` is not |
 | Kucherenko | None | Host NumPy implementation |
 | VKOGA | None | Host quasi-Monte Carlo index stage |

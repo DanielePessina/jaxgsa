@@ -170,6 +170,85 @@ class TestOTSolverProperties:
         padded, _ = _sinkhorn_w2(jnp.asarray(C_pad), jnp.asarray(log_b), *args)
         assert float(padded) == pytest.approx(float(ref), abs=1e-6)
 
+    def test_sinkhorn_reverse_gradient_matches_central_difference(self):
+        """Tier T4: the implicit reverse gradient matches a central difference.
+
+        The target has unequal weights and padded columns, so the transpose
+        solve meets its real null direction ``b``, not the constant vector.
+        The gradients in ``C``, ``scale`` and ``epsilon`` must match a
+        central difference, and a padded column must get an exact zero.
+        """
+        from jaxgsa.optimal_transport._solver import _sinkhorn_w2
+
+        with jax.enable_x64():
+            rng = np.random.default_rng(0)
+            N, P = 30, 12
+            source = rng.normal(size=(N, 2))
+            target = rng.normal(size=(P, 2))
+            valid = np.zeros(P, dtype=bool)
+            valid[[0, 2, 3, 5, 6, 8, 9, 11]] = True
+            weights = rng.uniform(0.2, 2.0, valid.sum())
+            log_b = np.full(P, -np.inf)
+            log_b[valid] = np.log(weights / weights.sum())
+            cost = ((source[:, None] - target[None]) ** 2).sum(-1) * valid[None, :]
+            C, log_b = jnp.asarray(cost), jnp.asarray(log_b)
+
+            def f(C, scale, epsilon):
+                return _sinkhorn_w2(
+                    C, log_b, epsilon, jnp.asarray(200_000), jnp.asarray(1e-13), scale
+                )[0]
+
+            scale, epsilon = jnp.asarray(2.0), jnp.asarray(0.03)
+            grad_C, grad_scale, grad_eps = jax.grad(f, argnums=(0, 1, 2))(C, scale, epsilon)
+            direction = jnp.asarray(rng.normal(size=C.shape) * valid[None, :])
+            h = 1e-6
+            fd_C = (
+                f(C + h * direction, scale, epsilon) - f(C - h * direction, scale, epsilon)
+            ) / (2 * h)
+            fd_scale = (f(C, scale + h, epsilon) - f(C, scale - h, epsilon)) / (2 * h)
+            h_eps = h * 0.03
+            fd_eps = (f(C, scale, epsilon + h_eps) - f(C, scale, epsilon - h_eps)) / (2 * h_eps)
+            reverse_C = jnp.vdot(grad_C, direction)
+
+        np.testing.assert_allclose(float(reverse_C), float(fd_C), rtol=1e-6)
+        np.testing.assert_allclose(float(grad_scale), float(fd_scale), rtol=1e-6)
+        np.testing.assert_allclose(float(grad_eps), float(fd_eps), rtol=1e-6)
+        assert np.all(np.asarray(grad_C)[:, ~valid] == 0.0)
+
+    def test_empty_class_gives_a_finite_gradient(self):
+        """An empty class must not leak NaN into a reverse-mode gradient.
+
+        An empty class has no valid target column. The kernel discards its
+        solve with ``jnp.where``, but reverse mode still differentiates the
+        discarded branch. So the kernel gives that class a dummy column, and
+        the gradient stays finite.
+        """
+        from jaxgsa.optimal_transport._analyze import _joint_kernel
+
+        with jax.enable_x64():
+            N = 40
+            Z = jnp.asarray(np.random.default_rng(1).normal(size=(N, 2)))
+            # One parameter, two classes: all N rows, then an empty class.
+            cls_idx = jnp.stack([jnp.arange(N), jnp.zeros(N, dtype=int)])
+            cls_idx = cls_idx[None, None].astype(jnp.int32)  # (R, D, M, P)
+            counts = jnp.asarray([[[float(N), 0.0]]])  # (R, D, M)
+
+            def total(Z):
+                return _joint_kernel(
+                    Z,
+                    jnp.arange(N)[None],
+                    ((cls_idx, counts),),
+                    (jnp.arange(2, dtype=jnp.int32),),
+                    jnp.asarray(0.1),
+                    jnp.asarray(2000),
+                    jnp.asarray(1e-9),
+                )[0].sum()
+
+            value, grad = jax.value_and_grad(total)(Z)
+
+        assert np.isfinite(float(value))
+        assert np.all(np.isfinite(np.asarray(grad)))
+
 
 def _gaussian_additive(n: int):
     """``Y = X1 + X2`` with ``N(0, 1)`` and ``N(0, 4)`` inputs, and its closed form."""
@@ -945,6 +1024,75 @@ class TestIndicesPureCore:
         assert jac.shape == (N,)
         assert np.all(np.isfinite(np.asarray(jac)))
         np.testing.assert_allclose(np.asarray(jac), np.asarray(eager), rtol=1e-8)
+
+    @pytest.mark.parametrize("mode", ["multivariate", "trajectory"])
+    def test_point_cloud_modes_differentiate_in_both_modes(self, mode):
+        """Tier T4: the Sinkhorn modes give the same derivative in reverse and forward mode.
+
+        The solver stops on a ``while_loop``, which reverse mode cannot pass
+        through. The derivative comes from the implicit function theorem at
+        the fixed point instead, so ``jax.grad``, ``jax.jvp`` and a central
+        finite difference must agree. Before 1.1.2, ``jax.grad`` raised here.
+        """
+        with jax.enable_x64():
+            X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=120, seed=11))
+            if mode == "multivariate":
+                Y = jnp.stack([ishigami.evaluate(X), X[:, 0] * X[:, 1]], axis=1)
+            else:
+                Y = jnp.stack([X[:, 0] * t + X[:, 2] * (1 - t) for t in (0.0, 0.5, 1.0)], axis=1)
+                Y = Y[..., None]
+
+            def loss(outputs):
+                ot = jaxgsa.optimal_transport.indices(
+                    ishigami.PROBLEM,
+                    X,
+                    outputs,
+                    mode=mode,
+                    epsilon=0.1,
+                    tol=1e-13,
+                    max_iter=50_000,
+                )[0]
+                return (ot * jnp.array([1.0, -0.7, 0.4])).sum()
+
+            direction = jax.random.normal(jax.random.key(5), Y.shape)
+            reverse = jnp.vdot(jax.jit(jax.grad(loss))(Y), direction)
+            _, forward = jax.jvp(loss, (Y,), (direction,))
+            h = 1e-6
+            central = (loss(Y + h * direction) - loss(Y - h * direction)) / (2 * h)
+
+        np.testing.assert_allclose(float(reverse), float(forward), rtol=1e-8)
+        np.testing.assert_allclose(float(reverse), float(central), rtol=1e-5)
+
+    def test_default_epsilon_gradient_matches_a_tight_reference(self):
+        """Tier T4: at the default epsilon, the default gradient is accurate.
+
+        At ``epsilon = 0.03`` the scaling update contracts slowly, so a
+        loose linear solve gave a gradient off by about 1e-3. The default
+        settings must give the same gradient in reverse and forward mode,
+        and match a gradient with a much tighter ``tol``.
+        """
+        with jax.enable_x64():
+            X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=120, seed=11))
+            Y = jnp.stack([ishigami.evaluate(X), X[:, 0] * X[:, 1]], axis=1)
+
+            def make_loss(**solver):
+                def loss(outputs):
+                    ot = jaxgsa.optimal_transport.indices(
+                        ishigami.PROBLEM, X, outputs, mode="multivariate", **solver
+                    )[0]
+                    return (ot * jnp.array([1.0, -0.7, 0.4])).sum()
+
+                return loss
+
+            loss = make_loss()
+            direction = jax.random.normal(jax.random.key(5), Y.shape)
+            reverse = jnp.vdot(jax.jit(jax.grad(loss))(Y), direction)
+            _, forward = jax.jvp(loss, (Y,), (direction,))
+            tight = make_loss(tol=1e-13, max_iter=100_000)
+            reference = jnp.vdot(jax.jit(jax.grad(tight))(Y), direction)
+
+        np.testing.assert_allclose(float(reverse), float(forward), rtol=1e-10)
+        np.testing.assert_allclose(float(reverse), float(reference), rtol=1e-6)
 
     def test_categorical_is_refused_with_a_pointer_to_analyze(self):
         """Tier T4: a categorical parameter cannot be traced, so the core says so."""
