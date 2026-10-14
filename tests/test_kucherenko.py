@@ -68,6 +68,28 @@ def test_asymmetric_correlation_structure():
     np.testing.assert_allclose(float(np.asarray(result.variance)), var_y, rtol=2e-2)
 
 
+def test_analytic_indices_accepts_a_covariance_matrix():
+    """The closed form must not depend on the input scale.
+
+    ``Y = a . X`` with ``X ~ N(0, D R D)`` is the same model as
+    ``Y = (D a) . Z`` with ``Z ~ N(0, R)``. The indices must match. The
+    old unit-diagonal formula gave ``S_TC = [3.654, 0.654]`` for the 2-D
+    case below.
+    """
+    scales = np.array([2.0, 0.5, 3.0, 1.5])
+    sigma = np.diag(scales) @ R_ASYM @ np.diag(scales)
+    S_TC, S_TU, var_y = analytic_indices(A_COEF_ASYM, sigma)
+    S_TC_ref, S_TU_ref, var_y_ref = analytic_indices(scales * A_COEF_ASYM, R_ASYM)
+    np.testing.assert_allclose(S_TC, S_TC_ref, rtol=1e-12)
+    np.testing.assert_allclose(S_TU, S_TU_ref, rtol=1e-12)
+    np.testing.assert_allclose(var_y, var_y_ref, rtol=1e-12)
+
+    # Hand values: Sigma a = [5.2, 2.2], V = 7.4, Var(X_i | X_~i) = Sigma_ii - 1.44 / Sigma_~i~i.
+    S_TC2, S_TU2, _ = analytic_indices(np.ones(2), np.array([[4.0, 1.2], [1.2, 1.0]]))
+    np.testing.assert_allclose(S_TC2, [27.04 / 29.6, 4.84 / 7.4], rtol=1e-12)
+    np.testing.assert_allclose(S_TU2, [(4.0 - 1.44) / 7.4, (1.0 - 0.36) / 7.4], rtol=1e-12)
+
+
 def test_large_output_mean_does_not_corrupt_the_indices():
     """A +1e8 output offset must leave every index unchanged.
 
