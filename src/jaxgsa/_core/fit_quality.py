@@ -223,3 +223,89 @@ def warn_cv_overfit(
         skip_file_prefixes=(PACKAGE_DIR,),
         category=JaxgsaWarning,
     )
+
+
+@jax.jit
+def _non_finite_stats(
+    coefficients: Array, cv_rmse: Array, rmse: Array, std_y: Array
+) -> tuple[Array, Array]:
+    """Count the non-finite fit entries that a constant output cannot explain.
+
+    A constant output slice has ``std(Y) == 0`` and legitimately reports
+    undefined ratios. A slice with spread has no such excuse, so a non-finite
+    leave-one-out or in-sample error there means the fit itself failed.
+
+    Args:
+        coefficients: Fitted coefficients, any shape.
+        cv_rmse: Leave-one-out RMSE per output slice.
+        rmse: In-sample RMSE per output slice, same shape as ``cv_rmse``.
+        std_y: Standard deviation of ``Y`` per slice, same shape as
+            ``cv_rmse``.
+
+    Returns:
+        ``(n_bad_coefficients, n_bad_slices)``.
+    """
+    spread = jnp.asarray(std_y) > 0
+    bad_slice = spread & ~(jnp.isfinite(cv_rmse) & jnp.isfinite(rmse))
+    return jnp.sum(~jnp.isfinite(coefficients)), jnp.sum(bad_slice)
+
+
+def check_fit_finite(
+    namespace: str,
+    coefficients: Array,
+    cv_rmse: Array | None,
+    rmse: Array | None,
+    std_y: Array,
+    *,
+    advice: str,
+) -> None:
+    """Refuse or warn when a fit produced non-finite numbers.
+
+    The other checks in this module skip non-finite entries, because a
+    constant output has none to report. That also hides a real failure: when
+    the Gram matrix is numerically singular, the Cholesky factor behind the
+    leave-one-out error is NaN, the coefficients can overflow, and every
+    index read from them is meaningless, yet the arrays keep their shapes.
+
+    Non-finite coefficients make the indices undefined, so the call raises.
+    A non-finite error on a slice with spread leaves the indices defined but
+    unverified, so the call warns.
+
+    Args:
+        namespace: The public function the message speaks for.
+        coefficients: Fitted coefficients, any shape.
+        cv_rmse: Leave-one-out RMSE per output slice, or ``None`` when the
+            fit reported none (the error check is then skipped).
+        rmse: In-sample RMSE per output slice, or ``None``.
+        std_y: Standard deviation of ``Y`` per output slice.
+        advice: What to do about it. Appended to the message.
+
+    Raises:
+        ValueError: If any coefficient is not finite.
+
+    Warns:
+        JaxgsaWarning: If ``cv_rmse`` or ``rmse`` is not finite on a slice
+            whose output is not constant.
+    """
+    check_errors = cv_rmse is not None and rmse is not None
+    n_coef, n_slices = _non_finite_stats(
+        coefficients,
+        cv_rmse if cv_rmse is not None else jnp.zeros(()),
+        rmse if rmse is not None else jnp.zeros(()),
+        std_y if check_errors else jnp.ones(()),
+    )
+    if int(n_coef):
+        raise ValueError(
+            f"{namespace}: the fitted coefficients are not finite, because the Gram "
+            "matrix of the design is numerically singular. The indices are "
+            f"undefined. {advice}"
+        )
+    if check_errors and int(n_slices):
+        warnings.warn(
+            f"{namespace}: cv_rmse or rmse is not finite on {int(n_slices)} output "
+            "slice(s) whose output is not constant. The Gram matrix of the design "
+            "is numerically singular, so the leave-one-out factorisation failed. "
+            f"The indices are unreliable. {advice}",
+            skip_file_prefixes=(PACKAGE_DIR,),
+            category=JaxgsaWarning,
+        )

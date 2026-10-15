@@ -14,7 +14,9 @@ from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa.problem import CategoricalSpec, Problem, UniformSpec
 
 
-def _truncnorm_cdf(z: Array, a: float, b: float, *, clip: bool = True) -> Array:
+def _truncnorm_cdf(
+    z: Array, a: float | np.ndarray, b: float | np.ndarray, *, clip: bool = True
+) -> Array:
     """CDF of a standard normal truncated to ``[a, b]``, evaluated at ``z``.
 
     This exists so the transform stays on device: ``scipy.stats.truncnorm.cdf``
@@ -34,12 +36,17 @@ def _truncnorm_cdf(z: Array, a: float, b: float, *, clip: bool = True) -> Array:
     care, since the direct form is already well conditioned there.
 
     ``a`` and ``b`` are Python floats read off the spec, so the branch between
-    the two forms is taken at trace time and never depends on data.
+    the two forms is taken at trace time and never depends on data. They may
+    also be host arrays of per-column bounds, broadcast against ``z``; the
+    caller then guarantees that every ``a`` falls on the same side of 0, so
+    one branch serves all columns.
 
     Args:
         z: Standardised values, any shape.
-        a: Lower truncation bound in standard units. May be ``-inf``.
-        b: Upper truncation bound in standard units. May be ``+inf``.
+        a: Lower truncation bound in standard units. May be ``-inf``. A host
+            array holds one bound per column of ``z``.
+        b: Upper truncation bound in standard units. May be ``+inf``. A host
+            array holds one bound per column of ``z``.
         clip: Clamp the result to ``[0, 1]`` when ``True`` (the default). A
             ``z`` outside ``[a, b]`` otherwise computes to a value outside
             ``[0, 1]``, which is what :func:`cdf_to_unit_interval` needs to
@@ -56,7 +63,7 @@ def _truncnorm_cdf(z: Array, a: float, b: float, *, clip: bool = True) -> Array:
     # of silently promoting a float32 column to float64 under x64.
     lo = jnp.asarray(a, dtype=z.dtype)
     hi = jnp.asarray(b, dtype=z.dtype)
-    if a > 0.0:  # interval in the upper tail: use the survival function
+    if bool(np.all(np.asarray(a) > 0.0)):  # interval in the upper tail: use the survival function
         sf_a, sf_b = ndtr(-lo), ndtr(-hi)
         u = (sf_a - ndtr(-z)) / (sf_a - sf_b)
     else:
@@ -108,6 +115,33 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
             reject categorical problems up front, so this is a second,
             layered guard.
     """
+    if problem.n_params < GROUPED_MIN_D:
+        return _cdf_by_column(X, problem)
+    return _cdf_by_group(X, problem)
+
+
+# Smallest D that takes the grouped transform. Below it the per-column loop is
+# cheap, and it keeps float32 results bit-identical to earlier releases: under
+# `jit` XLA fuses the grouped form differently, and its fused multiply-add
+# contraction then moves float32 values in the last bit. The loop dispatches
+# eagerly per column, so it costs seconds at D in the hundreds; the grouped
+# form costs a fraction of a second.
+GROUPED_MIN_D = 17
+
+
+def _cdf_by_column(X: Array, problem: Problem) -> Array:
+    """Map each column through its marginal CDF, one column at a time.
+
+    Args:
+        X: ``(N, D)`` input samples in physical units.
+        problem: Problem with per-dimension distribution specs.
+
+    Returns:
+        ``(N, D)`` array. See :func:`cdf_to_unit_interval`.
+
+    Raises:
+        ValueError: If any parameter is categorical.
+    """
     from jax.scipy.stats import norm as jax_norm
 
     D = problem.n_params
@@ -154,3 +188,120 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
         cols.append(jnp.where(in_range, jnp.clip(u, clip_lo, clip_hi), u))
 
     return jnp.column_stack(cols)
+
+
+def _cdf_by_group(X: Array, problem: Problem) -> Array:
+    """Map the columns through their marginal CDFs, one op per marginal family.
+
+    Args:
+        X: ``(N, D)`` input samples in physical units.
+        problem: Problem with per-dimension distribution specs.
+
+    Returns:
+        ``(N, D)`` array. See :func:`cdf_to_unit_interval`.
+
+    Raises:
+        ValueError: If any parameter is categorical.
+    """
+    D = problem.n_params
+    X = jnp.asarray(X)
+    dtype = X.dtype if jnp.issubdtype(X.dtype, jnp.floating) else jnp.result_type(X.dtype, float)
+    X = X.astype(dtype)
+
+    # CDF-to-unit-interval mapping: apply F(x) per dimension. For Gaussian
+    # inputs, standardised truncation bounds a=(lo-mu)/sigma, b=(hi-mu)/sigma
+    # follow scipy's truncnorm convention. Only the Gaussian branches clip; see
+    # the docstring for why the uniform branch must not.
+    #
+    # Columns are grouped by marginal family and each group goes through one
+    # broadcast op, so the number of eager dispatches does not grow with D. The
+    # per-column constants are computed on the host in double precision and
+    # cast to the column dtype, which is exactly what a Python-float operand
+    # becomes inside a single-column op. Run eagerly, the result is bit-identical to a
+    # column-by-column loop.
+    uniform: list[int] = []
+    plain: list[int] = []  # unbounded Gaussian
+    lower: list[int] = []  # truncated, interval not in the upper tail
+    upper: list[int] = []  # truncated, interval in the upper tail
+    consts: dict[int, tuple[float, ...]] = {}
+    for d in range(D):
+        spec = problem.input_specs[d]
+        if isinstance(spec, CategoricalSpec):
+            raise ValueError(
+                f"Parameter {problem.names[d]!r} is categorical; its step CDF is "
+                "many-to-one and has no meaningful unit-interval image. Use "
+                "jaxgsa.optimal_transport, jaxgsa.borgonovo, or jaxgsa.sobol "
+                "for categorical inputs"
+            )
+        if isinstance(spec, UniformSpec):  # affine map (x - lo)/(hi - lo) is the CDF of U(lo, hi)
+            uniform.append(d)
+            consts[d] = (spec.low, spec.high - spec.low)
+            continue
+        # math.sqrt, not float(jnp.sqrt(...)): inside a trace jnp.sqrt returns a
+        # tracer even for a Python-float input, so float() on it raises. The
+        # variance is a plain float on the spec, so no JAX op is needed at all,
+        # and this keeps the whole branch below concrete at trace time.
+        std = math.sqrt(spec.variance)
+        if spec.low is not None or spec.high is not None:
+            a = -np.inf if spec.low is None else (spec.low - spec.mean) / std
+            b = np.inf if spec.high is None else (spec.high - spec.mean) / std
+            (upper if a > 0.0 else lower).append(d)
+            consts[d] = (spec.mean, std, a, b)
+        else:
+            plain.append(d)
+            consts[d] = (spec.mean, std)
+
+    def column_consts(group: list[int], n: int) -> list[Array]:
+        values = np.asarray([consts[d][:n] for d in group], dtype=np.float64)
+        return [jnp.asarray(values[:, j], dtype=dtype) for j in range(n)]
+
+    # The upper bound is pulled in to the last float below 1.0 when the
+    # dtype cannot tell 1 - UNIT_CLIP from 1. The lower bound is left at
+    # UNIT_CLIP, which float32 represents exactly; widening it for
+    # symmetry would discard information and move numbers for nothing.
+    # See unit_clip_bounds. Only applied to values already in [0, 1]: a
+    # truncated sample outside its declared bounds must stay outside.
+    clip_lo, clip_hi = unit_clip_bounds(UNIT_CLIP, dtype)
+
+    def clipped(u: Array) -> Array:
+        in_range = (u >= 0.0) & (u <= 1.0)
+        return jnp.where(in_range, jnp.clip(u, clip_lo, clip_hi), u)
+
+    parts: list[tuple[list[int], Array]] = []
+    if uniform:
+        low, width = column_consts(uniform, 2)
+        parts.append((uniform, (X[:, uniform] - low) / width))
+    if plain:
+        mean, std = column_consts(plain, 2)
+        parts.append((plain, clipped(ndtr((X[:, plain] - mean) / std))))
+    for group in (lower, upper):
+        if group:
+            mean, std = column_consts(group, 2)
+            a_host = np.asarray([consts[d][2] for d in group], dtype=np.float64)
+            b_host = np.asarray([consts[d][3] for d in group], dtype=np.float64)
+            # clip=False: an out-of-declared-bounds sample must compute to a
+            # value outside [0, 1], not be silently folded into the nearest
+            # edge bin. See the docstring above and _truncnorm_cdf.
+            u = _truncnorm_cdf((X[:, group] - mean) / std, a_host, b_host, clip=False)
+            parts.append((group, clipped(u)))
+    return _in_column_order(parts, D)
+
+
+def _in_column_order(parts: list[tuple[list[int], Array]], D: int) -> Array:
+    """Stack per-group column blocks and restore the original column order.
+
+    Args:
+        parts: ``(column_indices, block)`` pairs, where ``block`` has shape
+            ``(N, len(column_indices))``. Together the indices cover
+            ``range(D)`` exactly once.
+        D: Total number of columns.
+
+    Returns:
+        Array of shape ``(N, D)`` whose column ``d`` is the block column that
+        was labelled ``d``.
+    """
+    if len(parts) == 1 and parts[0][0] == list(range(D)):
+        return parts[0][1]
+    labels = np.concatenate([np.asarray(idx, dtype=np.int64) for idx, _ in parts])
+    stacked = jnp.concatenate([block for _, block in parts], axis=1)
+    return stacked[:, jnp.asarray(np.argsort(labels))]

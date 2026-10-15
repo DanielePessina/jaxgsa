@@ -35,28 +35,28 @@ def _hermite_1d(x: Array, max_degree: int) -> Array:
         E[tilde_He_m(X) tilde_He_n(X)] = delta_{mn}
 
     Args:
-        x: Standardized points (zero mean, unit variance), shape ``(N,)``.
+        x: Standardized points (zero mean, unit variance), shape ``(N,)`` or
+            any ``(...,)``; the recurrence runs elementwise.
         max_degree: Maximum polynomial degree.
 
     Returns:
-        Matrix of basis values, shape ``(N, max_degree + 1)``.
+        Basis values, shape ``(..., max_degree + 1)``.
     """
-    N = x.shape[0]
-    H = jnp.zeros((N, max_degree + 1))
+    H = jnp.zeros((*x.shape, max_degree + 1))
     # Seed the recurrence: He_0(x) = 1, He_1(x) = x.
-    H = H.at[:, 0].set(1.0)
+    H = H.at[..., 0].set(1.0)
     if max_degree >= 1:
-        H = H.at[:, 1].set(x)
+        H = H.at[..., 1].set(x)
 
     # Probabilist's Hermite recurrence: He_{n+1}(x) = x·He_n(x) − n·He_{n-1}(x).
     # The 1/sqrt(n!) normalization below makes them orthonormal w.r.t. N(0,1).
     for n in range(1, max_degree):
-        H = H.at[:, n + 1].set(x * H[:, n] - n * H[:, n - 1])
+        H = H.at[..., n + 1].set(x * H[..., n] - n * H[..., n - 1])
 
     # Orthonormalize: E[He_k^2] = k! under N(0,1), so dividing by sqrt(k!)
     # gives unit-norm basis functions needed for variance decomposition.
     norms = jnp.array([1.0 / jnp.sqrt(float(factorial(k))) for k in range(max_degree + 1)])
-    return H * norms[None, :]
+    return H * norms
 
 
 def _positive_compositions(total: int, n_parts: int):
@@ -136,6 +136,133 @@ def build_multi_index(D: int, p: int) -> np.ndarray:
     return result
 
 
+def _basis_table(
+    X: Array, input_types: tuple[str, ...], max_degree: int
+) -> tuple[Array, np.ndarray]:
+    """Tabulate every 1-D orthonormal basis function at every sample.
+
+    Each family (Legendre for ``"uniform"``, Hermite otherwise) runs once over
+    all of its columns, so the traced graph does not grow with the number of
+    dimensions. The table lists the uniform columns first, then the Gaussian
+    ones, so no permutation back to column order is needed: ``position`` says
+    where each dimension went, and callers index through it.
+
+    Args:
+        X: Reference-domain inputs, shape ``(N, D)``.
+        input_types: Per-dimension ``"uniform"`` or ``"gaussian"`` tags.
+        max_degree: Maximum 1-D polynomial degree.
+
+    Returns:
+        ``(table, position)``. ``table`` has shape ``(N, D, max_degree + 1)``
+        and ``table[n, position[d], k] = phi_k(X[n, d])``. ``position`` is an
+        integer array of length ``D``.
+    """
+    uniform = [d for d, kind in enumerate(input_types) if kind == "uniform"]
+    gaussian = [d for d, kind in enumerate(input_types) if kind != "uniform"]
+    parts: list[Array] = []
+    for family, basis in ((uniform, _legendre_1d), (gaussian, _hermite_1d)):
+        if family:
+            # Applied to the whole (N, G) block at once: both recurrences are
+            # elementwise over leading axes. `vmap` over columns would give
+            # the same values eagerly, but XLA fuses it differently under
+            # `jit`, and the fused float32 recurrence then differs in the last
+            # bit from the per-column program this table replaces.
+            parts.append(basis(X[:, jnp.asarray(family)], max_degree))
+    position = np.argsort(np.asarray(uniform + gaussian))
+    table = parts[0] if len(parts) == 1 else jnp.concatenate(parts, axis=1)
+    return table, position
+
+
+def _design_matrix_dense(
+    X: Array,
+    multi_index: np.ndarray,
+    input_types: tuple[str, ...],
+    max_degree: int,
+) -> Array:
+    """Build the design matrix as a running product over every dimension.
+
+    This is the original construction. Its traced graph grows with ``D``, but
+    for small ``D`` it compiles fast, and the float32 values it returns are
+    the reference that :func:`build_design_matrix` keeps for those sizes.
+
+    Args:
+        X: Reference-domain inputs, shape ``(N, D)``.
+        multi_index: Multi-index array, shape ``(n_terms, D)``.
+        input_types: Per-dimension ``"uniform"`` or ``"gaussian"`` tags.
+        max_degree: Maximum 1-D polynomial degree.
+
+    Returns:
+        Design matrix of shape ``(N, n_terms)``.
+    """
+    D = X.shape[1]
+    basis_1d: list[Array] = []
+    for d in range(D):
+        if input_types[d] == "uniform":
+            basis_1d.append(_legendre_1d(X[:, d], max_degree))
+        else:
+            basis_1d.append(_hermite_1d(X[:, d], max_degree))
+
+    # Index into the precomputed 1-D tables and multiply across dimensions as
+    # a running product: only the accumulator, one gathered (N, n_terms)
+    # factor, and the multiply output are live at a time (~3*N*n_terms
+    # floats), instead of stacking all D gathered factors at once.
+    mi = jnp.asarray(multi_index)
+    Phi = basis_1d[0][:, mi[:, 0]]
+    for d in range(1, D):
+        Phi = Phi * basis_1d[d][:, mi[:, d]]
+    return Phi
+
+
+def _design_matrix_sparse(
+    X: Array,
+    multi_index: np.ndarray,
+    input_types: tuple[str, ...],
+    max_degree: int,
+) -> Array:
+    """Build the design matrix from at most ``max_degree`` factors per term.
+
+    A term of total degree <= p has at most p non-zero entries, so each term
+    is a product of at most that many table lookups, not of ``D`` of them.
+    Padding slots point at degree 0, whose value is exactly 1.0, and
+    ``x * 1.0 == x`` in IEEE arithmetic. The non-zero factors are gathered in
+    ascending dimension order, the order of the dense product, so in exact
+    arithmetic and in float64 the result equals it. The unrolled graph has
+    ``width`` multiplies instead of ``D``, so compile time stays flat in ``D``.
+
+    Args:
+        X: Reference-domain inputs, shape ``(N, D)``.
+        multi_index: Multi-index array, shape ``(n_terms, D)``.
+        input_types: Per-dimension ``"uniform"`` or ``"gaussian"`` tags.
+        max_degree: Maximum 1-D polynomial degree.
+
+    Returns:
+        Design matrix of shape ``(N, n_terms)``.
+    """
+    mi = np.asarray(multi_index)
+    table, position = _basis_table(X, input_types, max_degree)
+    n_terms = mi.shape[0]
+    width = int(np.max(np.count_nonzero(mi, axis=1)))
+    if width == 0:
+        return jnp.ones((X.shape[0], n_terms), dtype=table.dtype)
+    # A stable argsort on "is zero" lists each row's non-zero dimensions first,
+    # in ascending order, then pads with zero-degree slots.
+    dims = np.argsort(mi == 0, axis=1, kind="stable")[:, :width]
+    degs = np.take_along_axis(mi, dims, axis=1).astype(np.int32)
+    dims = position[dims].astype(np.int32)
+    Phi = table[:, dims[:, 0], degs[:, 0]]
+    for j in range(1, width):
+        Phi = Phi * table[:, dims[:, j], degs[:, j]]
+    return Phi
+
+
+# Largest D that keeps the dense running product. Its compile time grows with
+# D (24.8 s at D=1000), while the sparse form compiles in well under a second
+# at any D. Below the cut the dense form keeps float32 results bit-identical to
+# earlier releases: XLA fuses the two forms differently, and its fused
+# multiply-add contraction then moves float32 values in the last bit.
+_DENSE_MAX_D = 16
+
+
 def build_design_matrix(
     X: Array,
     multi_index: np.ndarray,
@@ -155,27 +282,9 @@ def build_design_matrix(
         Design matrix of shape ``(N, n_terms)`` where
         Phi[n, alpha] = Psi_alpha(X_n).
     """
-    N, D = X.shape
-    # Pre-compute all 1-D basis values per dimension (N x max_degree+1 each).
-    # Each dimension picks Legendre or Hermite per the Wiener-Askey scheme.
-    basis_1d: list[Array] = []
-    for d in range(D):
-        if input_types[d] == "uniform":
-            basis_1d.append(_legendre_1d(X[:, d], max_degree))
-        else:
-            basis_1d.append(_hermite_1d(X[:, d], max_degree))
-
-    # Tensor-product basis: Psi_alpha(x) = prod_{d=1}^{D} phi_{alpha_d}(x_d).
-    # The multi-index alpha selects which 1-D polynomial degree per dimension.
-    mi = jnp.asarray(multi_index)
-    # Index into the precomputed 1-D tables and multiply across dimensions as
-    # a running product: only the accumulator, one gathered (N, n_terms)
-    # factor, and the multiply output are live at a time (~3*N*n_terms
-    # floats), instead of stacking all D gathered factors at once.
-    Phi = basis_1d[0][:, mi[:, 0]]
-    for d in range(1, D):
-        Phi = Phi * basis_1d[d][:, mi[:, d]]
-    return Phi
+    if X.shape[1] <= _DENSE_MAX_D:
+        return _design_matrix_dense(X, multi_index, input_types, max_degree)
+    return _design_matrix_sparse(X, multi_index, input_types, max_degree)
 
 
 def sobol_from_coefficients(
@@ -268,12 +377,19 @@ def sobol_from_coefficients(
     itemsize = jnp.dtype(c2.dtype).itemsize
     bytes_per_pair = itemsize * (2 * n_terms + n_slices)
     chunk = max(1, min(n_pairs, get_memory_budget() // max(bytes_per_pair, 1)))
-    parts = [jnp.zeros((*c2.shape[:-1], 0), dtype=c2.dtype)]  # covers D == 1
-    for start in range(0, n_pairs, chunk):
-        end = start + chunk
-        pair_mask = active[:, iu[start:end]] & active[:, ju[start:end]] & pair2
-        parts.append(jnp.asarray(c2 @ pair_mask))  # (..., <=chunk)
-    stacked = parts[-1] if len(parts) == 2 else jnp.concatenate(parts, axis=-1)
+    if n_terms == 0 or int(active_count.max()) < 2:
+        # An order-1 expansion has no term that activates two variables, so
+        # every masked sum below would be an exact zero. Build the zeros
+        # directly and skip the O(n_terms * n_pairs) mask work. The product
+        # with `inv_var` still runs, so a constant slice still reads NaN.
+        stacked = jnp.zeros((*c2.shape[:-1], n_pairs), dtype=c2.dtype)
+    else:
+        parts = [jnp.zeros((*c2.shape[:-1], 0), dtype=c2.dtype)]  # covers D == 1
+        for start in range(0, n_pairs, chunk):
+            end = start + chunk
+            pair_mask = active[:, iu[start:end]] & active[:, ju[start:end]] & pair2
+            parts.append(jnp.asarray(c2 @ pair_mask))  # (..., <=chunk)
+        stacked = parts[-1] if len(parts) == 2 else jnp.concatenate(parts, axis=-1)
     s2_upper = stacked * inv_var[..., None]  # (..., n_pairs)
     # Scatter into the symmetric matrix and mirror; the diagonal is not a pair
     # index, so keep it NaN to match SobolResult's S2.
