@@ -156,6 +156,40 @@ def test_integer_inputs_run_through_the_degenerate_input_check():
     assert np.all(np.isfinite(np.asarray(shap.Sh)))
 
 
+def _bool_inputs() -> tuple[jaxgsa.Problem, np.ndarray]:
+    rng = np.random.default_rng(1)
+    problem = jaxgsa.Problem(["a", "b", "c"], [(0, 1)] * 3)
+    return problem, rng.integers(0, 2, (2000, 3)).astype(bool)
+
+
+def test_boolean_inputs_run_through_the_degenerate_input_check():
+    # 1.1.1 accepted boolean X and returned exact indices.
+    problem, X = _bool_inputs()
+    Y = X[:, 0] + 1.5 * X[:, 1] + 2.0 * X[:, 2]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=1, verbose=False)
+        shap = jaxgsa.shapley.analyze(
+            problem, jnp.asarray(X), jnp.asarray(Y), backend="pce", order=1
+        )
+    assert isinstance(result, pce.PCEResult)
+    np.testing.assert_allclose(np.asarray(result.S1), [0.1379, 0.3103, 0.5517], atol=1e-3)
+    assert isinstance(shap, jaxgsa.shapley.ShapleyResult)
+    assert np.all(np.isfinite(np.asarray(shap.Sh)))
+
+
+@pytest.mark.parametrize(
+    ("degenerate", "message"),
+    [("constant", "have the same value in every row"), ("duplicate", "are equal in every row")],
+)
+def test_boolean_degenerate_inputs_raise_value_error(degenerate, message):
+    problem, X = _bool_inputs()
+    X[:, 2] = True if degenerate == "constant" else X[:, 1]
+    Y = X[:, 0] + 1.5 * X[:, 1] + 2.0 * X[:, 2]
+    with pytest.raises(ValueError, match=message):
+        pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=1, verbose=False)
+
+
 def test_degenerate_input_message_names_the_shapley_entry_point():
     problem, X, _ = _three_inputs()
     X[:, 2] = X[:, 1]

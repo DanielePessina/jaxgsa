@@ -274,18 +274,19 @@ def _input_fingerprints(X: Array) -> tuple[Array, Array]:
     """Per-column spread and a projection that identical columns share.
 
     Args:
-        X: Inputs, shape ``(N, D)``, of any real or integer dtype.
+        X: Inputs, shape ``(N, D)``, of any real, integer or boolean dtype.
 
     Returns:
         ``(spread, projection)``, each of shape ``(D,)``. ``spread`` is
-        ``max - min`` per column, in the dtype of ``X``. Identical columns get
+        ``max - min`` per column, in floating point. Identical columns get
         equal projections up to the summation order. The projection is
         floating point even for integer ``X``.
     """
     dtype = jnp.result_type(X.dtype, jnp.float32)
     weights = jax.random.normal(jax.random.key(0), (X.shape[0], 1), dtype)
-    spread = jnp.max(X, axis=0) - jnp.min(X, axis=0)
-    return spread, jnp.sum(X.astype(dtype) * weights, axis=0)
+    values = X.astype(dtype)
+    spread = jnp.max(values, axis=0) - jnp.min(values, axis=0)
+    return spread, jnp.sum(values * weights, axis=0)
 
 
 def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> None:
