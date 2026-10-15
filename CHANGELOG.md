@@ -79,7 +79,7 @@ bitwise the same values as 1.1.1, in float32 and float64.
   The check reads the Cholesky pivots of the Gram matrix. For each basis
   column, it finds the fraction of the column's variance that is left after
   the earlier columns explain it. In float64 the fit raises when this
-  fraction is below 1e-8. In float32 the fit raises below 1e-5. Between 1e-5
+  fraction is below 1e-9. In float32 the fit raises below 1e-5. Between 1e-5
   and 1e-4 it warns, because float32 rounding cannot tell a singular design
   from a well-posed one there. Before, float64 fits gave finite but wrong
   indices with no message: a duplicated input shared the index of the true

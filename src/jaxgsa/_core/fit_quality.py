@@ -71,12 +71,16 @@ CV_RATIO_THRESHOLD = math.sqrt(1.0 - POORFIT_THRESHOLD)
 # at a floor: the ridge sets it in float64 (about ``ridge / N``), and
 # rounding sets it in float32 (it grows with N, about 1.8e-5 at N = 10000).
 #
-# float64 refuses a share below 1e-8. Measured singular designs, on 2000 rows
-# at order 3, sit at or below 1.1e-10: a duplicated input gives 4.9e-12, a
+# float64 refuses a share below 1e-9. Measured singular designs, on 2000 rows
+# at order 3, sit at or below 2.9e-10: a duplicated input gives 4.9e-12, a
 # constant input 8.8e-12, a three-level input 3.5e-12, an input that is the
-# square of another 1.1e-10. The lowest well-posed shares measured are 5.6e-7
-# (D = 10, order 4, fit_ratio = 1) and 1.6e-6 (three Gaussian inputs, order
-# 10, N = 600), and those fits are accurate.
+# square of another 1.1e-10, and an input that copies another up to 1e-3
+# noise 2.9e-10 (its copy then gets a total index of 0.08 instead of 0). The
+# ridge floor of an exact duplicate, about 1e-8 / N, stays below 2.5e-10 for
+# N >= 40. Accurate fits go much lower than one would expect: three Gaussian
+# inputs at order 16 on 6000 rows give 1.2e-8 and match the true indices to
+# four digits, and a copy up to 1e-2 noise gives 2.0e-8 with indices within
+# 3e-3 of the truth.
 #
 # float32 cannot resolve the same range. Its rounding floor overlaps the
 # shares of singular designs, so a three-level input on 2000 rows gives
@@ -85,7 +89,7 @@ CV_RATIO_THRESHOLD = math.sqrt(1.0 - POORFIT_THRESHOLD)
 # warns, because the design may be singular and float32 cannot tell. The
 # lowest well-posed float32 share measured is 1.5e-4 (D = 10, order 4,
 # fit_ratio = 1).
-SINGULAR_PIVOT_THRESHOLD_F64 = 1e-8
+SINGULAR_PIVOT_THRESHOLD_F64 = 1e-9
 SINGULAR_PIVOT_THRESHOLD_F32 = 1e-5
 AMBIGUOUS_PIVOT_THRESHOLD_F32 = 1e-4
 
