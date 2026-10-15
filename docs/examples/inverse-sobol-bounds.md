@@ -54,7 +54,7 @@ initial_widths = jnp.array([1.0, 2.0])
 target = jnp.array([0.4, 0.4])
 
 design = jaxgsa.sobol.sample(
-    problem, n_samples=16384, base_n=4096,
+    problem, base_n=4096,
     calc_second_order=False, seed=42, verbose=False,
 )
 initial_result = jaxgsa.sobol.analyze(
@@ -184,7 +184,7 @@ here so we can also measure the interaction.
 
 ```python
 validation = jaxgsa.sobol.sample(
-    problem, n_samples=196608, base_n=32768, seed=123, verbose=False,
+    problem, base_n=32768, seed=123, verbose=False,
 )
 fitted_theta = {
     name: {"low": -fitted[i], "high": fitted[i]}

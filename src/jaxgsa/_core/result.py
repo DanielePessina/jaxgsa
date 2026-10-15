@@ -149,8 +149,9 @@ def _attr_value(value: Any) -> Any:
     ``xr.Dataset.attrs`` is written out as-is, so a JAX scalar would reach a
     netCDF file as a device array and reach a reader as
     ``Array(4, dtype=int32)``. The rule is: a string stays a string, and
-    every other scalar becomes the plain Python ``bool``, ``int``, ``float``
-    or ``complex`` NumPy reads it as. Anything that is not a numeric scalar
+    every other scalar becomes the plain Python ``int``, ``float`` or
+    ``complex`` NumPy reads it as. A ``bool`` becomes the ``int`` 0 or 1,
+    because netCDF cannot store a boolean attribute. Anything that is not a numeric scalar
     is recorded by its ``str``, so a declaration this function did not
     anticipate degrades to a readable label instead of raising in the middle
     of an export.
@@ -169,7 +170,9 @@ def _attr_value(value: Any) -> Any:
     if isinstance(value, str):
         return value
     array = np.asarray(value)
-    if array.ndim == 0 and array.dtype.kind in "biufc":
+    if array.ndim == 0 and array.dtype.kind == "b":
+        return int(array.item())
+    if array.ndim == 0 and array.dtype.kind in "iufc":
         return array.item()
     return str(value)
 
@@ -351,6 +354,9 @@ class SchemaResult:
         Point estimates come first, then the ``*_lower`` / ``*_upper`` halves
         of every confidence interval. Splitting the ``(2, ...)`` interval
         arrays lets you select a bound by name instead of by integer index.
+
+        Boolean provenance attributes (such as ``streamed``) are stored as the
+        integers 0 and 1, because netCDF cannot hold a boolean attribute.
 
         Args:
             time_coords: Coordinate values for the time dimension of a

@@ -198,6 +198,12 @@ problem that mapping is the Gaussian inverse CDF. The 15 curves at 4096
 points each cost 61440 model runs.
 
 ```python
+import jax
+
+from jaxgsa.benchmarks import oakley_ohagan
+
+problem = oakley_ohagan.PROBLEM
+
 efast_samples = jaxgsa.efast.sample(problem, n_per_curve=4096, M=4, seed=42)
 Y_ef = oakley_ohagan.evaluate(jnp.asarray(efast_samples.samples))
 
@@ -238,7 +244,7 @@ def oakley_fn(x):
     return oakley_ohagan.evaluate(x[None, :])[0]
 
 X_dg = jaxgsa.sampling.monte_carlo(problem, n_samples=10_000, seed=42)
-dgsm_result = jaxgsa.dgsm.analyze(problem, oakley_fn, jnp.asarray(X_dg))
+dgsm_result = jaxgsa.dgsm.analyze(problem, jnp.asarray(X_dg), fn=oakley_fn)
 print(dgsm_result)
 ```
 

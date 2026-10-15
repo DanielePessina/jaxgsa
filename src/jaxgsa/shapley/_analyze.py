@@ -24,7 +24,9 @@ from jaxgsa._core.entry import (
     bootstrap_checks,
     check_scalars,
     gates,
+    method_alias,
     one_of,
+    positive_int,
     require,
 )
 from jaxgsa._core.invalid import OnInvalid
@@ -499,7 +501,11 @@ def analyze(
     # tolerated depends on the backend, so it is settled below instead.
     gates(_SPEC, problem, method="jaxgsa.shapley.analyze", check=("categorical",))
     check_scalars(
-        (*bootstrap_checks(n_bootstrap, ci_method, conf_level, key),),
+        (
+            *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
+            positive_int("slice_chunk_size", backend_kwargs.get("slice_chunk_size")),
+            positive_int("batch_size", backend_kwargs.get("batch_size")),
+        ),
         method="jaxgsa.shapley.analyze",
     )
     # The backend prints no summary of its own: one shapley call prints one
@@ -513,9 +519,12 @@ def analyze(
         _raise_correlated_pce_backend(problem, "jaxgsa.shapley.analyze")
         from jaxgsa.pce import analyze as analyze_pce
 
-        pce_result = analyze_pce(
-            problem, X, Y, on_invalid=on_invalid, verbose=False, **backend_kwargs
-        )
+        # The alias makes the shared preamble name shapley, not pce, in the
+        # warnings and errors it raises for the user's call.
+        with method_alias("jaxgsa.shapley.analyze"):
+            pce_result = analyze_pce(
+                problem, X, Y, on_invalid=on_invalid, verbose=False, **backend_kwargs
+            )
         # Unreachable: the irregular path returned at the top of this
         # function, so Y is a regular array by the time the backend runs.
         # The guard keeps the union return type honest without a cast.
@@ -530,9 +539,10 @@ def analyze(
         # The warning for a correlated problem with include_correlative=False
         # lives on HDMRResult.shapley, which is the call below and is also
         # reachable on its own. Warning here as well would report it twice.
-        hdmr_result = analyze_hdmr(
-            problem, X, Y, on_invalid=on_invalid, verbose=False, **backend_kwargs
-        )
+        with method_alias("jaxgsa.shapley.analyze"):
+            hdmr_result = analyze_hdmr(
+                problem, X, Y, on_invalid=on_invalid, verbose=False, **backend_kwargs
+            )
         if isinstance(hdmr_result, IrregularResult):
             raise AssertionError("shapley hdmr backend returned an irregular result")
         result = hdmr_result.shapley(include_correlative=include_correlative)
