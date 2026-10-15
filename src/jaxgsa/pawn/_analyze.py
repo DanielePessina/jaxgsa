@@ -867,11 +867,12 @@ def analyze(
         n_bootstrap: Number of bootstrap resamples for confidence intervals.
             ``0`` disables the confidence intervals.
         conf_level: Confidence level for the bootstrap intervals. The
-            bootstrap resamples rows with replacement. Duplicated rows make
-            the conditional samples look more alike the unconditional one in
-            some bins and less alike in others, and the KS statistic is a
-            maximum, so each replicate sits above the point estimate on
-            average. The interval is therefore biased upward and is widest
+            bootstrap resamples rows with replacement. Resampling adds its
+            own noise to a KS gap that is already noisy, and the KS
+            statistic is a maximum of absolute gaps, so each replicate sits
+            above the point estimate on average. Weighted resampling with no
+            duplicated rows shows the same shift. The interval is therefore
+            biased upward and is widest
             in relative terms for weak parameters. For a parameter with no
             effect, the interval can lie entirely above the point estimate.
             Read it as a rough scale of the sampling noise. Do not read it
