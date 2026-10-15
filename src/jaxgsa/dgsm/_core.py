@@ -17,7 +17,7 @@ the two is picked from those two numbers, both of which are shapes.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Hashable, Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -190,6 +190,25 @@ def jacobian_of(fn: Callable, *, n_inputs: int, n_outputs: int) -> Callable:
     return jax.jacrev(_fn_with_aux(fn), has_aux=True)
 
 
+def _is_hashable(obj: object) -> bool:
+    """Tell whether ``hash(obj)`` works.
+
+    ``isinstance(obj, Hashable)`` is not enough: a frozen dataclass with an
+    array field has a ``__hash__`` that raises ``TypeError`` when called.
+
+    Args:
+        obj: Any object.
+
+    Returns:
+        ``True`` if ``obj`` can key a cache.
+    """
+    try:
+        hash(obj)
+    except TypeError:
+        return False
+    return True
+
+
 def jac_batches(
     fn: Callable,
     X: Array,
@@ -233,11 +252,11 @@ def jac_batches(
     n_inputs = int(X.shape[1])
     if n_outputs is None:
         n_outputs = n_output_slices(fn, X)
-    if isinstance(fn, Hashable):
+    if _is_hashable(fn):
         combined = _get_jacobian_kernel(fn, n_inputs, n_outputs)
     else:
-        # A model written as a plain dataclass has __hash__ set to None, so it
-        # cannot key the cache. Build the kernel directly rather than fail.
+        # A model that cannot key the cache (a plain dataclass, or a frozen
+        # one with array fields) gets its kernel built directly, not an error.
         combined = jax.jit(jax.vmap(jacobian_of(fn, n_inputs=n_inputs, n_outputs=n_outputs)))
 
     N = X.shape[0]
@@ -392,11 +411,15 @@ def jacobian_sums(
     row_ok_parts: list[Array] = []
     resample: list[Array] | None = None
     offset = 0
+    counts = None if idx is None else _count_matrix(idx, int(idx.shape[1]))
+    shift: Array | None = None
 
     for jac, Y_chunk, X_chunk in jac_batches(fn, X, batch_size, n_outputs=n_outputs):
         Y_parts.append(Y_chunk)
-        if idx is not None:
-            parts = _resample_batch_sums(jac, Y_chunk, idx, offset)
+        if counts is not None:
+            if shift is None:
+                shift = _output_shift(Y_chunk)
+            parts = _resample_batch_sums(jac, Y_chunk, counts, offset, shift)
             resample = (
                 parts
                 if resample is None
@@ -480,9 +503,9 @@ def resample_moment_sums(
     sweep over the sample rather than one sweep per replicate, and the
     Jacobian still never exists whole.
 
-    The weight matrix is ``(n_bootstrap, batch)``, so with a bootstrap the
-    batch width bounds that array too. Lower ``batch_size`` if a large
-    ``n_bootstrap`` runs the device out of memory.
+    The draw-count matrix is ``(n_bootstrap, N)`` int32, built once and sliced
+    per batch. A large ``n_bootstrap`` times a large ``N`` can run the device
+    out of memory.
 
     Args:
         batches: Yields ``(jac, Y)`` per batch, in row order and with no gaps.
@@ -497,8 +520,12 @@ def resample_moment_sums(
     """
     acc: list[Array] | None = None
     offset = 0
+    counts = _count_matrix(idx, int(idx.shape[1]))
+    shift: Array | None = None
     for jac, Y_chunk in batches:
-        parts = _resample_batch_sums(jac, Y_chunk, idx, offset)
+        if shift is None:
+            shift = _output_shift(Y_chunk)
+        parts = _resample_batch_sums(jac, Y_chunk, counts, offset, shift)
         acc = parts if acc is None else [a + b for a, b in zip(acc, parts, strict=True)]
         offset += int(jac.shape[0])
     if acc is None:
@@ -506,41 +533,88 @@ def resample_moment_sums(
     return acc[0], acc[1], acc[2], acc[3]
 
 
-def _resample_batch_sums(jac: Array, Y_chunk: Array, idx: Array, offset: int) -> list[Array]:
+def _count_matrix(idx: Array, n_rows: int) -> Array:
+    """Count how often each row is drawn by each replicate.
+
+    Args:
+        idx: Resampled row indices, shape ``(n_bootstrap, n)``.
+        n_rows: Number of rows in the sample.
+
+    Returns:
+        Integer array of shape ``(n_bootstrap, n_rows)``.
+    """
+    rows = jnp.arange(idx.shape[0])[:, None]
+    return jnp.zeros((idx.shape[0], n_rows), dtype=jnp.int32).at[rows, idx].add(1)
+
+
+def _output_shift(Y_chunk: Array) -> Array:
+    """Return one constant per output slice, to centre the output sums on.
+
+    The variance is shift-invariant, but ``sum(y**2)/n - mean(y)**2`` loses
+    every digit to cancellation when ``|mean(y)|`` dwarfs the spread. Shifting
+    by the mean of the first batch before the sums removes that offset.
+
+    Args:
+        Y_chunk: Output rows of the first batch.
+
+    Returns:
+        Array of shape ``(T*K,)`` in the dtype of ``Y_chunk``.
+    """
+    return jnp.mean(Y_chunk.reshape(Y_chunk.shape[0], -1), axis=0)
+
+
+@jax.jit
+def _weighted_sums(
+    weights: Array, jac: Array, Y_chunk: Array, shift: Array
+) -> tuple[Array, Array, Array, Array]:
     """Weighted sums of one batch for every bootstrap replicate.
+
+    Args:
+        weights: Draw counts, shape ``(n_bootstrap, batch)``.
+        jac: Jacobian rows of this batch.
+        Y_chunk: Output rows of this batch.
+        shift: Per-slice constant from :func:`_output_shift`, subtracted from
+            the outputs before they are summed.
+
+    Returns:
+        ``(sum_jac, sum_jac2, sum_y, sum_y2)`` with a leading ``n_bootstrap``
+        axis. The two output sums are of the shifted outputs.
+    """
+    n_replicates, n = weights.shape
+    w = weights.astype(jac.dtype)
+    jac_flat = jac.reshape(n, -1)
+    y_flat = Y_chunk.reshape(n, -1) - shift
+    return (
+        (w @ jac_flat).reshape((n_replicates, *jac.shape[1:])),
+        (w @ jac_flat**2).reshape((n_replicates, *jac.shape[1:])),
+        (w @ y_flat).reshape((n_replicates, *Y_chunk.shape[1:])),
+        (w @ y_flat**2).reshape((n_replicates, *Y_chunk.shape[1:])),
+    )
+
+
+def _resample_batch_sums(
+    jac: Array, Y_chunk: Array, counts: Array, offset: int, shift: Array
+) -> list[Array]:
+    """Weighted sums of one batch for every bootstrap replicate.
+
+    The output sums are of ``Y - shift``. That leaves ``Var(Y)`` as it was and
+    keeps the raw-moment form stable when ``Y`` has a large offset.
 
     Args:
         jac: Jacobian rows of this batch.
         Y_chunk: Output rows of this batch.
-        idx: Resampled row indices, shape ``(n_bootstrap, n)``.
+        counts: Draw counts of every row, shape ``(n_bootstrap, N)``, from
+            :func:`_count_matrix`.
         offset: Number of rows that came before this batch.
+        shift: Per-slice constant, from :func:`_output_shift` on the first
+            batch. The same value must be used for every batch.
 
     Returns:
         ``[sum_jac, sum_jac2, sum_y, sum_y2]`` for this batch, each with a
         leading ``n_bootstrap`` axis.
     """
-    n_replicates = int(idx.shape[0])
-    rows = jnp.arange(n_replicates)[:, None]
     n = int(jac.shape[0])
-    local = idx - offset
-    in_chunk = (local >= 0) & (local < n)
-    # Draw counts per (replicate, row of this batch). Indices from other
-    # batches are steered to column 0 and given weight 0, which is the
-    # explicit form of "drop" and does not rely on out-of-bounds
-    # behaviour.
-    weights = (
-        jnp.zeros((n_replicates, n), dtype=jac.dtype)
-        .at[rows, jnp.where(in_chunk, local, 0)]
-        .add(jnp.where(in_chunk, 1.0, 0.0).astype(jac.dtype))
-    )
-    jac_flat = jac.reshape(n, -1)
-    y_flat = Y_chunk.reshape(n, -1)
-    return [
-        (weights @ jac_flat).reshape((n_replicates, *jac.shape[1:])),
-        (weights @ jac_flat**2).reshape((n_replicates, *jac.shape[1:])),
-        (weights @ y_flat).reshape((n_replicates, *Y_chunk.shape[1:])),
-        (weights @ y_flat**2).reshape((n_replicates, *Y_chunk.shape[1:])),
-    ]
+    return list(_weighted_sums(counts[:, offset : offset + n], jac, Y_chunk, shift))
 
 
 def promote_jac(jac: Array) -> Array:

@@ -1090,9 +1090,12 @@ def _bootstrap_draws(
     nu = sum_jac2.reshape(n_bootstrap, T, K, n_params) / n_rows
     mean_y = sum_y.reshape(n_bootstrap, T, K) / n_rows
     # Var(Y) from the two raw moments, because a replicate never materialises
-    # the rows it drew. Clipped at zero: the raw-moment form can go a rounding
-    # step negative on a near-constant slice, and a negative variance would
-    # turn into a NaN standard deviation.
+    # the rows it drew. The output sums are of Y minus one constant per slice
+    # (see _core._output_shift): the variance does not change, and the
+    # subtraction does not cancel to nothing when Y has a large offset. mean_y
+    # is the shifted mean and is used only here. Clipped at zero: the
+    # raw-moment form can go a rounding step negative on a near-constant
+    # slice, and a negative variance would turn into a NaN standard deviation.
     variance = jnp.maximum(sum_y2.reshape(n_bootstrap, T, K) / n_rows - mean_y**2, 0.0)
 
     # Every step below broadcasts over the leading replicate axis, so a

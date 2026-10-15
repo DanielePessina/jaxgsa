@@ -54,11 +54,8 @@ def poincare_constant(spec: InputSpec) -> float:
         if spec.low is None and spec.high is None:
             return spec.variance
         std = math.sqrt(spec.variance)
-        # An open side gets a far-tail stand-in bound; the spectral solve needs
-        # a finite interval, and 8 sigma carries the whole mass to float precision.
-        fallback_lo = spec.mean - 8 * std if spec.low is None else spec.low
-        fallback_hi = spec.mean + 8 * std if spec.high is None else spec.high
-        return _truncnorm_poincare(spec.mean, std, fallback_lo, fallback_hi, 512)
+        lo, hi = _effective_support(spec.mean, std, spec.low, spec.high)
+        return _truncnorm_poincare(spec.mean, std, lo, hi, 512)
     if isinstance(spec, CategoricalSpec):
         raise ValueError(
             "A categorical marginal has no Poincare constant (the inequality "
@@ -66,6 +63,47 @@ def poincare_constant(spec: InputSpec) -> float:
             "categorical parameters"
         )
     raise ValueError(f"Unknown input spec {spec!r}")
+
+
+# Tail mass cut off each end of the effective support. The weight there is far
+# below float64 resolution of the spectral solve, so the constant is unchanged.
+_TAIL_MASS = 1e-15
+
+
+def _effective_support(
+    mean: float, std: float, low: float | None, high: float | None
+) -> tuple[float, float]:
+    """Return the interval the spectral solve runs on.
+
+    The declared bounds can sit hundreds of standard deviations from the
+    mass, where the Gaussian weight underflows. Or one side can be open, and
+    a fixed stand-in such as ``mean +/- 8 std`` can lie on the wrong side of
+    the declared bound on the other side. So the declared bounds are cut to
+    the quantiles of the truncated distribution itself that leave
+    ``1e-15`` of the mass in each tail. Those come from
+    :class:`scipy.stats.truncnorm`, which works in log space and stays
+    accurate in the far tail.
+
+    Args:
+        mean: Mean of the underlying Gaussian.
+        std: Standard deviation of the underlying Gaussian.
+        low: Declared lower bound, or ``None`` if open.
+        high: Declared upper bound, or ``None`` if open.
+
+    Returns:
+        ``(lo, hi)``, inside the declared bounds, with ``lo < hi``.
+    """
+    a_std = -np.inf if low is None else (low - mean) / std
+    b_std = np.inf if high is None else (high - mean) / std
+    lo_std = float(truncnorm.ppf(_TAIL_MASS, a_std, b_std))
+    hi_std = float(truncnorm.isf(_TAIL_MASS, a_std, b_std))
+    lo = mean + std * lo_std
+    hi = mean + std * hi_std
+    if low is not None:
+        lo = max(lo, low)
+    if high is not None:
+        hi = min(hi, high)
+    return lo, hi
 
 
 @lru_cache(maxsize=None)
