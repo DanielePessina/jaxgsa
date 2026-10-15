@@ -58,7 +58,7 @@ from jax import Array
 from jax.typing import DTypeLike
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.entry import at_least, prepare, require
+from jaxgsa._core.entry import _user_stacklevel, at_least, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -630,6 +630,9 @@ def _get_hsic_kernel(n_perms: int, bandwidth: float):
 
         null_counts, _ = jax.lax.scan(_scan_body, jnp.zeros_like(hsic_xys), perm_keys)
         p_vals = (null_counts + 1.0) / (n_perms + 1.0)
+        # A degenerate output has no dependence to test: R2 and T are NaN, so
+        # the p-value is NaN too, not a confident 1.0.
+        p_vals = jnp.where(zero_var, jnp.nan, p_vals)
 
         return r2, t_hsic, p_vals, hsic_xys
 
@@ -695,6 +698,79 @@ def _warn_constant_inputs(problem: Problem, X: Array) -> None:
         "and R2 is exactly 0 — a constant input has provably zero "
         "dependence on any output",
         stacklevel=2,
+        category=JaxgsaWarning,
+    )
+
+
+def _collapsed_median_labels(values: np.ndarray) -> list[int]:
+    """Return the columns whose median heuristic collapses to the floor.
+
+    The median of the off-diagonal pairwise squared distances is exactly 0
+    when more than half of the ``N (N - 1) / 2`` pairs are equal, which
+    happens when one value holds a large share of the sample. A column with
+    exactly two distinct values is left alone: the equality-indicator kernel
+    the floor produces is the right kernel for it. A constant column is left
+    alone too, since it has its own warning.
+
+    Args:
+        values: Samples, shape ``(N, C)``.
+
+    Returns:
+        Indices of the affected columns.
+    """
+    n = values.shape[0]
+    n_pairs = n * (n - 1) // 2
+    bad = []
+    for c in range(values.shape[1]):
+        col = values[:, c]
+        col = col[np.isfinite(col)]
+        uniq, counts = np.unique(col, return_counts=True)
+        if uniq.size <= 2:
+            continue
+        equal_pairs = int(np.sum(counts.astype(np.int64) * (counts.astype(np.int64) - 1) // 2))
+        if 2 * equal_pairs > n_pairs:
+            bad.append(c)
+    return bad
+
+
+def _warn_collapsed_median(problem: Problem, X: Array, Y3: Array, stacklevel: int) -> None:
+    """Warn when the median heuristic collapses for an input or an output slice.
+
+    When more than half of the sample pairs share one value, the median
+    squared distance is 0 and the heuristic falls to its 1e-20 floor. The
+    Gaussian kernel then reads 1 for equal values and 0 for any other pair,
+    and the indices react strongly to tiny perturbations of the rest of the
+    sample. The check reads concrete values, so it lives here and not in
+    :func:`indices`. ``bandwidth`` multiplies the heuristic, so it cannot
+    rescue a collapsed one.
+
+    Args:
+        problem: Problem definition, used to name the parameters.
+        X: Input samples, shape ``(N, D)``.
+        Y3: Output samples, shape ``(N, T, K)``.
+        stacklevel: Stack level that points the warning at the caller's line.
+
+    Warns:
+        JaxgsaWarning: If an input or an output slice has more than half of
+            its sample pairs equal and more than two distinct values.
+    """
+    x_host = np.asarray(X)
+    y_host = np.asarray(Y3)
+    n, n_t, n_k = y_host.shape
+    parts = [f"parameter {problem.names[d]!r}" for d in _collapsed_median_labels(x_host)]
+    for c in _collapsed_median_labels(y_host.reshape(n, n_t * n_k)):
+        t, k = divmod(c, n_k)
+        parts.append(f"output slice (t={t}, k={k})")
+    if not parts:
+        return
+    warnings.warn(
+        f"jaxgsa.hsic: the median heuristic failed for {', '.join(parts)}: more than half "
+        "of the samples share one value, so the median squared distance is 0 and the "
+        "kernel only tests whether two values are equal. The indices then react strongly "
+        "to tiny changes in the other samples. The bandwidth multiplier cannot fix this. "
+        "Analyse the non-zero part of the variable separately, or use a method that does "
+        "not rely on a bandwidth.",
+        stacklevel=stacklevel,
         category=JaxgsaWarning,
     )
 
@@ -1070,6 +1146,7 @@ def analyze(
         raise ValueError("key is required for the permutation test")
     _warn_constant_inputs(problem, X)
     _warn_single_precision()
+    _warn_collapsed_median(problem, X, ctx.Y3, _user_stacklevel())
 
     t0 = _verbose.tic()
     r2_all, t_all, p_all, raw_all = indices(

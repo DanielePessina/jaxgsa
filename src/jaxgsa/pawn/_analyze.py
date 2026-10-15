@@ -321,8 +321,9 @@ _CUMSUM_BLOCK = 64
 def _count_cumsum(oh: Array) -> Array:
     """Return the cumulative sum of ``oh`` along axis 0, exactly.
 
-    ``oh`` holds 0/1 flags, so every partial sum is an integer below ``2**24``
-    and float32 adds it without rounding. The result is therefore bit-for-bit
+    ``oh`` holds 0/1 flags, so every partial sum is an integer of at most
+    ``N``. That is exact in float32 only while ``N < 2**24``, which is the
+    limit of this function. The result is therefore bit-for-bit
     ``jnp.cumsum(oh, axis=0)``. It is built from a lower-triangular matmul
     inside blocks of rows plus a cumulative sum of the block totals, which
     XLA on CPU runs faster than its own reduce-window lowering of ``cumsum``.
@@ -865,7 +866,17 @@ def analyze(
             shifts the output. ``"mean"`` weights all bins equally.
         n_bootstrap: Number of bootstrap resamples for confidence intervals.
             ``0`` disables the confidence intervals.
-        conf_level: Confidence level for the bootstrap intervals.
+        conf_level: Confidence level for the bootstrap intervals. The
+            bootstrap resamples rows with replacement. Duplicated rows make
+            the conditional samples look more alike the unconditional one in
+            some bins and less alike in others, and the KS statistic is a
+            maximum, so each replicate sits above the point estimate on
+            average. The interval is therefore biased upward and is widest
+            in relative terms for weak parameters. For a parameter with no
+            effect, the interval can lie entirely above the point estimate.
+            Read it as a rough scale of the sampling noise. Do not read it
+            as a coverage guarantee. Use a larger ``N`` or a different
+            statistic if you need to separate weak parameters from noise.
         ci_method: How the interval endpoints are formed. ``"quantile"``
             (default) reads them off the empirical bootstrap distribution.
             ``"gaussian"`` centres them on the point estimate and takes
