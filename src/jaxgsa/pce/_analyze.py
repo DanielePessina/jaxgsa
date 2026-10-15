@@ -16,6 +16,7 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import get_memory_budget, pad_rows, resolve_batch_size
 from jaxgsa._core.bootstrap import bootstrap_draws, interval
 from jaxgsa._core.entry import (
+    _METHOD_ALIAS,
     at_least,
     bootstrap_checks,
     check_scalars,
@@ -24,6 +25,8 @@ from jaxgsa._core.entry import (
     require,
 )
 from jaxgsa._core.fit_quality import (
+    PACKAGE_DIR,
+    check_degenerate_inputs,
     check_fit_finite,
     check_gram_rank,
     min_pivot_share,
@@ -856,7 +859,7 @@ def _fit_pce_core(
         loo_flat=loo_flat,
         rmse_flat=rmse_flat,
         streamed=streamed,
-        pivot_share=min_pivot_share(gram, ridge) if diagnostics else None,
+        pivot_share=min_pivot_share(gram) if diagnostics else None,
     )
 
 
@@ -1180,10 +1183,10 @@ def analyze(
             ``fit_ratio`` is above 1, or too few rows survive
             ``on_invalid`` for even the order-1 expansion
             (``D + 1 > int(fit_ratio * N)``, which would make the fit
-            underdetermined). Also raised when the Gram matrix of the design
-            is numerically singular, for example for a duplicated or
-            constant input, or when the fitted coefficients are not finite:
-            the indices are then undefined.
+            underdetermined). Also raised when an input is constant or two
+            inputs are equal in every row, when the Gram matrix of the
+            design is numerically singular in float32, or when the fitted
+            coefficients are not finite: the indices are then undefined.
     """
     key = as_key(key, "pce")
     if _is_irregular_y(Y):
@@ -1256,15 +1259,18 @@ def analyze(
             category=JaxgsaWarning,
         )
 
+    # Messages name the public entry point the caller used: jaxgsa.shapley
+    # runs this function under its own alias.
+    namespace = _METHOD_ALIAS.get() or "jaxgsa.pce"
     switched = _order_forced_legendre(problem, fit.order)
     if switched:
         warnings.warn(
-            f"jaxgsa.pce: order {fit.order} is above {_MAX_HERMITE_ORDER_UNDER_TRUNCATION}, "
+            f"{namespace}: order {fit.order} is above {_MAX_HERMITE_ORDER_UNDER_TRUNCATION}, "
             f"so the truncated Gaussian input(s) {switched} use a Legendre basis "
             "through the truncated CDF instead of Hermite. That basis fits a "
             "Gaussian-shaped input less accurately and can degrade the indices. "
             f"Use order <= {_MAX_HERMITE_ORDER_UNDER_TRUNCATION} to keep Hermite.",
-            stacklevel=2,
+            skip_file_prefixes=(PACKAGE_DIR,),
             category=JaxgsaWarning,
         )
 
@@ -1293,16 +1299,19 @@ def analyze(
     # NaN coefficients are then the documented outcome, already warned about,
     # and not a sign of a singular Gram matrix.
     if bool(jnp.all(jnp.isfinite(X)) & jnp.all(jnp.isfinite(ctx.Y3))):
-        # The rank check comes first. A singular Gram matrix turns into NaN
+        # The rank checks come first. A singular Gram matrix turns into NaN
         # only in float32; in float64 every number stays finite and wrong.
+        # Constant and duplicated inputs are the provable cases, so they are
+        # read off the inputs; the pivot share covers the rest.
+        check_degenerate_inputs(namespace, X, problem.names)
         assert fit.pivot_share is not None
         check_gram_rank(
-            "jaxgsa.pce",
+            namespace,
             fit.pivot_share,
             advice="Remove duplicated or constant inputs, lower order, or add rows.",
         )
         check_fit_finite(
-            "jaxgsa.pce",
+            namespace,
             fit.coefficients,
             loo,
             rmse,

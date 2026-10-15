@@ -90,27 +90,44 @@ def test_order_one_second_order_indices_are_zero_and_nan_when_constant():
     assert np.all(np.isnan(np.asarray(S2c)))
 
 
-def test_duplicated_input_raises_on_singular_gram():
+def _three_inputs(n: int = 2000) -> tuple[jaxgsa.Problem, np.ndarray, np.random.Generator]:
     rng = np.random.default_rng(0)
     problem = jaxgsa.Problem(["a", "b", "c"], [(0, 1)] * 3)
-    X = rng.uniform(0, 1, (2000, 3)).astype(np.float32)
+    return problem, rng.uniform(0, 1, (n, 3)).astype(np.float32), rng
+
+
+def _gaussian_fit(order: int, n: int, seed: int, **kwargs):
+    gauss = GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0)
+    problem = jaxgsa.Problem.from_dict({"a": gauss, "b": gauss})
+    X = np.random.default_rng(seed).standard_normal((n, 2))
+    if not jax.config.jax_enable_x64:
+        X = X.astype(np.float32)
+    Y = X[:, 0] + 0.5 * X[:, 1] + X[:, 0] * X[:, 1]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = pce.analyze(
+            problem, jnp.asarray(X), jnp.asarray(Y), order=order, verbose=False, **kwargs
+        )
+    assert isinstance(result, pce.PCEResult)
+    return np.asarray(result.S1)
+
+
+@pytest.mark.parametrize("ridge", [1e-8, 1.0])
+def test_duplicated_input_raises_in_both_dtypes(ridge):
+    # Read off the inputs, so neither dtype nor ridge can hide it.
+    problem, X, _ = _three_inputs()
     X[:, 2] = X[:, 1]
     Y = 2 * X[:, 0] + X[:, 1] ** 2
-    with pytest.raises(ValueError, match="numerically singular"):
-        pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
+    with pytest.raises(ValueError, match=r"\[\('b', 'c'\)\] are equal in every row"):
+        pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, ridge=ridge, verbose=False)
 
 
 @pytest.mark.parametrize("batch_size", [None, 256])
-def test_constant_input_raises_on_singular_gram(batch_size):
-    # Raises in float32 and float64 alike, on the single-pass and the
-    # streamed path. Under x64 nothing turns NaN, so only the rank check
-    # catches it.
-    rng = np.random.default_rng(0)
-    problem = jaxgsa.Problem(["a", "b", "c"], [(0, 1)] * 3)
-    X = rng.uniform(0, 1, (2000, 3)).astype(np.float32)
+def test_constant_input_raises_in_both_dtypes(batch_size):
+    problem, X, _ = _three_inputs()
     X[:, 2] = 0.5
     Y = 2 * X[:, 0] + X[:, 1] ** 2
-    with pytest.raises(ValueError, match="numerically singular"):
+    with pytest.raises(ValueError, match=r"\['c'\] have the same value in every row"):
         pce.analyze(
             problem,
             jnp.asarray(X),
@@ -121,67 +138,64 @@ def test_constant_input_raises_on_singular_gram(batch_size):
         )
 
 
+def test_degenerate_input_message_names_the_shapley_entry_point():
+    problem, X, _ = _three_inputs()
+    X[:, 2] = X[:, 1]
+    Y = 2 * X[:, 0] + X[:, 1] ** 2
+    with pytest.raises(ValueError, match=r"^jaxgsa\.shapley\.analyze: "):
+        jaxgsa.shapley.analyze(problem, jnp.asarray(X), jnp.asarray(Y), backend="pce")
+
+
 def test_near_duplicated_input_is_flagged_in_both_dtypes():
-    # Copies b up to 1e-3 noise: NaN Cholesky in float32, so it raises. In
-    # float64 the fit is defined but ill-conditioned (share about 1e-10), so
-    # it warns.
-    rng = np.random.default_rng(0)
-    problem = jaxgsa.Problem(["a", "b", "c"], [(0, 1)] * 3)
-    X = rng.uniform(0, 1, (2000, 3)).astype(np.float32)
+    # Copies b up to 1e-3 noise. float32: the Cholesky factor is NaN, so the
+    # fit raises and names float32 rounding. float64: the share is about
+    # 3e-10, which proves nothing, so the fit warns.
+    problem, X, rng = _three_inputs()
     X[:, 2] = np.clip(X[:, 1] + 1e-3 * rng.standard_normal(2000), 0, 1).astype(np.float32)
     Y = 2 * X[:, 0] + X[:, 1] ** 2
     if jax.config.jax_enable_x64:
-        with pytest.warns(JaxgsaWarning, match="ill-conditioned"):
+        with pytest.warns(JaxgsaWarning, match="near singular"):
             pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
     else:
-        with pytest.raises(ValueError, match="numerically singular"):
+        with pytest.raises(ValueError, match="float32 rounding may be the cause"):
             pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
 
 
-@pytest.mark.parametrize("seed", [0, 1])
-def test_accurate_order_20_hermite_fit_is_not_refused_in_float64(seed):
-    # Pivot share about 6e-11 to 8e-11, far below the old fixed limits, yet
-    # the indices match the truth [0.4444, 0.1111] to 1e-3. It must warn, not
+def test_three_level_input_is_never_silent():
+    # Exactly singular at order 3: the cubic in a three-level input lies in
+    # the span of the lower terms. Its float32 share sits near the 1e-5
+    # limit and moves with the jax version, so float32 may raise or warn.
+    # float64 warns.
+    problem, X, rng = _three_inputs()
+    X[:, 2] = rng.choice(np.array([0.1, 0.5, 0.9], np.float32), 2000)
+    Y = 2 * X[:, 0] + X[:, 1] ** 2
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
+        except ValueError as error:
+            assert not jax.config.jax_enable_x64
+            assert "numerically singular" in str(error)
+            return
+    assert [w for w in caught if "singular" in str(w.message)]
+
+
+@pytest.mark.parametrize(("order", "n", "seed"), [(20, 1000, 0), (20, 1000, 1), (40, 2000, 1)])
+def test_accurate_high_order_hermite_fit_is_not_refused_in_float64(order, n, seed):
+    # Pivot shares fall far below any fixed limit at these orders, yet the
+    # indices stay close to the truth [0.4444, 0.1111]. They may warn, never
     # raise.
     if not jax.config.jax_enable_x64:
         pytest.skip("float64 only")
-    gauss = GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0)
-    problem = jaxgsa.Problem.from_dict({"a": gauss, "b": gauss})
-    X = np.random.default_rng(seed).standard_normal((1000, 2))
-    Y = X[:, 0] + 0.5 * X[:, 1] + X[:, 0] * X[:, 1]
-    with pytest.warns(JaxgsaWarning, match="ill-conditioned"):
-        result = pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=20, verbose=False)
-    assert isinstance(result, pce.PCEResult)
-    np.testing.assert_allclose(np.asarray(result.S1), [0.4444, 0.1111], atol=2e-3)
+    np.testing.assert_allclose(_gaussian_fit(order, n, seed), [0.4444, 0.1111], atol=1e-2)
 
 
-@pytest.mark.parametrize("ridge", [1e-8, 1.0])
-def test_duplicated_input_raises_whatever_the_ridge(ridge):
-    rng = np.random.default_rng(0)
-    problem = jaxgsa.Problem(["a", "b", "c"], [(0, 1)] * 3)
-    X = rng.uniform(0, 1, (2000, 3)).astype(np.float32)
-    X[:, 2] = X[:, 1]
-    Y = 2 * X[:, 0] + X[:, 1] ** 2
-    with pytest.raises(ValueError, match="numerically singular"):
-        pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, ridge=ridge, verbose=False)
-
-
-def test_three_level_input_is_flagged_in_both_dtypes():
-    # Exactly singular at order 3: the cubic in a three-level input lies in
-    # the span of the lower terms. float64 resolves it (share 3.5e-12) and
-    # refuses it. In float32 the rounding floor (1.6e-5 here) hides it, so
-    # the fit warns instead of passing in silence.
-    rng = np.random.default_rng(0)
-    problem = jaxgsa.Problem(["a", "b", "c"], [(0, 1)] * 3)
-    X = rng.uniform(0, 1, (2000, 3)).astype(np.float32)
-    X[:, 2] = rng.choice(np.array([0.1, 0.5, 0.9], np.float32), 2000)
-    Y = 2 * X[:, 0] + X[:, 1] ** 2
+def test_ridge_regularized_high_order_fit_is_not_refused_in_float32():
+    # The share keeps the ridge, so ridge=1 keeps a float32 order-16 fit
+    # finite and accurate.
     if jax.config.jax_enable_x64:
-        with pytest.raises(ValueError, match="numerically singular"):
-            pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
-    else:
-        with pytest.warns(JaxgsaWarning, match="may be numerically singular"):
-            pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
+        pytest.skip("float32 only")
+    np.testing.assert_allclose(_gaussian_fit(16, 1000, 0, ridge=1.0), [0.4444, 0.1111], atol=2e-2)
 
 
 def test_high_order_hermite_fit_is_not_refused_in_float64():

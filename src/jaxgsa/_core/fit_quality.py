@@ -18,10 +18,12 @@ from __future__ import annotations
 import math
 import os
 import warnings
+from collections.abc import Sequence
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
 
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -65,36 +67,25 @@ CV_RATIO_THRESHOLD = math.sqrt(1.0 - POORFIT_THRESHOLD)
 # Limits on the pivot share of a Gram matrix, per dtype.
 #
 # The pivot share of column j is the squared Cholesky pivot ``L[j, j]**2``
-# over the Gram diagonal ``G[j, j]``: the fraction of the column's variance
-# that is left after the columns before it explain it. It is read off the
-# Gram matrix of the data alone. :func:`min_pivot_share` takes the ridge out
-# and adds PIVOT_JITTER times each diagonal entry instead. A column that the
-# earlier columns explain exactly then has a share of PIVOT_JITTER, whatever
-# the ridge, the row count or the column scale. A share far above it is the
-# data's own.
+# over the diagonal ``G[j, j]`` of the ridge-regularized Gram matrix: the
+# fraction of the column's variance that is left after the columns before it
+# explain it.
 #
-# float64 refuses a share below 4e-12, four times the jitter. An exactly
-# dependent column whose earlier columns are well-conditioned sits at 1.4 to
-# 2.0 times the jitter, measured at every N from 40 to 200000: a duplicated
-# input, a constant input (NaN, an all-zero column), a three-level input.
-# High-order Hermite fits come close from above: two Gaussian inputs on 1000
-# rows give 60 to 80 times the jitter at order 20, and 9 to 18 times at
-# orders 24 and 26, and their indices are still accurate. The margin is about
-# two on each side. That is the precision limit of float64 normal equations.
-# An exact dependence among ill-conditioned columns can sit higher (an input
-# that is the square of another gives 34 times the jitter) and then only
-# warns. Every share below 1e-9 warns: an input that copies another up to
-# 1e-3 noise gives about 1e-10, and its copy gets a total index of 0.08
-# instead of 0.
+# The share alone cannot prove that the indices are undefined in float64.
+# Accurate high-order Hermite fits and exactly dependent designs give shares
+# in overlapping ranges, so no fixed limit separates them. The provable cases,
+# a constant input and two identical inputs, are read off the inputs instead
+# (:func:`check_degenerate_inputs`). In float64 the share only warns, below
+# 1e-9. An input that copies another up to 1e-3 noise gives about 3e-10 on
+# 2000 rows, and its copy then gets a total index of 0.08 instead of 0.
 #
 # float32 cannot resolve the same range. Its rounding floor overlaps the
-# shares of singular designs, so a three-level input on 2000 rows gives
-# 1.6e-5 in float32. Below 1e-5 float32 refuses the fit, and NaN (a failed
-# factorisation) counts as below. From 1e-5 to 1e-4 it warns, because the
-# design may be singular and float32 cannot tell. The lowest well-posed
-# float32 share measured is 1.5e-4 (D = 10, order 4, fit_ratio = 1).
-PIVOT_JITTER = 1e-12
-SINGULAR_PIVOT_THRESHOLD_F64 = 4e-12
+# shares of singular designs: a three-level input on 2000 rows gives about
+# 1e-5 in float32, and the exact value moves with the jax version. Below 1e-5
+# float32 refuses the fit, and NaN (a failed factorisation) counts as below.
+# From 1e-5 to 1e-4 it warns, because the design may be singular and float32
+# cannot tell. The lowest well-posed float32 share measured is 1.5e-4 (D = 10,
+# order 4, fit_ratio = 1).
 ILL_CONDITIONED_PIVOT_THRESHOLD_F64 = 1e-9
 SINGULAR_PIVOT_THRESHOLD_F32 = 1e-5
 AMBIGUOUS_PIVOT_THRESHOLD_F32 = 1e-4
@@ -263,41 +254,94 @@ def warn_cv_overfit(
 
 
 @jax.jit
-def min_pivot_share(gram: Array, ridge: Array | float = 0.0) -> Array:
+def min_pivot_share(gram: Array) -> Array:
     """The smallest unexplained share of any column of a Gram matrix.
 
-    The ridge is taken out first, so a large ridge cannot hide a singular
-    design, and a fixed relative jitter of :data:`PIVOT_JITTER` times each
-    diagonal entry goes in instead. An exactly dependent column then has a
-    share of about :data:`PIVOT_JITTER` in float64. In float32 the jitter is
-    below rounding and changes nothing.
-
     Args:
-        gram: Symmetric Gram matrix, shape ``(n_terms, n_terms)``.
-        ridge: The ridge already added to the diagonal of ``gram``.
+        gram: Symmetric Gram matrix, shape ``(n_terms, n_terms)``, with any
+            ridge already added.
 
     Returns:
-        ``min_j L[j, j]**2 / G[j, j]`` of the jittered data Gram matrix ``G``,
-        a scalar in ``[0, 1]``. NaN when the Cholesky factorisation fails or
-        a column is all zeros.
+        ``min_j L[j, j]**2 / G[j, j]``, a scalar in ``[0, 1]``. NaN when the
+        Cholesky factorisation fails or a column is all zeros.
     """
-    diag = jnp.diagonal(gram) - ridge
-    data = gram + jnp.diag(PIVOT_JITTER * diag - ridge)
-    chol = jnp.linalg.cholesky(data)
-    return jnp.min(jnp.diagonal(chol) ** 2 / jnp.diagonal(data))
+    chol = jnp.linalg.cholesky(gram)
+    return jnp.min(jnp.diagonal(chol) ** 2 / jnp.diagonal(gram))
+
+
+@jax.jit
+def _input_fingerprints(X: Array) -> tuple[Array, Array]:
+    """Per-column spread and a projection that identical columns share.
+
+    Args:
+        X: Inputs, shape ``(N, D)``.
+
+    Returns:
+        ``(spread, projection)``, each of shape ``(D,)``. ``spread`` is
+        ``max - min`` per column. Identical columns get equal projections up
+        to the summation order.
+    """
+    weights = jax.random.normal(jax.random.key(0), (X.shape[0], 1), X.dtype)
+    spread = jnp.max(X, axis=0) - jnp.min(X, axis=0)
+    return spread, jnp.sum(X * weights, axis=0)
+
+
+def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> None:
+    """Refuse inputs whose indices are undefined: constant or duplicated.
+
+    A constant input carries no variance, so no share of the output variance
+    can belong to it. Two identical inputs cannot be told apart, so the fit
+    can split their effect between them in any proportion. Both make the Gram
+    matrix of a polynomial basis exactly singular, but the pivot shares
+    cannot prove that in float64. This check reads the inputs directly, so
+    both dtypes refuse the same designs.
+
+    Args:
+        namespace: The public function the message speaks for.
+        X: Finite inputs, shape ``(N, D)``.
+        names: Input names, length ``D``.
+
+    Raises:
+        ValueError: If an input is constant over all rows, or two inputs are
+            equal in every row.
+    """
+    spread_dev, projection_dev = _input_fingerprints(X)
+    spread = np.asarray(spread_dev)
+    constant = [names[int(j)] for j in np.flatnonzero(spread == 0)]
+    if constant:
+        raise ValueError(
+            f"{namespace}: the input(s) {constant} have the same value in every row. "
+            "A constant input has no variance, so its indices are undefined, and "
+            "the Gram matrix of the design is singular. Remove the input from the "
+            "problem, or sample it over its range."
+        )
+    projection = np.asarray(projection_dev, dtype=np.float64)
+    order = np.argsort(projection)
+    scale = np.max(np.abs(projection)) if projection.size else 0.0
+    duplicates: list[tuple[str, str]] = []
+    for a, b in zip(order[:-1], order[1:], strict=True):
+        if abs(projection[a] - projection[b]) > 1e-4 * scale:
+            continue
+        if bool(jnp.array_equal(X[:, a], X[:, b])):
+            first, second = sorted((int(a), int(b)))
+            duplicates.append((names[first], names[second]))
+    if duplicates:
+        raise ValueError(
+            f"{namespace}: the inputs {duplicates} are equal in every row. Two "
+            "identical inputs cannot be told apart, so their indices are "
+            "undefined, and the Gram matrix of the design is singular. Remove "
+            "one input of each pair, or sample them independently."
+        )
 
 
 def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
-    """Refuse a fit whose Gram matrix is numerically rank deficient.
+    """Refuse or warn on a fit whose Gram matrix is near singular.
 
     :func:`check_fit_finite` sees a singular Gram matrix only when it turns
-    into NaN. That happens in float32. In float64 the factorisation succeeds,
-    the ridge keeps the solve finite, and the coefficients split one effect
-    across collinear columns at will. Every number stays finite and the
-    indices are wrong: a duplicated input shares the true input's index, and
-    a constant input gets a large one. This check reads the conditioning
-    directly. The limits depend on the dtype of ``pivot_share``; see
-    :data:`SINGULAR_PIVOT_THRESHOLD_F64`.
+    into NaN, which happens in float32. In float64 the factorisation
+    succeeds and every number stays finite. This check reads the
+    conditioning directly. The limits depend on the dtype of
+    ``pivot_share``; see :data:`ILL_CONDITIONED_PIVOT_THRESHOLD_F64`.
 
     Args:
         namespace: The public function the message speaks for.
@@ -306,7 +350,6 @@ def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
 
     Raises:
         ValueError: If ``pivot_share`` is not finite, or is below
-            :data:`SINGULAR_PIVOT_THRESHOLD_F64` in float64 or
             :data:`SINGULAR_PIVOT_THRESHOLD_F32` in float32.
 
     Warns:
@@ -315,28 +358,34 @@ def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
             :data:`AMBIGUOUS_PIVOT_THRESHOLD_F32` in float32.
     """
     is_f64 = jnp.asarray(pivot_share).dtype == jnp.float64
-    limit = SINGULAR_PIVOT_THRESHOLD_F64 if is_f64 else SINGULAR_PIVOT_THRESHOLD_F32
     share = float(pivot_share)
+    precision = (
+        ""
+        if is_f64
+        else " float32 rounding may be the cause: enable jax x64 "
+        "(jax.config.update('jax_enable_x64', True)) to fit in float64."
+    )
     if not math.isfinite(share):
         raise ValueError(
             f"{namespace}: the Gram matrix of the design is numerically singular: "
             "its Cholesky factorisation failed. The coefficients are not "
-            f"identified, so the indices are undefined. {advice}"
+            f"identified, so the indices are undefined.{precision} {advice}"
         )
-    if share < limit:
+    if not is_f64 and share < SINGULAR_PIVOT_THRESHOLD_F32:
         raise ValueError(
             f"{namespace}: the Gram matrix of the design is numerically singular: "
             f"one basis column has only {share:.1e} of its variance left after the "
-            f"earlier columns explain it, below {limit:.0e}. The coefficients are "
-            f"not identified, so the indices are undefined. {advice}"
+            f"earlier columns explain it, below {SINGULAR_PIVOT_THRESHOLD_F32:.0e}. "
+            f"The coefficients are not identified, so the indices are undefined."
+            f"{precision} {advice}"
         )
     if is_f64 and share < ILL_CONDITIONED_PIVOT_THRESHOLD_F64:
         warnings.warn(
-            f"{namespace}: the Gram matrix of the design is ill-conditioned: one "
+            f"{namespace}: the Gram matrix of the design is near singular: one "
             f"basis column has only {share:.1e} of its variance left after the "
-            "earlier columns explain it. The indices are defined, but a nearly "
-            "duplicated input can make them inaccurate. Check for inputs that "
-            f"almost copy each other. {advice}",
+            "earlier columns explain it. Near-singular or dependent inputs make "
+            "the indices unreliable. A very high order on Gaussian inputs can "
+            f"also cause this, and its indices can still be accurate. {advice}",
             skip_file_prefixes=(PACKAGE_DIR,),
             category=JaxgsaWarning,
         )
