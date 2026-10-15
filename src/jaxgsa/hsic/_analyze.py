@@ -192,9 +192,11 @@ def _pair_boundaries(y: Array, t: Array) -> tuple[Array, Array]:
     def d2(j: Array) -> Array:
         return (y[j] - y) ** 2
 
-    right_lo, right_hi = i, jnp.full((n,), n, dtype=jnp.int32)
-    left_lo, left_hi = jnp.zeros((n,), dtype=jnp.int32), i
-    for _ in range(n.bit_length()):
+    # A rolled loop, not a Python unroll: this runs inside a bisection that is
+    # itself inlined once per input, and unrolling made the first call
+    # compile for tens of seconds at N = 1024.
+    def body(_: Array, carry: tuple[Array, Array, Array, Array]) -> tuple[Array, ...]:
+        right_lo, right_hi, left_lo, left_hi = carry
         active = right_lo < right_hi
         mid = (right_lo + right_hi) // 2
         ok = d2(jnp.minimum(mid, n - 1)) <= t
@@ -206,6 +208,10 @@ def _pair_boundaries(y: Array, t: Array) -> tuple[Array, Array]:
         ok = d2(mid) <= t
         left_hi = jnp.where(active & ok, mid, left_hi)
         left_lo = jnp.where(active & ~ok, mid + 1, left_lo)
+        return right_lo, right_hi, left_lo, left_hi
+
+    init = (i, jnp.full((n,), n, dtype=jnp.int32), jnp.zeros((n,), dtype=jnp.int32), i)
+    right_lo, _, left_lo, _ = jax.lax.fori_loop(0, n.bit_length(), body, init)
     return right_lo, left_lo
 
 
@@ -396,7 +402,21 @@ def _build_one_kernel(x: Array, bandwidth: float) -> Array:
     Returns:
         Kernel matrix, shape ``(N, N)``.
     """
-    sigma_sq = jnp.asarray(bandwidth, dtype=x.dtype) ** 2 * _median_bandwidth_sq(x)
+    return _kernel_from_median(x, _median_bandwidth_sq(x), bandwidth)
+
+
+def _kernel_from_median(x: Array, median_sq: Array, bandwidth: float) -> Array:
+    """Build a Gaussian RBF kernel matrix from a known median squared distance.
+
+    Args:
+        x: Values for one variable, shape ``(N,)``.
+        median_sq: Median-heuristic squared bandwidth of ``x``, a scalar.
+        bandwidth: Positive multiplier on the median-heuristic bandwidth.
+
+    Returns:
+        Kernel matrix, shape ``(N, N)``.
+    """
+    sigma_sq = jnp.asarray(bandwidth, dtype=x.dtype) ** 2 * median_sq
     return jnp.exp(-((x[:, None] - x[None, :]) ** 2) / (2.0 * sigma_sq))
 
 
@@ -483,7 +503,13 @@ def _input_setup(
         ``(total,)`` holding ``fold_in(key, i)`` for each slice.
     """
     D = X_unit.shape[1]
-    Ks_stack = jnp.stack([_build_one_kernel(X_unit[:, d], bandwidth) for d in range(D)])
+    # One vmapped bandwidth selection instead of D inlined copies halves the
+    # compile time. The kernels stay in a Python loop: vmapping the
+    # exponential too moves the last bit of the indices.
+    medians = jax.vmap(_median_bandwidth_sq, in_axes=1)(X_unit)
+    Ks_stack = jnp.stack(
+        [_kernel_from_median(X_unit[:, d], medians[d], bandwidth) for d in range(D)]
+    )
     K_aug_full, K_aug_compls_stack = _complement_kernels(_augmented_kernels(Ks_stack))
     # Self-HSIC HSIC(K_d, K_d) is output-independent, so compute it once
     # here and share it across every output slice.
