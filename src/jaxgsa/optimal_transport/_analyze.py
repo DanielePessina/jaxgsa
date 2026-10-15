@@ -62,6 +62,7 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import (
+    _user_stacklevel,
     at_least,
     bootstrap_checks,
     check_scalars,
@@ -86,9 +87,11 @@ from jaxgsa._core.partition import (
 )
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
+    _join_capped,
     _prepare_Y,
     _standardize_outputs,
     _validate_output,
+    _zero_variance_stats,
     as_key,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -626,12 +629,25 @@ def _joint_kernel(
             # scale=V, not this class's own max cost: see _sinkhorn_w2's
             # docstring (M3) for why the regularization must be relative to
             # one fixed, class-independent normalizer.
-            cost, err = _sinkhorn_w2(C, log_b_all[g, m], epsilon, max_iter, tol, V)
+            # An empty class has no valid column, so its log_b is all -inf
+            # and the solve returns NaN. jnp.where below discards that value,
+            # but a NaN still leaks into a reverse-mode gradient through
+            # the discarded branch. So give an empty class one dummy column
+            # of mass 1: the solve stays finite and is discarded anyway.
+            empty = ~(count_dm > 0)
+            dummy_log_b = jnp.full((P,), -jnp.inf, dtype).at[0].set(0.0)
+            log_b = jnp.where(empty, dummy_log_b, log_b_all[g, m])
+            # A constant cloud has V == 0, and every class cost is then 0 and
+            # discarded by the aggregation. The solver's own floor on the
+            # scale has a NaN derivative at exactly 0, which would leak into a
+            # reverse-mode gradient. So hand it 1.0 in that case; V > 0 passes
+            # through unchanged, bit for bit.
+            safe_V = jnp.where(V > 0, V, jnp.ones_like(V))
+            cost, err = _sinkhorn_w2(C, log_b, epsilon, max_iter, tol, safe_V)
             cls_mean = (Z_c * mask_dm[:, None]).sum(axis=0) / jnp.maximum(count_dm, 1.0)
             adv = ((cls_mean - mean_all) ** 2).sum()
             # An empty class carries zero weight; discard its (junk) solve
             # so it neither poisons the sum nor counts as a failure.
-            empty = ~(count_dm > 0)
             zero = jnp.zeros((), dtype)
             return (
                 jnp.where(empty, zero, cost),
@@ -655,7 +671,9 @@ def _joint_kernel(
             _aggregate_normalized(w2, weights, V),
             _aggregate_normalized(adv, weights, V),
             _aggregate_normalized(diff, weights, V),
-            (errs > tol).sum(),
+            # ``~(errs <= tol)`` and not ``errs > tol``: a NaN residual fails the
+            # first test too, so it counts as not converged.
+            (~(errs <= tol)).sum(),
         )
 
     def _one_replicate(carry, xs):
@@ -1032,6 +1050,57 @@ def _boot_replicates(vals_all: Array, hat: Array, degen_all: Array) -> Array:
     return jnp.where(degen_boot, hat[None], vals_all[1:])
 
 
+def _warn_joint_zero_variance(
+    Y: Array, output_names: tuple[str, ...] | None, *, stacklevel: int
+) -> None:
+    """Warn about constant output slices in a joint (point-cloud) mode.
+
+    A joint mode scores the whole output cloud at once. A constant slice adds
+    nothing to the transport distance, but the other slices still give a
+    non-zero index. Only a fully constant cloud gives indices of exactly 0.
+
+    Args:
+        Y: Output array in the caller's own rank, ``(N, K)`` or ``(N, T, K)``.
+        output_names: Declared output names, or ``None``.
+        stacklevel: Passed to :func:`warnings.warn`, so the warning points at
+            the caller's own line.
+    """
+    flat = Y.reshape(Y.shape[0], -1)
+    mask, n_dev = _zero_variance_stats(flat)
+    n_zero = int(n_dev)
+    if n_zero == 0:
+        return
+    n_outputs = flat.shape[1]
+    method = "jaxgsa.optimal_transport.analyze"
+    if n_zero == n_outputs:
+        warnings.warn(
+            f"{method}: every output slice has zero variance, so the whole cloud is "
+            "constant and all indices will be 0",
+            stacklevel=stacklevel,
+            category=JaxgsaWarning,
+        )
+        return
+    K = Y.shape[-1]
+    names = output_names if output_names is not None and len(output_names) == K else None
+
+    def _label(k: int) -> str:
+        return f"k={k} ('{names[k]}')" if names is not None else f"k={k}"
+
+    flat_idx = [int(i) for i in jnp.where(mask)[0]]
+    labels = (
+        [_label(i) for i in flat_idx]
+        if Y.ndim == 2
+        else [f"(t={i // K}, {_label(i % K)})" for i in flat_idx]
+    )
+    warnings.warn(
+        f"{method}: {n_zero}/{n_outputs} output slice(s) have zero variance "
+        f"({_join_capped(labels)}); they add nothing to the joint transport "
+        "distance, so the indices come from the other slices and are not forced to 0",
+        stacklevel=stacklevel,
+        category=JaxgsaWarning,
+    )
+
+
 def analyze(
     problem: Problem,
     X: Array,
@@ -1222,9 +1291,12 @@ def analyze(
             ``on_invalid`` is not one of the three policies, or the
             non-finite policy refuses the sample.
     Warns:
-        JaxgsaWarning: If an output slice has zero variance. Every
-            conditional distribution then equals the unconditional one, so
-            the corresponding indices are an exact 0 rather than an answer.
+        JaxgsaWarning: If an output slice has zero variance. In
+            ``mode="univariate"`` every conditional distribution then equals
+            the unconditional one, so the index is an exact 0 rather than an
+            answer. In the joint modes a constant slice only adds nothing to
+            the transport distance; the indices are 0 only when every slice
+            is constant.
     """
     key = as_key(key, "optimal_transport")
     if _is_irregular_y(Y):
@@ -1270,11 +1342,17 @@ def analyze(
         min_kept=_MIN_KEPT,
         # A constant slice leaves every conditional distribution equal to
         # the unconditional one, so the indices come out an exact 0, not
-        # the NaN a variance ratio would give.
+        # the NaN a variance ratio would give. That holds for the univariate
+        # mode only. The joint modes score the whole cloud at once, so a
+        # constant slice just adds nothing to the distance; they word their
+        # own warning below.
+        warn_zero_variance=mode not in _POINT_CLOUD_MODES,
         zero_variance_outcome="zero",
     )
     assert ctx.X is not None
     X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
+    if mode in _POINT_CLOUD_MODES and on_invalid != "skip":
+        _warn_joint_zero_variance(Y, problem.output_names, stacklevel=_user_stacklevel())
 
     if mode == "trajectory" and Y.ndim != 3:
         raise ValueError(
@@ -1457,7 +1535,9 @@ def analyze(
             warnings.warn(
                 f"jaxgsa.optimal_transport: {n_bad} of {n_solves} Sinkhorn solves did not reach "
                 f"tol={tol:g} within max_iter={max_iter}; results use the last "
-                "iterate (consider raising max_iter or epsilon)",
+                "iterate (consider raising max_iter or epsilon, loosening tol, or "
+                "enabling jax x64: in float32 the residual cannot fall below "
+                "its rounding floor, so more iterations do not help there)",
                 stacklevel=2,
                 category=JaxgsaWarning,
             )
@@ -1590,9 +1670,24 @@ def indices(
     static at trace time: one mode is traced per concrete value, exactly as
     ``analyze`` compiles one. The point-cloud modes go through the
     entropic solver, whose stopping rule is a ``while_loop`` on the
-    marginal residual; that is differentiable but the derivative is of the
-    iterate the loop stopped at, so tighten ``tol`` before trusting a
-    gradient through them.
+    marginal residual. The derivative does not go through that loop. It
+    comes from the implicit function theorem at the solver's fixed point,
+    so reverse mode (``jax.grad``, ``jax.jacrev``) and forward mode both
+    work. The derivative is that of the converged solution: if a solve
+    stops at ``max_iter`` before it reaches ``tol``, the derivative is as
+    unreliable as the value. Second derivatives work too: Hessian-vector
+    products (``grad`` of ``grad``, ``jacfwd`` of ``grad``) match finite
+    differences to about 1e-8 for converged solves.
+
+    A small ``epsilon`` (about 1e-3 or less) at the default ``max_iter`` can
+    stop the solve early. Then the value and the gradient are both
+    unreliable. Raise ``max_iter``, use a larger ``epsilon``, or enable
+    x64.
+
+    Index values are bitwise stable for :func:`analyze` and for an eager call
+    of this function. Under your own outer ``jax.jit`` they can differ in the
+    last float32 bits (XLA fuses the operations differently), by up to about
+    5e-6 relative.
 
     There is no ``n_bootstrap``, no ``key`` and no ``dummy``. All three are
     policy: the bootstrap and the dummy baseline draw randomness and return

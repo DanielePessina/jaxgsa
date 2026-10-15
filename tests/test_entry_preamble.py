@@ -155,7 +155,7 @@ class TestChunkSizeIsValidatedOnEveryPath:
         multi = jnp.asarray(np.stack([base, 2.0 * base], axis=-1))
         calls.append(lambda: jaxgsa.sobol.analyze(sr, multi, slice_chunk_size=0))
         for call in calls:
-            with pytest.raises(ValueError, match="slice_chunk_size must be >= 1"):
+            with pytest.raises(ValueError, match="slice_chunk_size must be an integer >= 1"):
                 call()
 
 

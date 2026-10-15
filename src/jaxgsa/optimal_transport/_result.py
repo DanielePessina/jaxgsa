@@ -132,6 +132,9 @@ class OTResult(SchemaResult):
         ),
         meta=("mode",),
     )
+    # scipy's netCDF writer keeps its own ``mode`` on the file object, so a
+    # global attribute of that name breaks ``to_netcdf(engine="scipy")``.
+    _attr_aliases = {"mode": "ot_mode"}
 
     def _base_dims(
         self, time_coords: np.ndarray | list | None

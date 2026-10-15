@@ -331,8 +331,11 @@ def analyze(
         verbose: If ``True`` (default), print a short summary to stdout.
             Pass ``False`` for a silent run.
         keep_replicates: Keep the per-resample indices on
-            ``RankResult.ci.replicates``. The kept draws are the rescaled
-            ones that the interval is built from.
+            ``RankResult.ci.replicates``. The kept draws are the plain
+            bootstrap draws. Recomputing an interval from them gives the
+            plain interval, which can be narrower than ``S1_conf``. That
+            field is the hull of the plain and the bias-corrected
+            intervals.
 
     Returns:
         A :class:`RankResult` with ``S1`` shaped ``(D,)``, ``(K, D)``, or

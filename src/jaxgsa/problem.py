@@ -227,6 +227,7 @@ class CategoricalSpec:
                 not positive and finite, the probabilities do not sum to 1
                 within tolerance, or ``labels`` has the wrong length or
                 duplicate entries.
+            TypeError: If ``labels`` is a bare string.
         """
         # Coerce to Python floats to prevent JAX tracers or numpy scalars from
         # leaking into hashable metadata.
@@ -246,6 +247,7 @@ class CategoricalSpec:
         if not self.labels:
             object.__setattr__(self, "labels", tuple(str(level) for level in range(n_levels)))
             return
+        _reject_bare_str(self.labels, "Categorical labels")
         label_values = tuple(str(label) for label in self.labels)
         if len(label_values) != n_levels:
             raise ValueError(
@@ -323,6 +325,7 @@ def _normalize_input_spec(spec: InputSpecValue) -> InputSpec:
             )
         if spec["dist"] == "categorical":
             labels = spec.get("labels")
+            _reject_bare_str(labels, "Categorical labels")
             return CategoricalSpec(
                 tuple(spec["probs"]),
                 labels=() if labels is None else tuple(str(label) for label in labels),
@@ -427,13 +430,23 @@ def _canonical_correlation(
         ValueError: If ``correlation`` couples a categorical parameter, or if
             it fails the copula validation.
     """
+    if correlation_type not in ("latent", "spearman"):
+        raise ValueError(
+            f"correlation_type must be 'latent' or 'spearman', got {correlation_type!r}"
+        )
     if correlation is None:
         return None
     # Imported lazily: jaxgsa._core.copula imports this module at load time.
     from jaxgsa._core.copula import _force_categorical_identity, canonicalize_correlation
 
     n_params = len(names)
-    R_declared = np.asarray(correlation, dtype=np.float64)
+    R_raw = np.asarray(correlation)
+    if np.iscomplexobj(R_raw):
+        raise TypeError(
+            "correlation must be real, got a complex matrix. Remove the imaginary "
+            "part before declaring it."
+        )
+    R_declared = np.asarray(R_raw, dtype=np.float64)
     if R_declared.shape == (n_params, n_params):
         # Check the declared matrix; a wrong shape falls through to the
         # shape error inside canonicalize_correlation. The sign-preserving
@@ -550,14 +563,17 @@ def _output_names_tuple(output_names: Sequence[str] | None) -> tuple[str, ...] |
 
     Raises:
         TypeError: If ``output_names`` is a ``str``.
+        ValueError: If any label is not a string, or two labels are equal.
     """
     if output_names is None:
         return None
     _reject_bare_str(output_names, "output_names")
-    return tuple(output_names)
+    labels = tuple(output_names)
+    _validate_names(labels, label="output names")
+    return labels
 
 
-def _validate_names(names: tuple[str, ...]) -> None:
+def _validate_names(names: tuple[str, ...], label: str = "parameter names") -> None:
     """Reject parameter names that are not strings or not unique.
 
     A non-string name breaks every keyed surface downstream — ``Theta``
@@ -566,24 +582,25 @@ def _validate_names(names: tuple[str, ...]) -> None:
     construction, where the fix is one line away.
 
     Args:
-        names: Parameter names in model-input order.
+        names: Parameter names in model-input order, or output labels.
+        label: What the names are, for the error messages.
 
     Raises:
         ValueError: If any name is not a ``str`` (convert it with ``str(...)``
-            when declaring the problem), or if two parameters share a name
+            when declaring the problem), or if two entries share a name
             (rename one of them).
     """
     non_str = [name for name in names if not isinstance(name, str)]
     if non_str:
         raise ValueError(
-            f"parameter names must be strings, got {non_str!r}. Convert each "
-            "name with str(...) when declaring the problem."
+            f"{label} must be strings, got {non_str!r}. Convert each "
+            "entry with str(...) when declaring the problem."
         )
     if len(set(names)) != len(names):
         duplicates = sorted({name for name in names if names.count(name) > 1})
         raise ValueError(
-            f"parameter names must be unique, but {duplicates!r} appear more "
-            "than once. Rename the duplicated parameters so every name is "
+            f"{label} must be unique, but {duplicates!r} appear more "
+            "than once. Rename the duplicated entries so every name is "
             "distinct."
         )
 
@@ -984,6 +1001,8 @@ class Problem:
         sampler_dimension: int | None = None,
     ) -> None:
         """Assign validated frozen dataclass fields in one place."""
+        if not names:
+            raise ValueError("a Problem needs at least one parameter, got none")
         _validate_names(names)
         _check_correlation_touches_categorical(names, input_specs, correlation)
         sampler, sampler_dimension = _validated_sampler(

@@ -54,11 +54,8 @@ def poincare_constant(spec: InputSpec) -> float:
         if spec.low is None and spec.high is None:
             return spec.variance
         std = math.sqrt(spec.variance)
-        # An open side gets a far-tail stand-in bound; the spectral solve needs
-        # a finite interval, and 8 sigma carries the whole mass to float precision.
-        fallback_lo = spec.mean - 8 * std if spec.low is None else spec.low
-        fallback_hi = spec.mean + 8 * std if spec.high is None else spec.high
-        return _truncnorm_poincare(spec.mean, std, fallback_lo, fallback_hi, 512)
+        lo, hi = _effective_support(spec.mean, std, spec.low, spec.high)
+        return _truncnorm_poincare(spec.mean, std, lo, hi, 512)
     if isinstance(spec, CategoricalSpec):
         raise ValueError(
             "A categorical marginal has no Poincare constant (the inequality "
@@ -66,6 +63,47 @@ def poincare_constant(spec: InputSpec) -> float:
             "categorical parameters"
         )
     raise ValueError(f"Unknown input spec {spec!r}")
+
+
+# Tail mass cut off each end of the effective support. The weight there is far
+# below float64 resolution of the spectral solve, so the constant is unchanged.
+_TAIL_MASS = 1e-15
+
+
+def _effective_support(
+    mean: float, std: float, low: float | None, high: float | None
+) -> tuple[float, float]:
+    """Return the interval the spectral solve runs on.
+
+    The declared bounds can sit hundreds of standard deviations from the
+    mass, where the Gaussian weight underflows. Or one side can be open, and
+    a fixed stand-in such as ``mean +/- 8 std`` can lie on the wrong side of
+    the declared bound on the other side. So the declared bounds are cut to
+    the quantiles of the truncated distribution itself that leave
+    ``1e-15`` of the mass in each tail. Those come from
+    :class:`scipy.stats.truncnorm`, which works in log space and stays
+    accurate in the far tail.
+
+    Args:
+        mean: Mean of the underlying Gaussian.
+        std: Standard deviation of the underlying Gaussian.
+        low: Declared lower bound, or ``None`` if open.
+        high: Declared upper bound, or ``None`` if open.
+
+    Returns:
+        ``(lo, hi)``, inside the declared bounds, with ``lo < hi``.
+    """
+    a_std = -np.inf if low is None else (low - mean) / std
+    b_std = np.inf if high is None else (high - mean) / std
+    lo_std = float(truncnorm.ppf(_TAIL_MASS, a_std, b_std))
+    hi_std = float(truncnorm.isf(_TAIL_MASS, a_std, b_std))
+    lo = mean + std * lo_std
+    hi = mean + std * hi_std
+    if low is not None:
+        lo = max(lo, low)
+    if high is not None:
+        hi = min(hi, high)
+    return lo, hi
 
 
 @lru_cache(maxsize=None)
@@ -115,6 +153,39 @@ def _truncnorm_poincare(mu: float, sigma: float, a: float, b: float, grid: int) 
     return float(1.0 / vals[1])
 
 
+# Gauss-Legendre nodes for the truncated-Gaussian variance. The weight is a
+# smooth Gaussian on an interval at most about 16 standard deviations wide,
+# so this many nodes reach float64 resolution.
+_GL_NODES = 256
+
+
+def _std_truncnorm_variance(a: float, b: float) -> float:
+    """Return the variance of a standard normal truncated to ``[a, b]``.
+
+    The closed form ``1 + (a phi(a) - b phi(b)) / Z - (...)^2`` subtracts
+    nearly equal numbers on a narrow interval or far in a tail, and it can
+    return a negative variance. This quadrature never subtracts like that. It
+    cuts the interval to its effective support, weights Gauss-Legendre nodes
+    by the density (shifted so the heaviest weight is 1), and takes the
+    second moment about the weighted mean.
+
+    Args:
+        a: Lower bound in standard units, possibly ``-inf``.
+        b: Upper bound in standard units, possibly ``inf``.
+
+    Returns:
+        The variance, which is positive.
+    """
+    lo, hi = _effective_support(0.0, 1.0, None if np.isinf(a) else a, None if np.isinf(b) else b)
+    nodes, weights = np.polynomial.legendre.leggauss(_GL_NODES)
+    x = 0.5 * (hi - lo) * nodes + 0.5 * (hi + lo)
+    z2 = x**2
+    w = weights * np.exp(-0.5 * (z2 - z2.min()))
+    w /= w.sum()
+    mean = float(np.sum(w * x))
+    return float(np.sum(w * (x - mean) ** 2))
+
+
 def marginal_variance(spec: InputSpec) -> float:
     """Return the marginal variance of a single input distribution.
 
@@ -147,7 +218,7 @@ def marginal_variance(spec: InputSpec) -> float:
         sd = math.sqrt(spec.variance)
         a_std = -np.inf if spec.low is None else (spec.low - spec.mean) / sd
         b_std = np.inf if spec.high is None else (spec.high - spec.mean) / sd
-        return float(truncnorm.var(a_std, b_std, loc=spec.mean, scale=sd))
+        return sd**2 * _std_truncnorm_variance(a_std, b_std)
     if isinstance(spec, CategoricalSpec):
         raise ValueError(
             "A categorical marginal's level codes have no variance meaningful "

@@ -828,7 +828,7 @@
       "ci_n_bootstrap",
       "jaxgsa_version",
       "method",
-      "mode"
+      "ot_mode"
     ],
     "coords": [
       "output",
@@ -879,7 +879,7 @@
       "ci_n_bootstrap",
       "jaxgsa_version",
       "method",
-      "mode"
+      "ot_mode"
     ],
     "coords": [
       "param"
@@ -928,7 +928,7 @@
       "ci_n_bootstrap",
       "jaxgsa_version",
       "method",
-      "mode"
+      "ot_mode"
     ],
     "coords": [
       "output",
@@ -981,7 +981,7 @@
       "ci_n_bootstrap",
       "jaxgsa_version",
       "method",
-      "mode"
+      "ot_mode"
     ],
     "coords": [
       "param"
@@ -1026,7 +1026,7 @@
       "ci_n_bootstrap",
       "jaxgsa_version",
       "method",
-      "mode"
+      "ot_mode"
     ],
     "coords": [
       "output",

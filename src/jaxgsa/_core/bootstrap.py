@@ -5,12 +5,14 @@ helpers, so one convention holds across the package: two-tailed, ``alpha/2``
 per tail, a choice between the empirical-quantile and normal-approximation
 endpoint rules, and tolerance of NaN draws.
 
-There are two entry points, and a bootstrapping ``analyze()`` normally uses
-both:
+There are two entry points. pce and hdmr use both. The other bootstrapping
+``analyze()`` functions draw their own resamples and use :func:`interval` or
+the lower-level ``_bootstrap_ci_endpoints``:
 
-* :func:`bootstrap_draws` runs the row-resample loop — split the key, draw
-  row indices, call the caller's fit, collect the result — once, so the four
-  copies of that loop (pawn, pce, hdmr, shapley) become one.
+* :func:`bootstrap_draws` runs the row-resample loop: split the key, draw
+  row indices, call the caller's fit, collect the result. pce and hdmr call
+  it. pawn and shapley keep their own loops, which draw the same rows from
+  the same key. The other methods use their own resamplers.
 * :func:`interval` turns the point estimate(s) and the draws
   :func:`bootstrap_draws` produced into ``*_conf`` endpoint arrays and the
   one :class:`~jaxgsa._core.result.CIInfo` record a result carries, so the
@@ -44,8 +46,7 @@ def bootstrap_draws(
 ) -> _T:
     """Run ``replicate_fn`` on ``n_bootstrap`` row-resamples and stack the results.
 
-    The loop this replaces is written out identically in four modules (pawn,
-    pce, hdmr, shapley): split the key, draw ``N`` row indices with
+    pce and hdmr use this loop: split the key, draw ``N`` row indices with
     replacement, call the per-replicate fit, append the result, and
     ``jnp.stack`` every collected list at the end. ``replicate_fn`` returns
     whatever pytree the per-replicate fit already returns — a single array, a

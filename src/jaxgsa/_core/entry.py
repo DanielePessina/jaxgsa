@@ -54,8 +54,13 @@ them rather than bending them:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+import contextlib
+import contextvars
+import os
+import sys
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -95,11 +100,61 @@ __all__ = [
     "check_scalars",
     "gates",
     "in_open_interval",
+    "method_alias",
     "one_of",
+    "positive_int",
     "prepare",
     "require",
     "validate_inputs",
 ]
+
+
+# Every jaxgsa source file starts with this prefix; see jaxgsa._core.invalid.
+_PACKAGE_DIR = str(Path(__file__).resolve().parent.parent) + os.sep
+
+_METHOD_ALIAS: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "jaxgsa_method_alias", default=None
+)
+
+
+@contextlib.contextmanager
+def method_alias(name: str) -> Generator[None]:
+    """Make :func:`prepare` report ``name`` instead of the calling method.
+
+    A method that runs another analyzer as its backend (``shapley`` runs
+    ``pce`` or ``hdmr``) uses this so that every message from the shared
+    preamble names the function the user called.
+
+    Args:
+        name: Fully qualified analyzer name, such as ``"jaxgsa.shapley.analyze"``.
+
+    Yields:
+        Nothing. The alias holds until the block ends.
+    """
+    token = _METHOD_ALIAS.set(name)
+    try:
+        yield
+    finally:
+        _METHOD_ALIAS.reset(token)
+
+
+def _user_stacklevel() -> int:
+    """Count the frames from a helper to the first frame outside jaxgsa.
+
+    Call this from a function that then calls a warning helper. The result is
+    the ``stacklevel`` that points the helper's warning at the first frame
+    outside the jaxgsa package. Unlike a fixed number, it stays right when a
+    backend calls ``prepare`` on the user's behalf.
+
+    Returns:
+        A ``stacklevel`` for ``warnings.warn`` inside the helper.
+    """
+    frame = sys._getframe(1)
+    level = 2  # the helper's own frame is 1, the frame that calls it is 2
+    while frame is not None and frame.f_code.co_filename.startswith(_PACKAGE_DIR):
+        frame = frame.f_back
+        level += 1
+    return level
 
 
 @dataclass(frozen=True)
@@ -132,6 +187,20 @@ def at_least(name: str, value: float | None, minimum: float) -> ScalarCheck:
         value is None or value >= minimum,
         f"{name} must be >= {minimum}, got {value}",
     )
+
+
+def positive_int(name: str, value: object) -> ScalarCheck:
+    """Check that ``value`` is ``None`` or an integer ``>= 1``.
+
+    A float such as ``2.0`` and a bool are refused: both pass a bare
+    ``>= 1`` test and then fail later, deep inside a chunked loop.
+    """
+    ok = value is None or (
+        isinstance(value, (int, np.integer))
+        and not isinstance(value, (bool, np.bool_))
+        and value >= 1
+    )
+    return ScalarCheck(ok, f"{name} must be an integer >= 1, got {value!r}")
 
 
 def in_open_interval(name: str, value: float | None, low: float, high: float) -> ScalarCheck:
@@ -408,7 +477,7 @@ def prepare(
         ValueError: From any of the six steps. The first one to fail wins.
         TypeError: If the spec declares no ``invalid_unit``.
     """
-    method = method or f"jaxgsa.{spec.name}.analyze"
+    method = _METHOD_ALIAS.get() or method or f"jaxgsa.{spec.name}.analyze"
     unit = spec.invalid_unit
     # Defensive: no registered method reaches this. Every spec that calls
     # prepare declares an invalid_unit, and shapley, the one spec that does
@@ -510,18 +579,16 @@ def prepare(
         # Warned on the caller's own rank, not on Y3: a (N, K) output then
         # gets "k=2" rather than the fabricated "(t=0, k=2)" that the
         # inserted singleton time axis would produce.
-        # Four frames reach the user: the helper, this function, the
-        # ``analyze()`` that called it, and the user's own call. Every
-        # ``prepare`` call site sits directly in a public ``analyze()``, so
-        # the count is the same for all of them. The non-finite warnings next
-        # door skip by file prefix instead, which needs no count at all;
-        # _warn_zero_variance_slices takes a stacklevel and lives in
-        # validation.py, so it cannot do the same until that helper changes.
+        # The stacklevel is counted from the first frame outside the package,
+        # because a backend (shapley -> pce) can call prepare for the user.
+        # The non-finite warnings next door skip by file prefix instead;
+        # _warn_zero_variance_slices lives in validation.py and takes a
+        # stacklevel, so the count is made here.
         _warn_zero_variance_slices(
             Y_kept,
             output_names=problem.output_names,
             outcome=zero_variance_outcome,
-            stacklevel=4,
+            stacklevel=_user_stacklevel(),
             method=method,
             zero_stats=zero_stats,
         )

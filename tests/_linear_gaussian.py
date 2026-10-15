@@ -31,14 +31,16 @@ expression as ``S_TU_i`` — the two are equal, not merely ordered. That
 identity is asserted below for both fixtures, and is what "the model is
 additive, so ``S_U = S_TU`` and ``S_IU = 0``" (still true) actually rests on.
 
-**Unit-variance assumption.** ``R`` must be a *correlation* matrix — every
-diagonal entry equal to 1 — not a general covariance matrix. Both formulas
-above use ``V(X_i) = R_ii = 1`` implicitly (``S_TC``'s numerator would
-otherwise need `V(X_i)` in it, and ``S_TU``'s ``a_i**2`` term is really
-``a_i**2 * V(X_i)``). Passing a covariance matrix with a non-unit diagonal
-silently produces an index outside ``[0, 1]``: for
-``Sigma = [[4, 1.2], [1.2, 1]]`` and ``a = [1, 1]``, ``S_TC`` comes back as
-``[3.654, 0.654]``.
+**Covariance inputs.** The formulas above assume a *correlation* matrix
+``R`` (unit diagonal). :func:`analytic_indices` also accepts a general
+positive-definite covariance matrix ``Sigma``. It then uses the general
+forms:
+
+    V(Y)   = a' Sigma a
+    S_TC_i = (Sigma a)_i^2 / (Sigma_ii V(Y))
+    S_TU_i = a_i^2 (Sigma_ii - Sigma_i,rest Sigma_rest^-1 Sigma_rest,i) / V(Y)
+
+With a unit diagonal these reduce to the correlation forms.
 """
 
 from __future__ import annotations
@@ -132,19 +134,30 @@ def gaussian_sampler(R: np.ndarray):
 def analytic_indices(a: np.ndarray, R: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
     """Closed-form ``(S_TC, S_TU, V(Y))`` for a linear model on ``N(0, R)`` inputs.
 
-    ``R`` must be a correlation matrix (unit diagonal); see the module
-    docstring. ``S_TC`` and ``S_TU`` are not the ``S1``/``ST`` pair a Sobol'
-    reader expects to be ordered — see :func:`analytic_independent_first_order`
-    for the pair that is.
+    ``S_TC`` and ``S_TU`` are not the ``S1``/``ST`` pair a Sobol' reader
+    expects to be ordered. See :func:`analytic_independent_first_order` for
+    the pair that is.
+
+    Args:
+        a: Model coefficients, shape ``(D,)``.
+        R: Input correlation matrix, or any positive-definite covariance
+            matrix, shape ``(D, D)``. A unit diagonal gives the correlation
+            forms of the module docstring.
+
+    Returns:
+        A tuple ``(S_TC, S_TU, var_y)``. ``S_TC`` and ``S_TU`` have shape
+        ``(D,)``. ``var_y`` is ``V(Y) = a' R a``.
     """
     var_y = float(a @ R @ a)
-    S_TC = (R @ a) ** 2 / var_y
+    var_x = np.diag(R)
+    S_TC = (R @ a) ** 2 / (var_x * var_y)
     D = a.shape[0]
     S_TU = np.empty(D)
     for i in range(D):
         rest = [j for j in range(D) if j != i]
         r = R[rest, i]
-        S_TU[i] = a[i] ** 2 * (1.0 - r @ np.linalg.solve(R[np.ix_(rest, rest)], r)) / var_y
+        cond_var = var_x[i] - r @ np.linalg.solve(R[np.ix_(rest, rest)], r)
+        S_TU[i] = a[i] ** 2 * cond_var / var_y
     return S_TC, S_TU, var_y
 
 

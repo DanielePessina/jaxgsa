@@ -58,7 +58,7 @@ from jax import Array
 from jax.typing import DTypeLike
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.entry import at_least, prepare, require
+from jaxgsa._core.entry import _user_stacklevel, at_least, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -123,17 +123,47 @@ def _linear_quantile_plan(q: float, n_elements: int) -> tuple[int, int, Array]:
     return int(low), int(high), jnp.asarray(high_weight)
 
 
+_MAX_N_32BIT = 65_535
+"""Largest N whose ``N^2`` pair count fits a ``uint32``, the x64-off counter."""
+
+
 def _count_dtype() -> DTypeLike:
-    """Return the widest integer dtype the current JAX mode really supports.
+    """Return the integer dtype that counts the ``N^2`` pairs of the median heuristic.
 
     Asking for ``int64`` while ``jax_enable_x64`` is off makes JAX truncate to
-    ``int32`` and emit a ``UserWarning`` on every call. Choosing the dtype from
-    the mode gives the same arithmetic with no warning in either mode.
+    ``int32`` and emit a ``UserWarning`` on every call, so the dtype follows
+    the mode. Without x64 the count is unsigned: ``int32`` overflows once
+    ``N^2`` passes ``2^31 - 1`` (``N > 46,340``), but ``uint32`` holds every
+    count up to ``N = 65,535``. :func:`_check_sample_size` refuses larger N.
+    All counts and ranks are non-negative and nothing subtracts them, so the
+    unsigned type changes no result.
 
     Returns:
-        ``jnp.int64`` in x64 mode, otherwise ``jnp.int32``.
+        ``jnp.int64`` in x64 mode, otherwise ``jnp.uint32``.
     """
-    return jnp.int64 if x64_enabled() else jnp.int32
+    return jnp.int64 if x64_enabled() else jnp.uint32
+
+
+def _check_sample_size(n: int) -> None:
+    """Refuse a sample too large for the 32-bit pair count of the median heuristic.
+
+    N is a static shape, so the check also works under ``jit``. It runs
+    before any kernel is built.
+
+    Args:
+        n: Number of samples.
+
+    Raises:
+        ValueError: If x64 is off and ``n`` exceeds 65,535.
+    """
+    if n > _MAX_N_32BIT and not x64_enabled():
+        raise ValueError(
+            f"jaxgsa.hsic: N = {n} is too large without x64; the median-heuristic "
+            f"bandwidth counts all N^2 sample pairs, and that count only fits 32 bits "
+            f"for N <= {_MAX_N_32BIT}. Enable x64 (64-bit integers and floats) with "
+            'jax.config.update("jax_enable_x64", True), or thin the sample. At this N '
+            "the dense (N, N) kernels need many GB of memory anyway."
+        )
 
 
 def _pair_boundaries(y: Array, t: Array) -> tuple[Array, Array]:
@@ -162,9 +192,11 @@ def _pair_boundaries(y: Array, t: Array) -> tuple[Array, Array]:
     def d2(j: Array) -> Array:
         return (y[j] - y) ** 2
 
-    right_lo, right_hi = i, jnp.full((n,), n, dtype=jnp.int32)
-    left_lo, left_hi = jnp.zeros((n,), dtype=jnp.int32), i
-    for _ in range(n.bit_length()):
+    # A rolled loop, not a Python unroll: this runs inside a bisection that is
+    # itself inlined once per input, and unrolling made the first call
+    # compile for tens of seconds at N = 1024.
+    def body(_: Array, carry: tuple[Array, Array, Array, Array]) -> tuple[Array, ...]:
+        right_lo, right_hi, left_lo, left_hi = carry
         active = right_lo < right_hi
         mid = (right_lo + right_hi) // 2
         ok = d2(jnp.minimum(mid, n - 1)) <= t
@@ -176,6 +208,10 @@ def _pair_boundaries(y: Array, t: Array) -> tuple[Array, Array]:
         ok = d2(mid) <= t
         left_hi = jnp.where(active & ok, mid, left_hi)
         left_lo = jnp.where(active & ~ok, mid + 1, left_lo)
+        return right_lo, right_hi, left_lo, left_hi
+
+    init = (i, jnp.full((n,), n, dtype=jnp.int32), jnp.zeros((n,), dtype=jnp.int32), i)
+    right_lo, _, left_lo, _ = jax.lax.fori_loop(0, n.bit_length(), body, init)
     return right_lo, left_lo
 
 
@@ -250,7 +286,9 @@ def _pairwise_quantile_by_selection(x: Array, q: float) -> Array:
     right_next = jnp.where(right < n, (y[jnp.minimum(right, n - 1)] - y) ** 2, top)
     left_next = jnp.where(left > 0, (y[jnp.maximum(left - 1, 0)] - y) ** 2, top)
     next_value = jnp.minimum(jnp.min(right_next), jnp.min(left_next))
-    high_value = jnp.where(n_at_or_below >= high_rank + 1, low_value, next_value)
+    high_value = jnp.where(
+        n_at_or_below >= jnp.asarray(high_rank + 1, dtype=count_dtype), low_value, next_value
+    )
 
     blended = jnp.quantile(jnp.stack([low_value, high_value]), high_weight)
     return jnp.where(finite, blended, jnp.nan)
@@ -364,7 +402,21 @@ def _build_one_kernel(x: Array, bandwidth: float) -> Array:
     Returns:
         Kernel matrix, shape ``(N, N)``.
     """
-    sigma_sq = jnp.asarray(bandwidth, dtype=x.dtype) ** 2 * _median_bandwidth_sq(x)
+    return _kernel_from_median(x, _median_bandwidth_sq(x), bandwidth)
+
+
+def _kernel_from_median(x: Array, median_sq: Array, bandwidth: float) -> Array:
+    """Build a Gaussian RBF kernel matrix from a known median squared distance.
+
+    Args:
+        x: Values for one variable, shape ``(N,)``.
+        median_sq: Median-heuristic squared bandwidth of ``x``, a scalar.
+        bandwidth: Positive multiplier on the median-heuristic bandwidth.
+
+    Returns:
+        Kernel matrix, shape ``(N, N)``.
+    """
+    sigma_sq = jnp.asarray(bandwidth, dtype=x.dtype) ** 2 * median_sq
     return jnp.exp(-((x[:, None] - x[None, :]) ** 2) / (2.0 * sigma_sq))
 
 
@@ -451,7 +503,13 @@ def _input_setup(
         ``(total,)`` holding ``fold_in(key, i)`` for each slice.
     """
     D = X_unit.shape[1]
-    Ks_stack = jnp.stack([_build_one_kernel(X_unit[:, d], bandwidth) for d in range(D)])
+    # One vmapped bandwidth selection instead of D inlined copies halves the
+    # compile time. The kernels stay in a Python loop: vmapping the
+    # exponential too moves the last bit of the indices.
+    medians = jax.vmap(_median_bandwidth_sq, in_axes=1)(X_unit)
+    Ks_stack = jnp.stack(
+        [_kernel_from_median(X_unit[:, d], medians[d], bandwidth) for d in range(D)]
+    )
     K_aug_full, K_aug_compls_stack = _complement_kernels(_augmented_kernels(Ks_stack))
     # Self-HSIC HSIC(K_d, K_d) is output-independent, so compute it once
     # here and share it across every output slice.
@@ -572,6 +630,9 @@ def _get_hsic_kernel(n_perms: int, bandwidth: float):
 
         null_counts, _ = jax.lax.scan(_scan_body, jnp.zeros_like(hsic_xys), perm_keys)
         p_vals = (null_counts + 1.0) / (n_perms + 1.0)
+        # A degenerate output has no dependence to test: R2 and T are NaN, so
+        # the p-value is NaN too, not a confident 1.0.
+        p_vals = jnp.where(zero_var, jnp.nan, p_vals)
 
         return r2, t_hsic, p_vals, hsic_xys
 
@@ -637,6 +698,79 @@ def _warn_constant_inputs(problem: Problem, X: Array) -> None:
         "and R2 is exactly 0 — a constant input has provably zero "
         "dependence on any output",
         stacklevel=2,
+        category=JaxgsaWarning,
+    )
+
+
+def _collapsed_median_labels(values: np.ndarray) -> list[int]:
+    """Return the columns whose median heuristic collapses to the floor.
+
+    The median of the off-diagonal pairwise squared distances is exactly 0
+    when more than half of the ``N (N - 1) / 2`` pairs are equal, which
+    happens when one value holds a large share of the sample. A column with
+    exactly two distinct values is left alone: the equality-indicator kernel
+    the floor produces is the right kernel for it. A constant column is left
+    alone too, since it has its own warning.
+
+    Args:
+        values: Samples, shape ``(N, C)``.
+
+    Returns:
+        Indices of the affected columns.
+    """
+    n = values.shape[0]
+    n_pairs = n * (n - 1) // 2
+    bad = []
+    for c in range(values.shape[1]):
+        col = values[:, c]
+        col = col[np.isfinite(col)]
+        uniq, counts = np.unique(col, return_counts=True)
+        if uniq.size <= 2:
+            continue
+        equal_pairs = int(np.sum(counts.astype(np.int64) * (counts.astype(np.int64) - 1) // 2))
+        if 2 * equal_pairs > n_pairs:
+            bad.append(c)
+    return bad
+
+
+def _warn_collapsed_median(problem: Problem, X: Array, Y3: Array, stacklevel: int) -> None:
+    """Warn when the median heuristic collapses for an input or an output slice.
+
+    When more than half of the sample pairs share one value, the median
+    squared distance is 0 and the heuristic falls to its 1e-20 floor. The
+    Gaussian kernel then reads 1 for equal values and 0 for any other pair,
+    and the indices react strongly to tiny perturbations of the rest of the
+    sample. The check reads concrete values, so it lives here and not in
+    :func:`indices`. ``bandwidth`` multiplies the heuristic, so it cannot
+    rescue a collapsed one.
+
+    Args:
+        problem: Problem definition, used to name the parameters.
+        X: Input samples, shape ``(N, D)``.
+        Y3: Output samples, shape ``(N, T, K)``.
+        stacklevel: Stack level that points the warning at the caller's line.
+
+    Warns:
+        JaxgsaWarning: If an input or an output slice has more than half of
+            its sample pairs equal and more than two distinct values.
+    """
+    x_host = np.asarray(X)
+    y_host = np.asarray(Y3)
+    n, n_t, n_k = y_host.shape
+    parts = [f"parameter {problem.names[d]!r}" for d in _collapsed_median_labels(x_host)]
+    for c in _collapsed_median_labels(y_host.reshape(n, n_t * n_k)):
+        t, k = divmod(c, n_k)
+        parts.append(f"output slice (t={t}, k={k})")
+    if not parts:
+        return
+    warnings.warn(
+        f"jaxgsa.hsic: the median heuristic failed for {', '.join(parts)}: more than half "
+        "of the samples share one value, so the median squared distance is 0 and the "
+        "kernel only tests whether two values are equal. The indices then react strongly "
+        "to tiny changes in the other samples. The bandwidth multiplier cannot fix this. "
+        "Analyse the non-zero part of the variable separately, or use a method that does "
+        "not rely on a bandwidth.",
+        stacklevel=stacklevel,
         category=JaxgsaWarning,
     )
 
@@ -781,10 +915,14 @@ def indices(
     Raises:
         ValueError: If any parameter is categorical. The Gaussian input
             kernel would read a level code as a distance.
+        ValueError: If x64 is off and ``N > 65,535``. The median heuristic
+            counts all ``N^2`` sample pairs, and without x64 that count has
+            only 32 bits. Enable x64 or thin the sample.
         TypeError: If the float width of ``X`` or ``Y`` has no unsigned
             integer counterpart for the median-heuristic selection.
     """
     key = as_key(key, "hsic")
+    _check_sample_size(X.shape[0])
     D = problem.n_params
     X_unit = cdf_to_unit_interval(X, problem)
 
@@ -950,6 +1088,10 @@ def analyze(
             are rejected because the Gaussian input kernel reads a level code
             as a distance, and the arbitrary code order makes that
             meaningless.
+            Also raised if x64 is off and ``N > 65,535``: the median
+            heuristic counts all ``N^2`` sample pairs, and without x64 that
+            count has only 32 bits. Enable x64 with
+            ``jax.config.update("jax_enable_x64", True)`` or thin the sample.
 
     Warns:
         JaxgsaWarning: If an output slice has zero variance (all indices NaN),
@@ -996,6 +1138,7 @@ def analyze(
     # contract has held, and a sample this small costs nothing to have read.
     if X.shape[0] < _MIN_SAMPLES:
         raise ValueError(f"N must be >= {_MIN_SAMPLES} for HSIC, got {X.shape[0]}")
+    _check_sample_size(X.shape[0])
     # Checked after the preamble and the shape contract, so a problem this
     # method refuses outright (categorical parameters, a sample too small)
     # still reports that, and not a missing key.
@@ -1003,6 +1146,7 @@ def analyze(
         raise ValueError("key is required for the permutation test")
     _warn_constant_inputs(problem, X)
     _warn_single_precision()
+    _warn_collapsed_median(problem, X, ctx.Y3, _user_stacklevel())
 
     t0 = _verbose.tic()
     r2_all, t_all, p_all, raw_all = indices(

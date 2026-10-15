@@ -223,6 +223,7 @@ Rescale a published covariance matrix before you pass it. The variances on
 its diagonal are discarded in favor of the declared marginals:
 
 ```python
+cov = np.array([[4.0, 1.2], [1.2, 1.0]])  # a published covariance matrix
 R = jaxgsa.sampling.correlation_from_covariance(cov)
 ```
 
@@ -261,6 +262,8 @@ When the dependence structure lives in a historical data set rather than a
 paper, estimate it from the data and attach it to the (frozen) problem:
 
 ```python
+# Stand-in for your historical data: any (n_rows, n_params) array.
+X_observed = np.asarray(X)
 R_fit = jaxgsa.sampling.fit_correlation(problem, X_observed)
 problem = problem.with_correlation(R_fit)
 ```
