@@ -216,7 +216,8 @@ def _std_truncnorm_variance(a: float, b: float) -> float:
     The closed form ``1 + (a phi(a) - b phi(b)) / Z - (...)^2`` subtracts
     nearly equal numbers on a narrow interval or far in a tail, and it can
     return a negative variance. This quadrature never subtracts like that. It is
-    used only when a bound is far from the mass (see ``_is_far``). It
+    used only when a bound is far from the mass (see ``_is_far``), or when
+    the interval is narrower than ``_NARROW_SD`` standard deviations. It
     cuts the interval to its effective support, weights Gauss-Legendre nodes
     by the density (shifted so the heaviest weight is 1), and takes the
     second moment about the weighted mean.

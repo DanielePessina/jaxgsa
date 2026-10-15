@@ -8,10 +8,14 @@ values do not change, with these exceptions:
 - DGSM values for a truncated Gaussian input change where they were wrong,
   that is where a declared bound lies far outside the mass, or where the
   interval is narrower than 0.1 standard deviations (1.1.1 could return a
-  negative variance there). Other truncated Gaussian inputs do not change. DGSM bootstrap intervals (`*_conf`) can
-  differ in the last bits for every input, because the resampled variance is
-  now computed on shifted outputs. In float32 with a large output offset
-  they move more, about 3e-5 relative at an offset of 50.
+  negative variance there). Intervals from 0.05 to 0.1 standard deviations
+  wide were right in 1.1.1, and their values move in the last digits (1e-12
+  to 2e-9 relative). Other truncated Gaussian inputs do not change.
+- DGSM bootstrap intervals (`*_conf`) can differ in the last bits for every
+  input, because the resampled variance is now computed on shifted outputs.
+  In float32 with a large output offset they move more, by a size that grows
+  with `offset**2 / Var(Y)`: about 2e-4 relative at an offset of 50 when the
+  output standard deviation is 3.3.
 - When the problem has 17 or more inputs, PCE values change slightly, and so
   do Shapley values from the PCE backend: by up to about 1e-5 relative in
   float32, and about 4e-14 relative in float64. In float32, HDMR, PAWN, HSIC
@@ -89,9 +93,10 @@ bitwise the same values as 1.1.1, in float32 and float64.
   inputs are equal in every row. The PCE cannot estimate the indices of such
   inputs from the sample. The message names the inputs. Only inputs that are
   equal value for value count as duplicates: an affine copy, such as
-  `c = 1 - a`, gets the warning described below in float64. Before, float64 fits gave finite but wrong indices with no
-  message: a duplicated input shared the index of the true input, and a
-  constant input got a large total index.
+  `c = 1 - a`, gets the warning described below in float64. Before, float64
+  fits gave finite but wrong indices with no message: a duplicated input
+  shared the index of the true input, and a constant input got a large total
+  index.
 - `pce` now checks the Gram matrix of the design. For each basis column, it
   finds the fraction of the column's variance that is left after the earlier
   columns explain it. In float64 the fit warns when this fraction is below
