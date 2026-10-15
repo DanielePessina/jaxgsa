@@ -57,6 +57,7 @@ from collections.abc import Callable
 from typing import Any, NamedTuple
 
 import jax
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
@@ -77,6 +78,10 @@ _DEFAULT_TOL_RESIDUAL = 1e-4
 # lambda = 1e-10 the RKHS term does almost nothing, so the kernel Gram can
 # still be numerically singular in float32 once many centres are selected.
 _JITTER = 1e-8
+
+# Relative jitter, in machine epsilons of the working dtype, for the retry
+# solve after a non-finite first solve.
+_JITTER_EPS = 10.0
 
 
 class _VKOGAState(NamedTuple):
@@ -250,6 +255,13 @@ def _select_centers(
         residual = jnp.where(mask[:, None], residual - jnp.outer(v, c), 0.0)
 
         V = V.at[:, m].set(v)
+        # Also block every exact copy of the new centre. At a copy the true
+        # squared power is 0, but the computed 1 - sum(V^2) is rounding noise.
+        # In float32 that noise (~1e-7) is above tol_power**2, so the greedy
+        # would pick the copy too and make the Gram singular. The test compares
+        # coordinates, because the kernel value of a copy is only 1 up to
+        # rounding. On data without duplicate rows it blocks only row i.
+        blocked = blocked | jnp.all(X == X[i][None, :], axis=1)
         blocked = blocked.at[i].set(True)
         # argmax returns int64 when x64 is enabled; keep the index buffer int32
         # so the scatter never hits a narrowing-cast promotion error.
@@ -365,8 +377,35 @@ def _solve_ridge(eq: _NormalEquations, ridge: Array | float) -> Array:
     # Relative jitter: scale-free against gamma and the number of rows, which
     # both move the magnitude of A_nm^T A_nm by orders of magnitude.
     diag_mean = jnp.sum(jnp.where(eq.active, jnp.diagonal(G), 0.0)) / jnp.maximum(eq.m, 1)
-    G = G + jnp.diag(jnp.where(eq.active, _JITTER * diag_mean, 1.0))
-    return jnp.linalg.solve(G, eq.AtY)
+    alpha = jnp.linalg.solve(G + jnp.diag(jnp.where(eq.active, _JITTER * diag_mean, 1.0)), eq.AtY)
+    # The default jitter is below float32 eps, so a singular Gram can still
+    # give NaN there. Only then, re-solve with a larger jitter. A finite first
+    # solve is returned unchanged, and the retry costs nothing unless it runs.
+    finite = jnp.all(jnp.isfinite(alpha))
+    if isinstance(finite, jax.core.Tracer):
+        # Traced (the cross-validation scorer): branch on the device.
+        return jax.lax.cond(
+            finite, lambda: alpha, lambda: _retry_solve(G, eq.AtY, eq.active, diag_mean)
+        )
+    # Eager (the final fit): branch on the host. An eager lax.cond would
+    # compile again on every call, because its branch closures are new.
+    return alpha if bool(finite) else _retry_solve(G, eq.AtY, eq.active, diag_mean)
+
+
+def _retry_solve(G: Array, AtY: Array, active: Array, diag_mean: Array) -> Array:
+    """Solve the ridge system again with a jitter of ``_JITTER_EPS`` epsilons.
+
+    Args:
+        G: Regularised normal matrix without jitter, ``(max_centers, max_centers)``.
+        AtY: Right-hand side, ``(max_centers, S)``.
+        active: Boolean mask of the filled centre slots, ``(max_centers,)``.
+        diag_mean: Mean of the active diagonal of ``G``.
+
+    Returns:
+        Expansion coefficients, shape ``(max_centers, S)``.
+    """
+    eps_jitter = jnp.maximum(_JITTER, _JITTER_EPS * jnp.finfo(G.dtype).eps)
+    return jnp.linalg.solve(G + jnp.diag(jnp.where(active, eps_jitter * diag_mean, 1.0)), AtY)
 
 
 def _solve_coefficients(
