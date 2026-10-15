@@ -58,7 +58,7 @@ import contextlib
 import contextvars
 import os
 import sys
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -118,7 +118,7 @@ _METHOD_ALIAS: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 
 
 @contextlib.contextmanager
-def method_alias(name: str) -> Iterator[None]:
+def method_alias(name: str) -> Generator[None]:
     """Make :func:`prepare` report ``name`` instead of the calling method.
 
     A method that runs another analyzer as its backend (``shapley`` runs
