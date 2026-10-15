@@ -371,7 +371,7 @@ def jacobian_sums(
     batch_size: int | None,
     *,
     n_outputs: int | None = None,
-    idx: Array | None = None,
+    counts: Array | None = None,
 ) -> _JacobianSums:
     """Sum the Jacobian and its square over every sample row, masked and not.
 
@@ -390,13 +390,14 @@ def jacobian_sums(
             active memory budget, as in :func:`jac_batches`.
         n_outputs: ``T*K``, passed straight to :func:`jac_batches` for a
             caller that already knows it.
-        idx: Resampled row indices, shape ``(n_bootstrap, N)``. When given,
-            the bootstrap sums of :func:`resample_moment_sums` over every row
-            are accumulated in the same sweep.
+        counts: Bootstrap draw counts from :func:`draw_counts`, shape
+            ``(n_bootstrap, N)``. When given, the bootstrap sums of
+            :func:`resample_moment_sums` over every row are accumulated in
+            the same sweep.
 
     Returns:
         A :class:`_JacobianSums` holding both pairs of sums, the stacked
-        outputs, the two per-row finite masks and, with ``idx``, the
+        outputs, the two per-row finite masks and, with ``counts``, the
         bootstrap sums.
 
     Raises:
@@ -411,7 +412,6 @@ def jacobian_sums(
     row_ok_parts: list[Array] = []
     resample: list[Array] | None = None
     offset = 0
-    counts = None if idx is None else _count_matrix(idx, int(idx.shape[1]))
     shift: Array | None = None
 
     for jac, Y_chunk, X_chunk in jac_batches(fn, X, batch_size, n_outputs=n_outputs):
@@ -492,7 +492,7 @@ def moment_sums(
 
 def resample_moment_sums(
     batches: Iterator[tuple[Array, Array]],
-    idx: Array,
+    counts: Array,
 ) -> tuple[Array, Array, Array, Array]:
     """Accumulate per-replicate sums of the Jacobian and the output.
 
@@ -503,16 +503,17 @@ def resample_moment_sums(
     sweep over the sample rather than one sweep per replicate, and the
     Jacobian still never exists whole.
 
-    The draw-count matrix is ``(n_bootstrap, N)`` int32, built once and sliced
-    per batch. A large ``n_bootstrap`` times a large ``N`` can run the device
+    The draw-count matrix is ``(n_bootstrap, N)`` int32, built once by
+    :func:`draw_counts` and sliced per batch. The index draws behind it are
+    freed as soon as it exists. A large ``n_bootstrap`` times a large ``N`` can run the device
     out of memory.
 
     Args:
         batches: Yields ``(jac, Y)`` per batch, in row order and with no gaps.
             The rows are numbered by the order they arrive in, so the caller
             must have compacted any dropped rows out already.
-        idx: Resampled row indices, shape ``(n_bootstrap, n)``, into that same
-            row numbering.
+        counts: Draw counts from :func:`draw_counts`, shape
+            ``(n_bootstrap, n)``, over that same row numbering.
 
     Returns:
         ``(sum_jac, sum_jac2, sum_y, sum_y2)``, each with a leading
@@ -520,7 +521,6 @@ def resample_moment_sums(
     """
     acc: list[Array] | None = None
     offset = 0
-    counts = _count_matrix(idx, int(idx.shape[1]))
     shift: Array | None = None
     for jac, Y_chunk in batches:
         if shift is None:
@@ -533,18 +533,25 @@ def resample_moment_sums(
     return acc[0], acc[1], acc[2], acc[3]
 
 
-def _count_matrix(idx: Array, n_rows: int) -> Array:
-    """Count how often each row is drawn by each replicate.
+def draw_counts(key: Array, n_bootstrap: int, n_rows: int) -> Array:
+    """Draw bootstrap rows with replacement and count them per replicate.
+
+    The index draws are local to this function, so only the count matrix
+    stays alive afterwards. That is one ``(n_bootstrap, n_rows)`` int32 array
+    less than keeping the indices next to the counts.
 
     Args:
-        idx: Resampled row indices, shape ``(n_bootstrap, n)``.
-        n_rows: Number of rows in the sample.
+        key: PRNG key for the row draws.
+        n_bootstrap: Number of replicates.
+        n_rows: Number of rows to draw from, which is also the resample size.
 
     Returns:
-        Integer array of shape ``(n_bootstrap, n_rows)``.
+        Integer array of shape ``(n_bootstrap, n_rows)``: how often each
+        replicate drew each row.
     """
-    rows = jnp.arange(idx.shape[0])[:, None]
-    return jnp.zeros((idx.shape[0], n_rows), dtype=jnp.int32).at[rows, idx].add(1)
+    idx = jax.random.randint(key, shape=(n_bootstrap, n_rows), minval=0, maxval=n_rows)
+    rows = jnp.arange(n_bootstrap)[:, None]
+    return jnp.zeros((n_bootstrap, n_rows), dtype=jnp.int32).at[rows, idx].add(1)
 
 
 def _output_shift(Y_chunk: Array) -> Array:
@@ -604,7 +611,7 @@ def _resample_batch_sums(
         jac: Jacobian rows of this batch.
         Y_chunk: Output rows of this batch.
         counts: Draw counts of every row, shape ``(n_bootstrap, N)``, from
-            :func:`_count_matrix`.
+            :func:`draw_counts`.
         offset: Number of rows that came before this batch.
         shift: Per-slice constant, from :func:`_output_shift` on the first
             batch. The same value must be used for every batch.

@@ -29,6 +29,7 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import (
+    _user_stacklevel,
     at_least,
     bootstrap_checks,
     check_scalars,
@@ -44,6 +45,7 @@ from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.dgsm._core import (
     _jac_bytes_per_row,
     bounds_from_moments,
+    draw_counts,
     jac_batches,
     jacobian_mode,
     jacobian_sums,
@@ -752,7 +754,7 @@ def analyze(
         unit=unit,
         allow_drop=unit is not InvalidUnit.CURVE,
     )
-    check_scalars(checks)
+    check_scalars(checks, _METHOD)
     gates(_SPEC, problem, method=_METHOD)
     # Say once, before the expensive work, that lower_bound is only a proven
     # bound for untruncated Gaussian marginals. The gates above already
@@ -782,8 +784,10 @@ def analyze(
         # With a bootstrap, the resampling joins the Jacobian sweep itself, so
         # the model is not differentiated a second time. The draw is made for
         # all N rows, which is right unless rows are dropped below.
-        full_idx = _draw_rows(key, n_bootstrap, N) if n_bootstrap > 0 and key is not None else None
-        moments = jacobian_sums(fn, X, batch_size, n_outputs=n_outputs, idx=full_idx)
+        full_counts = (
+            draw_counts(key, n_bootstrap, N) if n_bootstrap > 0 and key is not None else None
+        )
+        moments = jacobian_sums(fn, X, batch_size, n_outputs=n_outputs, counts=full_counts)
         # The Jacobian never leaves the device whole, so it reaches the check
         # as a per-row verdict rather than as its own array. The verdict is
         # the same one the batch loop masked with. It rides in as an extra
@@ -874,7 +878,12 @@ def analyze(
     # Var(Y) per (t, k) output slice, denominator of both bounds. A constant
     # slice makes both bounds NaN, so say so rather than returning it silently.
     variance = jnp.var(Y_3d, axis=0)  # (T, K)
-    _warn_zero_variance_slices(Y_valid, output_names=problem.output_names, method=_METHOD)
+    _warn_zero_variance_slices(
+        Y_valid,
+        output_names=problem.output_names,
+        method=_METHOD,
+        stacklevel=_user_stacklevel(),
+    )
 
     nu, mu, upper, lower, variance = bounds_from_moments(
         problem,
@@ -905,7 +914,7 @@ def analyze(
             assert moments.resample is not None
             sums = moments.resample
         else:
-            idx = _draw_rows(key, n_bootstrap, n_rows)
+            counts = draw_counts(key, n_bootstrap, n_rows)
             batches: Iterator[tuple[Array, Array]]
             if use_autodiff:
                 assert fn is not None
@@ -915,7 +924,7 @@ def analyze(
                 batches = ((jac, y) for jac, y, _ in jac_batches(fn, ctx.X, batch_size))
             else:
                 batches = _array_batches(dfdx_arr, Y_3d, batch_size)
-            sums = resample_moment_sums(batches, idx)
+            sums = resample_moment_sums(batches, counts)
         draws = _bootstrap_draws(
             problem,
             sums=sums,
@@ -1019,10 +1028,10 @@ def _array_batches(
         Y_3d: The validated output, shape ``(N, T, K)``.
         batch_size: Rows per batch, or ``None`` to derive one from the active
             memory budget with the same Jacobian bytes model the autodiff
-            path uses. The Jacobian already exists whole here, so the batch
-            width only bounds the bootstrap's per-batch transients (the
-            weight matrix and the squared block), but the two calling
-            conventions read one keyword and must give it one meaning.
+            path uses. The Jacobian already exists whole here, and so does the
+            bootstrap's ``(B, N)`` count matrix, so the batch width only
+            bounds the per-batch float cast of the counts and the squared
+            block, but the two calling conventions read one keyword and must give it one meaning.
 
     Yields:
         ``(jac, Y)`` per batch, in row order.
@@ -1035,20 +1044,6 @@ def _array_batches(
     for start in range(0, N, step):
         end = min(start + step, N)
         yield dfdx[start:end], Y_3d[start:end]
-
-
-def _draw_rows(key: Array, n_bootstrap: int, n_rows: int) -> Array:
-    """Draw the bootstrap row indices, with replacement.
-
-    Args:
-        key: PRNG key for the row draws.
-        n_bootstrap: Number of replicates.
-        n_rows: Number of rows to draw from, which is also the resample size.
-
-    Returns:
-        Integer array of shape ``(n_bootstrap, n_rows)``.
-    """
-    return jax.random.randint(key, shape=(n_bootstrap, n_rows), minval=0, maxval=n_rows)
 
 
 def _bootstrap_draws(

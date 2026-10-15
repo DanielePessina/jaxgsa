@@ -59,7 +59,7 @@ from jax import Array
 
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.bootstrap import interval
-from jaxgsa._core.entry import bootstrap_checks, prepare
+from jaxgsa._core.entry import _user_stacklevel, bootstrap_checks, prepare
 from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -366,10 +366,13 @@ def analyze(
         f_first = F[1 : D + 1]  # (D, N, S) — z redrawn given x_i
         f_total = F[D + 1 :]  # (D, N, S) — x_i redrawn given z
 
+    # Warned on the caller's own output rank, so a (N, K) output reads "k=1"
+    # and not the made-up "(t=0, k=1)" the inserted time axis would give.
     _warn_zero_variance_slices(
-        f_joint.reshape(-1, n_time, n_out),
+        f_joint.reshape((-1, *ctx.Y.shape[1:])),
         output_names=problem.output_names,
         method="jaxgsa.kucherenko.analyze",
+        stacklevel=_user_stacklevel(),
     )
     t0 = _verbose.tic()
     closed = subset_total = None

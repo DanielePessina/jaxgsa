@@ -153,6 +153,39 @@ def _truncnorm_poincare(mu: float, sigma: float, a: float, b: float, grid: int) 
     return float(1.0 / vals[1])
 
 
+# Gauss-Legendre nodes for the truncated-Gaussian variance. The weight is a
+# smooth Gaussian on an interval at most about 16 standard deviations wide,
+# so this many nodes reach float64 resolution.
+_GL_NODES = 256
+
+
+def _std_truncnorm_variance(a: float, b: float) -> float:
+    """Return the variance of a standard normal truncated to ``[a, b]``.
+
+    The closed form ``1 + (a phi(a) - b phi(b)) / Z - (...)^2`` subtracts
+    nearly equal numbers on a narrow interval or far in a tail, and it can
+    return a negative variance. This quadrature never subtracts like that. It
+    cuts the interval to its effective support, weights Gauss-Legendre nodes
+    by the density (shifted so the heaviest weight is 1), and takes the
+    second moment about the weighted mean.
+
+    Args:
+        a: Lower bound in standard units, possibly ``-inf``.
+        b: Upper bound in standard units, possibly ``inf``.
+
+    Returns:
+        The variance, which is positive.
+    """
+    lo, hi = _effective_support(0.0, 1.0, None if np.isinf(a) else a, None if np.isinf(b) else b)
+    nodes, weights = np.polynomial.legendre.leggauss(_GL_NODES)
+    x = 0.5 * (hi - lo) * nodes + 0.5 * (hi + lo)
+    z2 = x**2
+    w = weights * np.exp(-0.5 * (z2 - z2.min()))
+    w /= w.sum()
+    mean = float(np.sum(w * x))
+    return float(np.sum(w * (x - mean) ** 2))
+
+
 def marginal_variance(spec: InputSpec) -> float:
     """Return the marginal variance of a single input distribution.
 
@@ -185,7 +218,7 @@ def marginal_variance(spec: InputSpec) -> float:
         sd = math.sqrt(spec.variance)
         a_std = -np.inf if spec.low is None else (spec.low - spec.mean) / sd
         b_std = np.inf if spec.high is None else (spec.high - spec.mean) / sd
-        return float(truncnorm.var(a_std, b_std, loc=spec.mean, scale=sd))
+        return sd**2 * _std_truncnorm_variance(a_std, b_std)
     if isinstance(spec, CategoricalSpec):
         raise ValueError(
             "A categorical marginal's level codes have no variance meaningful "
