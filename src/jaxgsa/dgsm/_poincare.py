@@ -69,17 +69,33 @@ def poincare_constant(spec: InputSpec) -> float:
 # below float64 resolution of the spectral solve, so the constant is unchanged.
 _TAIL_MASS = 1e-15
 
+# Number of standard deviations around the mean that holds the whole mass of an
+# open or ordinary truncated side to float precision.
+_OPEN_SIDE_SD = 8.0
+
+# A declared bound this many standard deviations from the mean, on the side
+# that excludes the mean, leaves the mass piled against the bound. A fixed
+# stand-in interval no longer holds it, so the quantile cut takes over. It also
+# takes over for a bound past ``_OPEN_SIDE_SD`` on the mean's own side, where
+# the weight underflows.
+_FAR_BOUND_SD = 5.0
+
 
 def _effective_support(
     mean: float, std: float, low: float | None, high: float | None
 ) -> tuple[float, float]:
     """Return the interval the spectral solve runs on.
 
-    The declared bounds can sit hundreds of standard deviations from the
-    mass, where the Gaussian weight underflows. Or one side can be open, and
-    a fixed stand-in such as ``mean +/- 8 std`` can lie on the wrong side of
-    the declared bound on the other side. So the declared bounds are cut to
-    the quantiles of the truncated distribution itself that leave
+    Ordinarily each side is its declared bound, or ``mean +/- 8 std`` if the
+    side is open. That is exact for any bound near the mean, and it keeps a
+    truncation and its mirror image equal.
+
+    The declared bounds can instead sit far from the mass, where the Gaussian
+    weight underflows (a bound past 8 std from the mean). Or one bound can
+    exclude the mean by more than 5 std. Then the mass piles against the bound nearest the mean,
+    and a fixed stand-in such as ``mean +/- 8 std`` can lie on the wrong side
+    of the declared bound on the other side. Only in that case are the bounds
+    cut to the quantiles of the truncated distribution itself that leave
     ``1e-15`` of the mass in each tail. Those come from
     :class:`scipy.stats.truncnorm`, which works in log space and stays
     accurate in the far tail.
@@ -93,6 +109,15 @@ def _effective_support(
     Returns:
         ``(lo, hi)``, inside the declared bounds, with ``lo < hi``.
     """
+    lo = mean - _OPEN_SIDE_SD * std if low is None else low
+    hi = mean + _OPEN_SIDE_SD * std if high is None else high
+    far_above = low is not None and (low - mean) / std > _FAR_BOUND_SD
+    far_below = high is not None and (mean - high) / std > _FAR_BOUND_SD
+    beyond_stand_in = (low is not None and (mean - low) / std > _OPEN_SIDE_SD) or (
+        high is not None and (high - mean) / std > _OPEN_SIDE_SD
+    )
+    if not (far_above or far_below or beyond_stand_in):
+        return lo, hi
     a_std = -np.inf if low is None else (low - mean) / std
     b_std = np.inf if high is None else (high - mean) / std
     lo_std = float(truncnorm.ppf(_TAIL_MASS, a_std, b_std))

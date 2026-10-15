@@ -116,3 +116,24 @@ def test_bootstrap_is_independent_of_batch_size() -> None:
         for bs in (1000, 300)
     ]
     np.testing.assert_allclose(np.asarray(out[0].nu_conf), np.asarray(out[1].nu_conf), rtol=1e-4)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({"mean": 0.0, "variance": 1.0, "low": -1.0}, 0.7203579981925856),
+        ({"mean": 0.0, "variance": 1.0, "low": -3.0, "high": 5.0}, 0.988539393225847),
+        ({"mean": 2.0, "variance": 4.0, "low": 1.0}, 2.4260346384950227),
+        ({"mean": 0.0, "variance": 1.0, "low": -8.0, "high": 8.0}, 1.0000814000776046),
+    ],
+)
+def test_truncated_gaussian_poincare_matches_1_1_1(kwargs, expected) -> None:
+    """Ordinary truncations keep the 1.1.1 interval, so the constant is unchanged."""
+    assert poincare_constant(GaussianSpec(**kwargs)) == pytest.approx(expected, rel=3e-12)
+
+
+def test_truncated_gaussian_poincare_mirror_symmetry() -> None:
+    """A lower bound at -1 and the mirror upper bound at +1 give the same constant."""
+    lower = poincare_constant(GaussianSpec(0.0, 1.0, low=-1.0))
+    upper = poincare_constant(GaussianSpec(0.0, 1.0, high=1.0))
+    assert lower == pytest.approx(upper, rel=1e-11)
