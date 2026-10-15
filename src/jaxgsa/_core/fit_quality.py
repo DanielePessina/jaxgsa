@@ -66,30 +66,36 @@ CV_RATIO_THRESHOLD = math.sqrt(1.0 - POORFIT_THRESHOLD)
 #
 # The pivot share of column j is the squared Cholesky pivot ``L[j, j]**2``
 # over the Gram diagonal ``G[j, j]``: the fraction of the column's variance
-# that is left after the columns before it explain it. A rank-deficient
-# design has a share of zero in exact arithmetic. In practice the share stops
-# at a floor: the ridge sets it in float64 (about ``ridge / N``), and
-# rounding sets it in float32 (it grows with N, about 1.8e-5 at N = 10000).
+# that is left after the columns before it explain it. It is read off the
+# Gram matrix of the data alone. :func:`min_pivot_share` takes the ridge out
+# and adds PIVOT_JITTER times each diagonal entry instead. A column that the
+# earlier columns explain exactly then has a share of PIVOT_JITTER, whatever
+# the ridge, the row count or the column scale. A share far above it is the
+# data's own.
 #
-# float64 refuses a share below 1e-9. Measured singular designs, on 2000 rows
-# at order 3, sit at or below 2.9e-10: a duplicated input gives 4.9e-12, a
-# constant input 8.8e-12, a three-level input 3.5e-12, an input that is the
-# square of another 1.1e-10, and an input that copies another up to 1e-3
-# noise 2.9e-10 (its copy then gets a total index of 0.08 instead of 0). The
-# ridge floor of an exact duplicate, about 1e-8 / N, stays below 2.5e-10 for
-# N >= 40. Accurate fits go much lower than one would expect: three Gaussian
-# inputs at order 16 on 6000 rows give 1.2e-8 and match the true indices to
-# four digits, and a copy up to 1e-2 noise gives 2.0e-8 with indices within
-# 3e-3 of the truth.
+# float64 refuses a share below 4e-12, four times the jitter. An exactly
+# dependent column whose earlier columns are well-conditioned sits at 1.4 to
+# 2.0 times the jitter, measured at every N from 40 to 200000: a duplicated
+# input, a constant input (NaN, an all-zero column), a three-level input.
+# High-order Hermite fits come close from above: two Gaussian inputs on 1000
+# rows give 60 to 80 times the jitter at order 20, and 9 to 18 times at
+# orders 24 and 26, and their indices are still accurate. The margin is about
+# two on each side. That is the precision limit of float64 normal equations.
+# An exact dependence among ill-conditioned columns can sit higher (an input
+# that is the square of another gives 34 times the jitter) and then only
+# warns. Every share below 1e-9 warns: an input that copies another up to
+# 1e-3 noise gives about 1e-10, and its copy gets a total index of 0.08
+# instead of 0.
 #
 # float32 cannot resolve the same range. Its rounding floor overlaps the
 # shares of singular designs, so a three-level input on 2000 rows gives
-# 1.6e-5 in float32 and 3.5e-12 in float64. Below 1e-5 float32 refuses the
-# fit, and NaN (a failed factorisation) counts as below. From 1e-5 to 1e-4 it
-# warns, because the design may be singular and float32 cannot tell. The
-# lowest well-posed float32 share measured is 1.5e-4 (D = 10, order 4,
-# fit_ratio = 1).
-SINGULAR_PIVOT_THRESHOLD_F64 = 1e-9
+# 1.6e-5 in float32. Below 1e-5 float32 refuses the fit, and NaN (a failed
+# factorisation) counts as below. From 1e-5 to 1e-4 it warns, because the
+# design may be singular and float32 cannot tell. The lowest well-posed
+# float32 share measured is 1.5e-4 (D = 10, order 4, fit_ratio = 1).
+PIVOT_JITTER = 1e-12
+SINGULAR_PIVOT_THRESHOLD_F64 = 4e-12
+ILL_CONDITIONED_PIVOT_THRESHOLD_F64 = 1e-9
 SINGULAR_PIVOT_THRESHOLD_F32 = 1e-5
 AMBIGUOUS_PIVOT_THRESHOLD_F32 = 1e-4
 
@@ -257,19 +263,28 @@ def warn_cv_overfit(
 
 
 @jax.jit
-def min_pivot_share(gram: Array) -> Array:
+def min_pivot_share(gram: Array, ridge: Array | float = 0.0) -> Array:
     """The smallest unexplained share of any column of a Gram matrix.
 
+    The ridge is taken out first, so a large ridge cannot hide a singular
+    design, and a fixed relative jitter of :data:`PIVOT_JITTER` times each
+    diagonal entry goes in instead. An exactly dependent column then has a
+    share of about :data:`PIVOT_JITTER` in float64. In float32 the jitter is
+    below rounding and changes nothing.
+
     Args:
-        gram: Symmetric Gram matrix, shape ``(n_terms, n_terms)``, with any
-            ridge already added.
+        gram: Symmetric Gram matrix, shape ``(n_terms, n_terms)``.
+        ridge: The ridge already added to the diagonal of ``gram``.
 
     Returns:
-        ``min_j L[j, j]**2 / G[j, j]``, a scalar in ``[0, 1]``. NaN when the
-        Cholesky factorisation fails or a column is all zeros.
+        ``min_j L[j, j]**2 / G[j, j]`` of the jittered data Gram matrix ``G``,
+        a scalar in ``[0, 1]``. NaN when the Cholesky factorisation fails or
+        a column is all zeros.
     """
-    chol = jnp.linalg.cholesky(gram)
-    return jnp.min(jnp.diagonal(chol) ** 2 / jnp.diagonal(gram))
+    diag = jnp.diagonal(gram) - ridge
+    data = gram + jnp.diag(PIVOT_JITTER * diag - ridge)
+    chol = jnp.linalg.cholesky(data)
+    return jnp.min(jnp.diagonal(chol) ** 2 / jnp.diagonal(data))
 
 
 def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
@@ -295,8 +310,9 @@ def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
             :data:`SINGULAR_PIVOT_THRESHOLD_F32` in float32.
 
     Warns:
-        JaxgsaWarning: In float32, if ``pivot_share`` is below
-            :data:`AMBIGUOUS_PIVOT_THRESHOLD_F32` but not refused.
+        JaxgsaWarning: If ``pivot_share`` is not refused but is below
+            :data:`ILL_CONDITIONED_PIVOT_THRESHOLD_F64` in float64 or
+            :data:`AMBIGUOUS_PIVOT_THRESHOLD_F32` in float32.
     """
     is_f64 = jnp.asarray(pivot_share).dtype == jnp.float64
     limit = SINGULAR_PIVOT_THRESHOLD_F64 if is_f64 else SINGULAR_PIVOT_THRESHOLD_F32
@@ -314,7 +330,17 @@ def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
             f"earlier columns explain it, below {limit:.0e}. The coefficients are "
             f"not identified, so the indices are undefined. {advice}"
         )
-    if not is_f64 and share < AMBIGUOUS_PIVOT_THRESHOLD_F32:
+    if is_f64 and share < ILL_CONDITIONED_PIVOT_THRESHOLD_F64:
+        warnings.warn(
+            f"{namespace}: the Gram matrix of the design is ill-conditioned: one "
+            f"basis column has only {share:.1e} of its variance left after the "
+            "earlier columns explain it. The indices are defined, but a nearly "
+            "duplicated input can make them inaccurate. Check for inputs that "
+            f"almost copy each other. {advice}",
+            skip_file_prefixes=(PACKAGE_DIR,),
+            category=JaxgsaWarning,
+        )
+    elif not is_f64 and share < AMBIGUOUS_PIVOT_THRESHOLD_F32:
         warnings.warn(
             f"{namespace}: the Gram matrix of the design may be numerically "
             f"singular: one basis column has only {share:.1e} of its variance left "

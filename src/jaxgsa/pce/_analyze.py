@@ -856,7 +856,7 @@ def _fit_pce_core(
         loo_flat=loo_flat,
         rmse_flat=rmse_flat,
         streamed=streamed,
-        pivot_share=min_pivot_share(gram) if diagnostics else None,
+        pivot_share=min_pivot_share(gram, ridge) if diagnostics else None,
     )
 
 
