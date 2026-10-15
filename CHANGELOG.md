@@ -5,11 +5,15 @@
 This release fixes bugs and makes several methods faster. Correct index
 values do not change, with three exceptions:
 
-- DGSM values for a truncated Gaussian input change where they were wrong.
-  Ordinary cases move by at most 3e-13 relative.
-- In float32, PCE, HDMR, PAWN, HSIC and VKOGA values can differ in the last
-  bit when the problem has 17 or more inputs. Below 17 inputs they are
-  bitwise unchanged.
+- DGSM values for a truncated Gaussian input change where they were wrong,
+  that is where a declared bound lies far outside the mass. Other truncated
+  Gaussian inputs do not change. DGSM bootstrap intervals (`*_conf`) can
+  differ in the last bits for every input, because the resampled variance is
+  now computed on shifted outputs.
+- When the problem has 17 or more inputs, PCE values change slightly: by up
+  to about 1e-5 relative in float32, and about 4e-15 relative in float64. In
+  float32, HDMR, PAWN, HSIC and VKOGA values can differ in the last bit. Below
+  17 inputs all of them are bitwise unchanged.
 - One dataset attribute is renamed: `to_dataset()` on an optimal-transport
   result writes `ot_mode`, not `mode`.
 
@@ -74,18 +78,22 @@ bitwise the same values as 1.1.1, in float32 and float64.
 
 #### Warnings and errors
 
-- `pce` now raises a `ValueError` when the Gram matrix of the design is
-  numerically singular, for example when an input is duplicated or constant.
-  The check reads the Cholesky pivots of the Gram matrix without the ridge.
-  For each basis column, it finds the fraction of the column's variance that
-  is left after the earlier columns explain it. In float64 the fit raises
-  when this fraction is below 4e-12, and warns when it is below 1e-9. An
-  ill-conditioned fit, such as a high-order Hermite fit or a nearly
-  duplicated input, gets the warning. In float32 the fit raises below 1e-5,
-  and warns between 1e-5 and 1e-4, because float32 rounding cannot tell a
-  singular design from a well-posed one there. Before, float64 fits gave
-  finite but wrong indices with no message: a duplicated input shared the
-  index of the true input, and a constant input got a large total index.
+- `pce` now raises a `ValueError` when an input is constant, or when two
+  inputs are equal in every row. The indices are then undefined. The message
+  names the inputs. Before, float64 fits gave finite but wrong indices with no
+  message: a duplicated input shared the index of the true input, and a
+  constant input got a large total index.
+- `pce` now checks the Gram matrix of the design. For each basis column, it
+  finds the fraction of the column's variance that is left after the earlier
+  columns explain it. In float64 the fit warns when this fraction is below
+  1e-9: dependent or nearly duplicated inputs then make the indices
+  unreliable. A very high order on Gaussian inputs can also cause the
+  warning, and its indices can still be accurate. In float32 the fit raises
+  below 1e-5 or when the factorisation fails, and the message says that
+  float32 rounding may be the cause. Between 1e-5 and 1e-4 it warns, because
+  float32 rounding cannot tell a singular design from a well-posed one there.
+  When `jaxgsa.shapley` runs these checks, the messages name
+  `jaxgsa.shapley.analyze`.
 - `pce` now warns when the leave-one-out error is not finite on an output
   that is not constant. Before, no warning appeared. Non-finite coefficients
   now raise a `ValueError`, except with `on_invalid="propagate"`.
