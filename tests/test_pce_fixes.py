@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -99,14 +100,70 @@ def test_duplicated_input_raises_on_singular_gram():
         pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
 
 
-def test_constant_input_warns_when_loo_fails():
+@pytest.mark.parametrize("batch_size", [None, 256])
+def test_constant_input_raises_on_singular_gram(batch_size):
+    # Raises in float32 and float64 alike, on the single-pass and the
+    # streamed path. Under x64 nothing turns NaN, so only the rank check
+    # catches it.
     rng = np.random.default_rng(0)
     problem = jaxgsa.Problem(["a", "b", "c"], [(0, 1)] * 3)
     X = rng.uniform(0, 1, (2000, 3)).astype(np.float32)
     X[:, 2] = 0.5
     Y = 2 * X[:, 0] + X[:, 1] ** 2
-    with pytest.warns(JaxgsaWarning, match="numerically singular"):
+    with pytest.raises(ValueError, match="numerically singular"):
+        pce.analyze(
+            problem,
+            jnp.asarray(X),
+            jnp.asarray(Y),
+            order=3,
+            batch_size=batch_size,
+            verbose=False,
+        )
+
+
+def test_near_duplicated_input_raises_in_both_dtypes():
+    # Copies b up to 1e-3 noise: NaN Cholesky in float32, a finite but
+    # unidentified fit in float64. One threshold refuses both.
+    rng = np.random.default_rng(0)
+    problem = jaxgsa.Problem(["a", "b", "c"], [(0, 1)] * 3)
+    X = rng.uniform(0, 1, (2000, 3)).astype(np.float32)
+    X[:, 2] = np.clip(X[:, 1] + 1e-3 * rng.standard_normal(2000), 0, 1).astype(np.float32)
+    Y = 2 * X[:, 0] + X[:, 1] ** 2
+    with pytest.raises(ValueError, match="numerically singular"):
         pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
+
+
+def test_three_level_input_is_flagged_in_both_dtypes():
+    # Exactly singular at order 3: the cubic in a three-level input lies in
+    # the span of the lower terms. float64 resolves it (share 3.5e-12) and
+    # refuses it. In float32 the rounding floor (1.6e-5 here) hides it, so
+    # the fit warns instead of passing in silence.
+    rng = np.random.default_rng(0)
+    problem = jaxgsa.Problem(["a", "b", "c"], [(0, 1)] * 3)
+    X = rng.uniform(0, 1, (2000, 3)).astype(np.float32)
+    X[:, 2] = rng.choice(np.array([0.1, 0.5, 0.9], np.float32), 2000)
+    Y = 2 * X[:, 0] + X[:, 1] ** 2
+    if jax.config.jax_enable_x64:
+        with pytest.raises(ValueError, match="numerically singular"):
+            pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
+    else:
+        with pytest.warns(JaxgsaWarning, match="may be numerically singular"):
+            pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
+
+
+def test_high_order_hermite_fit_is_not_refused_in_float64():
+    # A well-posed order-10 fit has pivot shares near 2e-6. float64 fits it
+    # accurately and must not refuse it. float32 cannot fit it at all.
+    if not jax.config.jax_enable_x64:
+        pytest.skip("float64 only")
+    rng = np.random.default_rng(0)
+    gauss = GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0)
+    problem = jaxgsa.Problem.from_dict({"a": gauss, "b": gauss, "c": gauss})
+    X = rng.standard_normal((600, 3))
+    Y = X[:, 0] + 0.3 * X[:, 1] + X[:, 2] ** 2
+    result = pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=10, verbose=False)
+    assert isinstance(result, pce.PCEResult)
+    assert np.all(np.isfinite(np.asarray(result.S1)))
 
 
 def test_well_posed_fit_emits_no_singularity_message():

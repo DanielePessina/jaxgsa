@@ -74,10 +74,21 @@ bitwise the same values as 1.1.1, in float32 and float64.
 
 #### Warnings and errors
 
-- `pce` now warns when the fit is numerically singular in float32 and the
-  indices are unreliable. Before, the leave-one-out error was NaN and no
-  warning appeared. Non-finite coefficients now raise a `ValueError`, except
-  with `on_invalid="propagate"`.
+- `pce` now raises a `ValueError` when the Gram matrix of the design is
+  numerically singular, for example when an input is duplicated or constant.
+  The check reads the Cholesky pivots of the Gram matrix. For each basis
+  column, it finds the fraction of the column's variance that is left after
+  the earlier columns explain it. In float64 the fit raises when this
+  fraction is below 1e-8. In float32 the fit raises below 1e-5. Between 1e-5
+  and 1e-4 it warns, because float32 rounding cannot tell a singular design
+  from a well-posed one there. Before, float64 fits gave finite but wrong
+  indices with no message: a duplicated input shared the index of the true
+  input, and a constant input got a large total index. A large `ridge` can
+  hide a duplicated input from the check, because the ridge keeps the Gram
+  matrix invertible.
+- `pce` now warns when the leave-one-out error is not finite on an output
+  that is not constant. Before, no warning appeared. Non-finite coefficients
+  now raise a `ValueError`, except with `on_invalid="propagate"`.
 - `pce` now warns when an order above 7 moves a wide truncated Gaussian input
   from the Hermite to the Legendre basis. The warning names the input.
 - `hsic` now warns when more than half of the samples of an input or output

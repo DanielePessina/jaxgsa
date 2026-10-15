@@ -62,6 +62,33 @@ OVERFIT_THRESHOLD = 1.3
 # of 0.020.
 CV_RATIO_THRESHOLD = math.sqrt(1.0 - POORFIT_THRESHOLD)
 
+# Limits on the pivot share of a Gram matrix, per dtype.
+#
+# The pivot share of column j is the squared Cholesky pivot ``L[j, j]**2``
+# over the Gram diagonal ``G[j, j]``: the fraction of the column's variance
+# that is left after the columns before it explain it. A rank-deficient
+# design has a share of zero in exact arithmetic. In practice the share stops
+# at a floor: the ridge sets it in float64 (about ``ridge / N``), and
+# rounding sets it in float32 (it grows with N, about 1.8e-5 at N = 10000).
+#
+# float64 refuses a share below 1e-8. Measured singular designs, on 2000 rows
+# at order 3, sit at or below 1.1e-10: a duplicated input gives 4.9e-12, a
+# constant input 8.8e-12, a three-level input 3.5e-12, an input that is the
+# square of another 1.1e-10. The lowest well-posed shares measured are 5.6e-7
+# (D = 10, order 4, fit_ratio = 1) and 1.6e-6 (three Gaussian inputs, order
+# 10, N = 600), and those fits are accurate.
+#
+# float32 cannot resolve the same range. Its rounding floor overlaps the
+# shares of singular designs, so a three-level input on 2000 rows gives
+# 1.6e-5 in float32 and 3.5e-12 in float64. Below 1e-5 float32 refuses the
+# fit, and NaN (a failed factorisation) counts as below. From 1e-5 to 1e-4 it
+# warns, because the design may be singular and float32 cannot tell. The
+# lowest well-posed float32 share measured is 1.5e-4 (D = 10, order 4,
+# fit_ratio = 1).
+SINGULAR_PIVOT_THRESHOLD_F64 = 1e-8
+SINGULAR_PIVOT_THRESHOLD_F32 = 1e-5
+AMBIGUOUS_PIVOT_THRESHOLD_F32 = 1e-4
+
 
 @jax.jit
 def _finite_range(values: Array) -> tuple[Array, Array, Array]:
@@ -223,6 +250,77 @@ def warn_cv_overfit(
         skip_file_prefixes=(PACKAGE_DIR,),
         category=JaxgsaWarning,
     )
+
+
+@jax.jit
+def min_pivot_share(gram: Array) -> Array:
+    """The smallest unexplained share of any column of a Gram matrix.
+
+    Args:
+        gram: Symmetric Gram matrix, shape ``(n_terms, n_terms)``, with any
+            ridge already added.
+
+    Returns:
+        ``min_j L[j, j]**2 / G[j, j]``, a scalar in ``[0, 1]``. NaN when the
+        Cholesky factorisation fails or a column is all zeros.
+    """
+    chol = jnp.linalg.cholesky(gram)
+    return jnp.min(jnp.diagonal(chol) ** 2 / jnp.diagonal(gram))
+
+
+def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
+    """Refuse a fit whose Gram matrix is numerically rank deficient.
+
+    :func:`check_fit_finite` sees a singular Gram matrix only when it turns
+    into NaN. That happens in float32. In float64 the factorisation succeeds,
+    the ridge keeps the solve finite, and the coefficients split one effect
+    across collinear columns at will. Every number stays finite and the
+    indices are wrong: a duplicated input shares the true input's index, and
+    a constant input gets a large one. This check reads the conditioning
+    directly. The limits depend on the dtype of ``pivot_share``; see
+    :data:`SINGULAR_PIVOT_THRESHOLD_F64`.
+
+    Args:
+        namespace: The public function the message speaks for.
+        pivot_share: The output of :func:`min_pivot_share`.
+        advice: What to do about it. Appended to the message.
+
+    Raises:
+        ValueError: If ``pivot_share`` is not finite, or is below
+            :data:`SINGULAR_PIVOT_THRESHOLD_F64` in float64 or
+            :data:`SINGULAR_PIVOT_THRESHOLD_F32` in float32.
+
+    Warns:
+        JaxgsaWarning: In float32, if ``pivot_share`` is below
+            :data:`AMBIGUOUS_PIVOT_THRESHOLD_F32` but not refused.
+    """
+    is_f64 = jnp.asarray(pivot_share).dtype == jnp.float64
+    limit = SINGULAR_PIVOT_THRESHOLD_F64 if is_f64 else SINGULAR_PIVOT_THRESHOLD_F32
+    share = float(pivot_share)
+    if not math.isfinite(share):
+        raise ValueError(
+            f"{namespace}: the Gram matrix of the design is numerically singular: "
+            "its Cholesky factorisation failed. The coefficients are not "
+            f"identified, so the indices are undefined. {advice}"
+        )
+    if share < limit:
+        raise ValueError(
+            f"{namespace}: the Gram matrix of the design is numerically singular: "
+            f"one basis column has only {share:.1e} of its variance left after the "
+            f"earlier columns explain it, below {limit:.0e}. The coefficients are "
+            f"not identified, so the indices are undefined. {advice}"
+        )
+    if not is_f64 and share < AMBIGUOUS_PIVOT_THRESHOLD_F32:
+        warnings.warn(
+            f"{namespace}: the Gram matrix of the design may be numerically "
+            f"singular: one basis column has only {share:.1e} of its variance left "
+            "after the earlier columns explain it. In float32 this cannot be told "
+            "apart from a singular design, so the indices may be undefined. Enable "
+            "jax x64 (jax.config.update('jax_enable_x64', True)) to resolve it. "
+            f"{advice}",
+            skip_file_prefixes=(PACKAGE_DIR,),
+            category=JaxgsaWarning,
+        )
 
 
 @jax.jit

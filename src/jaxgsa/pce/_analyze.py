@@ -23,7 +23,13 @@ from jaxgsa._core.entry import (
     prepare,
     require,
 )
-from jaxgsa._core.fit_quality import check_fit_finite, warn_cv_overfit, warn_variance_fit
+from jaxgsa._core.fit_quality import (
+    check_fit_finite,
+    check_gram_rank,
+    min_pivot_share,
+    warn_cv_overfit,
+    warn_variance_fit,
+)
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -423,6 +429,9 @@ class _PCEFit(NamedTuple):
     loo_flat: Array | None  # (T*K,) per-slice LOO RMSE, or None (diagnostics=False)
     rmse_flat: Array | None  # (T*K,) per-slice in-sample RMSE, or None (diagnostics=False)
     streamed: bool  # True when the row-streamed fit path ran
+    # Smallest unexplained column share of the regularized Gram matrix, from
+    # jaxgsa._core.fit_quality.min_pivot_share, or None (diagnostics=False).
+    pivot_share: Array | None = None
 
 
 @lru_cache(maxsize=32)
@@ -494,7 +503,7 @@ def _fit_pce_streamed(
     ridge: float,
     batch_size: int | None,
     diagnostics: bool,
-) -> tuple[Array, Array | None, Array | None]:
+) -> tuple[Array, Array | None, Array | None, Array]:
     """Fit the PCE by streaming row batches.
 
     The normal-equation pass always runs. A second pass computes LOO and the
@@ -532,8 +541,9 @@ def _fit_pce_streamed(
 
     Returns:
         Tuple of ``coeffs_flat``, shape ``(n_terms, T*K)``, the per-slice LOO
-        RMSE, shape ``(T*K,)``, and the per-slice in-sample RMSE, same shape.
-        Both are ``None`` when diagnostics are disabled.
+        RMSE, shape ``(T*K,)``, the per-slice in-sample RMSE, same shape, and
+        the regularized Gram matrix, shape ``(n_terms, n_terms)``. The two
+        RMSEs are ``None`` when diagnostics are disabled.
     """
     N = X_ref.shape[0]
     n_terms = multi_index.shape[0]
@@ -581,7 +591,7 @@ def _fit_pce_streamed(
         loo_flat = None
         rmse_flat = None
 
-    return coeffs_flat, loo_flat, rmse_flat
+    return coeffs_flat, loo_flat, rmse_flat, gram
 
 
 def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
@@ -833,7 +843,7 @@ def _fit_pce_core(
         # Map inputs to reference domain; (N, D) is small next to (N, n_terms).
         X_ref, input_types = _map_to_reference(X, problem, effective_order)
         Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
-        coeffs_flat, loo_flat, rmse_flat = _fit_pce_streamed(
+        coeffs_flat, loo_flat, rmse_flat, gram = _fit_pce_streamed(
             X_ref, Y_flat, mi, input_types, effective_order, ridge, batch_size, diagnostics
         )
         # Terms-last layout, matching HDMR's Sa convention (slices lead).
@@ -846,6 +856,7 @@ def _fit_pce_core(
         loo_flat=loo_flat,
         rmse_flat=rmse_flat,
         streamed=streamed,
+        pivot_share=min_pivot_share(gram) if diagnostics else None,
     )
 
 
@@ -1169,7 +1180,10 @@ def analyze(
             ``fit_ratio`` is above 1, or too few rows survive
             ``on_invalid`` for even the order-1 expansion
             (``D + 1 > int(fit_ratio * N)``, which would make the fit
-            underdetermined).
+            underdetermined). Also raised when the Gram matrix of the design
+            is numerically singular, for example for a duplicated or
+            constant input, or when the fitted coefficients are not finite:
+            the indices are then undefined.
     """
     key = as_key(key, "pce")
     if _is_irregular_y(Y):
@@ -1279,6 +1293,14 @@ def analyze(
     # NaN coefficients are then the documented outcome, already warned about,
     # and not a sign of a singular Gram matrix.
     if bool(jnp.all(jnp.isfinite(X)) & jnp.all(jnp.isfinite(ctx.Y3))):
+        # The rank check comes first. A singular Gram matrix turns into NaN
+        # only in float32; in float64 every number stays finite and wrong.
+        assert fit.pivot_share is not None
+        check_gram_rank(
+            "jaxgsa.pce",
+            fit.pivot_share,
+            advice="Remove duplicated or constant inputs, lower order, or add rows.",
+        )
         check_fit_finite(
             "jaxgsa.pce",
             fit.coefficients,
