@@ -3,19 +3,26 @@
 ## 1.1.2
 
 This release fixes bugs and makes several methods faster. Correct index
-values do not change, with three exceptions:
+values do not change, with these exceptions:
 
 - DGSM values for a truncated Gaussian input change where they were wrong,
-  that is where a declared bound lies far outside the mass. Other truncated
-  Gaussian inputs do not change. DGSM bootstrap intervals (`*_conf`) can
+  that is where a declared bound lies far outside the mass, or where the
+  interval is narrower than 0.1 standard deviations (1.1.1 could return a
+  negative variance there). Other truncated Gaussian inputs do not change. DGSM bootstrap intervals (`*_conf`) can
   differ in the last bits for every input, because the resampled variance is
-  now computed on shifted outputs.
-- When the problem has 17 or more inputs, PCE values change slightly: by up
-  to about 1e-5 relative in float32, and about 4e-15 relative in float64. In
-  float32, HDMR, PAWN, HSIC and VKOGA values can differ in the last bit. Below
-  17 inputs all of them are bitwise unchanged.
-- One dataset attribute is renamed: `to_dataset()` on an optimal-transport
-  result writes `ot_mode`, not `mode`.
+  now computed on shifted outputs. In float32 with a large output offset
+  they move more, about 3e-5 relative at an offset of 50.
+- When the problem has 17 or more inputs, PCE values change slightly, and so
+  do Shapley values from the PCE backend: by up to about 1e-5 relative in
+  float32, and about 4e-14 relative in float64. In float32, HDMR, PAWN, HSIC
+  and VKOGA values can differ in the last bit. Below 17 inputs all of them
+  are bitwise unchanged.
+- `pce`, and `shapley` with the PCE backend, now raise a `ValueError` when an
+  input is constant or two inputs are equal in every row. 1.1.1 returned
+  indices for some of these designs.
+- Two dataset attributes change: `to_dataset()` on an optimal-transport
+  result writes `ot_mode`, not `mode`, and boolean attributes such as the
+  PCE `streamed` are written as 0 or 1.
 
 `optimal_transport.analyze` and eager `optimal_transport.indices` give
 bitwise the same values as 1.1.1, in float32 and float64.
@@ -79,8 +86,10 @@ bitwise the same values as 1.1.1, in float32 and float64.
 #### Warnings and errors
 
 - `pce` now raises a `ValueError` when an input is constant, or when two
-  inputs are equal in every row. The indices are then undefined. The message
-  names the inputs. Before, float64 fits gave finite but wrong indices with no
+  inputs are equal in every row. The PCE cannot estimate the indices of such
+  inputs from the sample. The message names the inputs. Only inputs that are
+  equal value for value count as duplicates: an affine copy, such as
+  `c = 1 - a`, gets the warning described below in float64. Before, float64 fits gave finite but wrong indices with no
   message: a duplicated input shared the index of the true input, and a
   constant input got a large total index.
 - `pce` now checks the Gram matrix of the design. For each basis column, it
