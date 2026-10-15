@@ -228,9 +228,12 @@ class SchemaResult:
 
     Attributes:
         _schema: The class's field declaration.
+        _attr_aliases: Export names for ``meta`` fields whose own name
+            cannot be a dataset attribute. Empty by default.
     """
 
     _schema: ClassVar[ResultSchema]
+    _attr_aliases: ClassVar[dict[str, str]] = {}
     problem: "Problem"
 
     # -- hooks ------------------------------------------------------------
@@ -313,7 +316,7 @@ class SchemaResult:
             value = getattr(self, name)
             if value is None:
                 continue
-            attrs[name] = _attr_value(value)
+            attrs[self._attr_aliases.get(name, name)] = _attr_value(value)
         ci = getattr(self, "ci", None)
         if ci is not None:
             attrs["ci_level"] = _attr_value(ci.level)

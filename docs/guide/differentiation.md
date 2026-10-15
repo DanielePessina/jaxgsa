@@ -66,10 +66,22 @@ and `jax.jacrev`.
 | HSIC | `jaxgsa.hsic.indices` | Reverse and forward mode |
 | PAWN | `jaxgsa.pawn.indices` | Traceable, but gradients need care |
 | Borgonovo | `jaxgsa.borgonovo.indices` | Reverse and forward mode |
-| Optimal transport | `jaxgsa.optimal_transport.indices` | Reverse and forward mode. Point-cloud modes differentiate the converged Sinkhorn solution (implicit function theorem). Second derivatives run but are not tested |
+| Optimal transport | `jaxgsa.optimal_transport.indices` | Reverse and forward mode. Point-cloud modes differentiate the converged Sinkhorn solution (implicit function theorem). Second derivatives work. See the note below the table |
 | Rank | `jaxgsa.rank.indices` | Traces. The index is piecewise constant in `X`, so `d/dX` is 0. `d/dY` is not |
 | Kucherenko | None | Host NumPy implementation |
 | VKOGA | None | Host quasi-Monte Carlo index stage |
+
+Optimal transport notes:
+
+- Hessian-vector products (`grad` of `grad`, `jacfwd` of `grad`) match
+  finite differences to about 1e-8 for converged solves.
+- With `epsilon` of about 1e-3 or less at the default `max_iter`, the solve
+  can stop early. Then the value and the gradient are both unreliable.
+- Index values are bitwise stable for `analyze()` and for an eager
+  `indices()` call. Under your own outer `jax.jit`, they can differ in the
+  last float32 bits (XLA fusion), by up to about 5e-6 relative.
+- A constant output column has a finite gradient. It adds nothing to the
+  joint distance.
 
 “Traceable” is a software property, not a promise that every mathematical
 derivative is informative. Discrete choices, ranks, hard bins, and extrema

@@ -763,7 +763,16 @@ def _standardize_outputs(Y: Array) -> tuple[Array, Array, Array, Array]:
     # different magnitude on one numerical footing, and matches what SALib
     # does, so a comparison against SALib is exact rather than equivalent.
     y_mean = jnp.mean(Y, axis=0)
-    y_std = jnp.std(Y, axis=0)
+    # ``jnp.std`` is ``sqrt(var)``, so this is the same value bit for bit. It
+    # is spelt out so the square root never sees a zero: sqrt has an infinite
+    # derivative at 0, and a constant slice would turn the ``jnp.where`` guard
+    # below into ``0 * inf = NaN`` in a reverse-mode gradient. The inner
+    # ``where`` feeds sqrt a safe 1.0 where the variance is exactly 0, and the
+    # outer one puts the 0 back. A NaN variance is not 0, so it still flows
+    # through as NaN.
+    var = jnp.var(Y, axis=0)
+    nonzero = var != 0
+    y_std = jnp.where(nonzero, jnp.sqrt(jnp.where(nonzero, var, jnp.ones_like(var))), 0.0)
     # ``jnp.std`` can leave a tiny positive residue for an exactly constant
     # float64 slice (the mean reduction is not necessarily bit-identical to
     # each input element). Detect exact constancy on device, without the host

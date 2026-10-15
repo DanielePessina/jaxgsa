@@ -54,7 +54,6 @@ def test_netcdf_roundtrip_netcdf4_engine(method, tmp_path):
     xr.load_dataset(path, engine="netcdf4")
 
 
-@pytest.mark.xfail(reason="OT `mode` attribute clashes in netCDF; rename to `ot_mode` is pending")
 def test_netcdf_roundtrip_ot(tmp_path):
     X, Y = _data()
     result = jaxgsa.optimal_transport.analyze(PROBLEM, X, Y, verbose=False)
