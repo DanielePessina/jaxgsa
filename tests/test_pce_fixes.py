@@ -138,6 +138,24 @@ def test_constant_input_raises_in_both_dtypes(batch_size):
         )
 
 
+def test_integer_inputs_run_through_the_degenerate_input_check():
+    # 1.1.1 accepted integer X and returned exact indices. The duplicate
+    # check must not reject the dtype.
+    rng = np.random.default_rng(1)
+    problem = jaxgsa.Problem(["a", "b", "c"], [(0, 9)] * 3)
+    dtype = np.int64 if jax.config.jax_enable_x64 else np.int32
+    X = rng.integers(0, 10, (1000, 3)).astype(dtype)
+    Y = (X[:, 0] + 2 * X[:, 1] + 0.5 * X[:, 2]).astype(float)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=2, verbose=False)
+        shap = jaxgsa.shapley.analyze(problem, jnp.asarray(X), jnp.asarray(Y), backend="pce")
+    assert isinstance(result, pce.PCEResult)
+    np.testing.assert_allclose(np.asarray(result.S1), [0.1905, 0.7619, 0.0476], atol=1e-3)
+    assert isinstance(shap, jaxgsa.shapley.ShapleyResult)
+    assert np.all(np.isfinite(np.asarray(shap.Sh)))
+
+
 def test_degenerate_input_message_names_the_shapley_entry_point():
     problem, X, _ = _three_inputs()
     X[:, 2] = X[:, 1]

@@ -274,27 +274,34 @@ def _input_fingerprints(X: Array) -> tuple[Array, Array]:
     """Per-column spread and a projection that identical columns share.
 
     Args:
-        X: Inputs, shape ``(N, D)``.
+        X: Inputs, shape ``(N, D)``, of any real or integer dtype.
 
     Returns:
         ``(spread, projection)``, each of shape ``(D,)``. ``spread`` is
-        ``max - min`` per column. Identical columns get equal projections up
-        to the summation order.
+        ``max - min`` per column, in the dtype of ``X``. Identical columns get
+        equal projections up to the summation order. The projection is
+        floating point even for integer ``X``.
     """
-    weights = jax.random.normal(jax.random.key(0), (X.shape[0], 1), X.dtype)
+    dtype = jnp.result_type(X.dtype, jnp.float32)
+    weights = jax.random.normal(jax.random.key(0), (X.shape[0], 1), dtype)
     spread = jnp.max(X, axis=0) - jnp.min(X, axis=0)
-    return spread, jnp.sum(X * weights, axis=0)
+    return spread, jnp.sum(X.astype(dtype) * weights, axis=0)
 
 
 def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> None:
-    """Refuse inputs whose indices are undefined: constant or duplicated.
+    """Refuse constant or duplicated inputs, which a surrogate cannot separate.
 
-    A constant input carries no variance, so no share of the output variance
-    can belong to it. Two identical inputs cannot be told apart, so the fit
-    can split their effect between them in any proportion. Both make the Gram
-    matrix of a polynomial basis exactly singular, but the pivot shares
-    cannot prove that in float64. This check reads the inputs directly, so
-    both dtypes refuse the same designs.
+    A constant input carries no variance, so the sample says nothing about
+    its effect: a polynomial fit cannot estimate its index. Two identical
+    inputs cannot be told apart, so the fit can split their effect between
+    them in any proportion. Both make the Gram matrix of a polynomial basis
+    exactly singular, but the pivot shares cannot prove that in float64. This
+    check reads the inputs directly, so both dtypes refuse the same designs.
+
+    Only columns that are equal value for value count as duplicates. An
+    input that is an affine copy of another (``c = 2 * a``, ``c = 1 - a``)
+    makes the Gram matrix singular too, but passes this check. The pivot
+    share then warns in float64 and refuses in float32.
 
     Args:
         namespace: The public function the message speaks for.
@@ -311,9 +318,10 @@ def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> N
     if constant:
         raise ValueError(
             f"{namespace}: the input(s) {constant} have the same value in every row. "
-            "A constant input has no variance, so its indices are undefined, and "
-            "the Gram matrix of the design is singular. Remove the input from the "
-            "problem, or sample it over its range."
+            "A constant input has no variance, so the PCE cannot estimate its "
+            "indices from this sample, and the Gram matrix of the design is "
+            "singular. Remove the input from the problem, or sample it over its "
+            "range."
         )
     projection = np.asarray(projection_dev, dtype=np.float64)
     order = np.argsort(projection)
@@ -328,8 +336,8 @@ def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> N
     if duplicates:
         raise ValueError(
             f"{namespace}: the inputs {duplicates} are equal in every row. Two "
-            "identical inputs cannot be told apart, so their indices are "
-            "undefined, and the Gram matrix of the design is singular. Remove "
+            "identical inputs cannot be told apart, so the PCE cannot estimate "
+            "their indices, and the Gram matrix of the design is singular. Remove "
             "one input of each pair, or sample them independently."
         )
 
