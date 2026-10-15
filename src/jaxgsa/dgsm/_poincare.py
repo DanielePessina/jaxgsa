@@ -81,6 +81,37 @@ _OPEN_SIDE_SD = 8.0
 _FAR_BOUND_SD = 5.0
 
 
+# Interval width, in standard deviations, below which the closed-form
+# truncated variance cancels badly and the quadrature is used instead.
+_NARROW_SD = 0.1
+
+
+def _is_far(mean: float, std: float, low: float | None, high: float | None) -> bool:
+    """Return whether a declared bound sits far from the mass.
+
+    The Poincare constant and the marginal variance both switch to the
+    quantile-cut path on this test, so they cannot drift apart.
+
+    Args:
+        mean: Mean of the underlying Gaussian.
+        std: Standard deviation of the underlying Gaussian.
+        low: Declared lower bound, or ``None`` if open.
+        high: Declared upper bound, or ``None`` if open.
+
+    Returns:
+        ``True`` if a bound excludes the mean by more than 5 std, or lies more
+        than 8 std from the mean.
+    """
+    z_low = None if low is None else (low - mean) / std
+    z_high = None if high is None else (high - mean) / std
+    far_above = z_low is not None and z_low > _FAR_BOUND_SD
+    far_below = z_high is not None and -z_high > _FAR_BOUND_SD
+    beyond_stand_in = (z_low is not None and -z_low > _OPEN_SIDE_SD) or (
+        z_high is not None and z_high > _OPEN_SIDE_SD
+    )
+    return far_above or far_below or beyond_stand_in
+
+
 def _effective_support(
     mean: float, std: float, low: float | None, high: float | None
 ) -> tuple[float, float]:
@@ -111,12 +142,7 @@ def _effective_support(
     """
     lo = mean - _OPEN_SIDE_SD * std if low is None else low
     hi = mean + _OPEN_SIDE_SD * std if high is None else high
-    far_above = low is not None and (low - mean) / std > _FAR_BOUND_SD
-    far_below = high is not None and (mean - high) / std > _FAR_BOUND_SD
-    beyond_stand_in = (low is not None and (mean - low) / std > _OPEN_SIDE_SD) or (
-        high is not None and (high - mean) / std > _OPEN_SIDE_SD
-    )
-    if not (far_above or far_below or beyond_stand_in):
+    if not _is_far(mean, std, low, high):
         return lo, hi
     a_std = -np.inf if low is None else (low - mean) / std
     b_std = np.inf if high is None else (high - mean) / std
@@ -189,7 +215,8 @@ def _std_truncnorm_variance(a: float, b: float) -> float:
 
     The closed form ``1 + (a phi(a) - b phi(b)) / Z - (...)^2`` subtracts
     nearly equal numbers on a narrow interval or far in a tail, and it can
-    return a negative variance. This quadrature never subtracts like that. It
+    return a negative variance. This quadrature never subtracts like that. It is
+    used only when a bound is far from the mass (see ``_is_far``). It
     cuts the interval to its effective support, weights Gauss-Legendre nodes
     by the density (shifted so the heaviest weight is 1), and takes the
     second moment about the weighted mean.
@@ -243,7 +270,12 @@ def marginal_variance(spec: InputSpec) -> float:
         sd = math.sqrt(spec.variance)
         a_std = -np.inf if spec.low is None else (spec.low - spec.mean) / sd
         b_std = np.inf if spec.high is None else (spec.high - spec.mean) / sd
-        return sd**2 * _std_truncnorm_variance(a_std, b_std)
+        # The closed form also loses all digits on a very narrow interval, so
+        # that case takes the quadrature too.
+        narrow = b_std - a_std < _NARROW_SD
+        if narrow or _is_far(spec.mean, sd, spec.low, spec.high):
+            return sd**2 * _std_truncnorm_variance(a_std, b_std)
+        return float(truncnorm.var(a_std, b_std, loc=spec.mean, scale=sd))
     if isinstance(spec, CategoricalSpec):
         raise ValueError(
             "A categorical marginal's level codes have no variance meaningful "

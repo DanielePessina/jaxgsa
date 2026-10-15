@@ -137,3 +137,17 @@ def test_truncated_gaussian_poincare_mirror_symmetry() -> None:
     lower = poincare_constant(GaussianSpec(0.0, 1.0, low=-1.0))
     upper = poincare_constant(GaussianSpec(0.0, 1.0, high=1.0))
     assert lower == pytest.approx(upper, rel=1e-11)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({"mean": 0.0, "variance": 1.0, "low": -1.0}, 0.6296862857766055),
+        ({"mean": 0.0, "variance": 1.0, "low": 4.0}, 0.04667283839739844),
+        ({"mean": 0.0, "variance": 1.0, "low": -3.0, "high": 5.0}, 0.9866593541888516),
+        ({"mean": 2.0, "variance": 4.0, "low": 1.0}, 1.9447017427854685),
+    ],
+)
+def test_truncated_gaussian_variance_matches_1_1_1(kwargs, expected) -> None:
+    """Ordinary truncations use scipy's closed form, as in 1.1.1."""
+    assert marginal_variance(GaussianSpec(**kwargs)) == pytest.approx(expected, rel=1e-14)
