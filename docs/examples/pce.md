@@ -312,7 +312,7 @@ Data variables:
     explained_variance  float32 4B 0.9997
 Attributes:
     order:     8
-    streamed:  False
+    streamed:  0
 0.31396696
 ```
 
@@ -322,7 +322,9 @@ for rows and `param_j` for columns. The diagnostics travel with the indices:
 fitted expansion reproduces, which is 0.9997 here. That one is the in-sample
 R^2, so it cannot pass 1; a fit that memorises the sample reads near 1 while
 `cv_rmse` climbs, which is why the two travel together. The
-`streamed: False` attribute records which fit path produced the numbers.
+`streamed` attribute records which fit path produced the numbers: 0 for the
+single-pass fit, 1 for the streamed one. netCDF has no boolean type, so it
+is stored as an integer.
 
 ## Limitations
 
