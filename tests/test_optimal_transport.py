@@ -791,6 +791,19 @@ class TestQuantileRankSplit:
             np.testing.assert_array_equal(np.asarray(j_right), j_right_ref)
             np.testing.assert_allclose(np.asarray(frac_left), frac_left_ref, atol=1e-6)
 
+    def test_frac_left_float64_under_x64(self):
+        """With x64 on and a float64 dtype, the overlap fractions stay float64."""
+        from jaxgsa.optimal_transport._analyze import _quantile_rank_split
+
+        N = 23
+        sizes = np.array([7, 13, 3])
+        with jax.enable_x64(True):
+            _, _, frac = _quantile_rank_split(jnp.asarray(sizes), N, jnp.float64)
+            assert frac.dtype == jnp.float64
+            r = (np.arange(N)[None] * sizes[:, None]) % N
+            exact = np.minimum(N - r, sizes[:, None]) / sizes[:, None]
+            np.testing.assert_allclose(np.asarray(frac), exact, rtol=0, atol=1e-15)
+
 
 class TestOTCorrelatedInputs:
     """Certify the documented correlation-inclusive reading of the OT index.

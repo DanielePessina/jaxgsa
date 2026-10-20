@@ -70,6 +70,7 @@ Some fixes change index values where the old values were wrong. See Fixed.
   input value exactly on an interior edge (for example `0.3` with
   `n_classes=10`) could go to the bin below. Only inputs that sit exactly on
   an edge change bin.
+- OT: with float64 on, the overlap weights of categorical inputs in `mode="univariate"` were rounded to float32. They now use the working dtype.
 
 ### Changed values
 
@@ -87,6 +88,7 @@ Some fixes change index values where the old values were wrong. See Fixed.
   and every order above 7). It is now 1e-12 in float64 and below 1e-6 in
   float32. A truncation of 7 sigma or wider at order 7 or lower moves by at
   most the old Hermite defect, 2e-4.
+- OT with categorical inputs, `mode="univariate"`, float64 only: `ot` changes by up to 2.4e-11 absolute (4e-10 relative) and `diffusive` by up to 4e-9 relative. The old values carried float32 rounding. Float32 runs and continuous inputs are bitwise unchanged.
 
 ### Performance
 
@@ -127,6 +129,10 @@ Some fixes change index values where the old values were wrong. See Fixed.
   with categorical inputs change only by float rounding. Measured against
   1.1.2: at most about 1.5e-7 absolute in float32, and about 2e-16 absolute
   in x64. `borgonovo` with categorical inputs shares the change.
+
+### Docs
+
+- OT: the `tol` docs now give the cost of a trajectory solve. The time is in Sinkhorn iterations, not the loop over outputs. The float64 default `tol=1e-9` is several times slower than `1e-5`, and it stays the default.
 
 ## 1.1.2
 
