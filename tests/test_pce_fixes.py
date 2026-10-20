@@ -272,16 +272,24 @@ def _wide_truncated_problem() -> jaxgsa.Problem:
     )
 
 
-def test_high_order_wide_truncation_warns_and_names_input():
+def test_high_order_wide_truncation_is_exact_and_silent():
+    # 1.1.2 switched this input to a Legendre basis above order 7 and warned.
+    # At order 8 it returned S1 = 0.7141 and a cv_rmse of 0.23, where the exact
+    # S1 is 0.7273. The basis is now exact for every order and no warning
+    # speaks.
     rng = np.random.default_rng(0)
     X = np.stack([rng.standard_normal(3000), rng.uniform(0, 1, 3000)], 1).astype(np.float32)
     Y = X[:, 0] ** 2 + 3 * X[:, 1]
     problem = _wide_truncated_problem()
-    with pytest.warns(JaxgsaWarning, match=r"truncated Gaussian input\(s\) \['a'\]"):
-        pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=8, verbose=False)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=7, verbose=False)
+    for order in (3, 7, 8):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            result = pce.analyze(
+                problem, jnp.asarray(X), jnp.asarray(Y), order=order, verbose=False
+            )
+        assert isinstance(result, pce.PCEResult)
+        assert float(result.S1[0]) == pytest.approx(2 / 2.75, abs=5e-3)
+        assert float(result.cv_rmse) < 1e-3
 
 
 def test_constant_output_and_dropped_rows_emit_no_singularity_message():
@@ -483,3 +491,125 @@ def test_bootstrap_counts_replicates_with_a_near_singular_design():
             key=jax.random.key(0),
             verbose=False,
         )
+
+
+def _truncnorm_response(low, high, order, *, n=4000, power=3):
+    """Fit Y = x**power + 3u, x truncated Gaussian, and return S1[0] with its truth."""
+    from scipy import stats
+
+    mean, std = 0.0, 1.0
+    a = -np.inf if low is None else (low - mean) / std
+    b = np.inf if high is None else (high - mean) / std
+    dist = stats.truncnorm(a, b, loc=mean, scale=std)
+    spec = GaussianInputSpec(dist="gaussian", mean=mean, variance=std**2)
+    if low is not None:
+        spec["low"] = low
+    if high is not None:
+        spec["high"] = high
+    problem = jaxgsa.Problem.from_dict({"a": spec, "b": (0.0, 1.0)})
+    rng = np.random.default_rng(0)
+    x = dist.rvs(n, random_state=1)
+    u = rng.uniform(0, 1, n)
+    dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+    X = np.stack([x, u], 1).astype(dtype)
+    Y = (x**power + 3 * u).astype(dtype)
+    grid = np.linspace(dist.ppf(1e-13), dist.ppf(1 - 1e-13), 400001)
+    pdf = dist.pdf(grid)
+    pdf /= np.trapezoid(pdf, grid)
+    mean_p = np.trapezoid(grid**power * pdf, grid)
+    var_p = np.trapezoid((grid**power - mean_p) ** 2 * pdf, grid)
+    truth = var_p / (var_p + 0.75)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=order, verbose=False)
+    assert isinstance(result, pce.PCEResult)
+    return float(result.S1[0]), truth, float(result.cv_rmse)
+
+
+@pytest.mark.parametrize(
+    ("low", "high"),
+    [(-8.0, 8.0), (-3.0, 3.0), (-1.0, 1.0), (-1.0, 2.0), (0.0, None), (3.0, None), (None, -3.0)],
+    ids=["+-8", "+-3", "[-1,1]", "[-1,2]", "[0,inf)", "z>=3", "z<=-3"],
+)
+def test_truncated_gaussian_polynomial_response_is_exact(low, high):
+    # A cubic response lies in the span of an order-3 basis that is orthonormal
+    # against the truncated measure, so S1 is exact up to float rounding. The
+    # old Legendre-through-the-CDF route was off by 4e-3 to 5e-2.
+    s1, truth, cv = _truncnorm_response(low, high, order=4)
+    tol = 1e-8 if jax.config.jax_enable_x64 else 2e-5
+    assert s1 == pytest.approx(truth, abs=tol)
+    assert cv < (1e-6 if jax.config.jax_enable_x64 else 1e-2)
+
+
+def test_very_narrow_truncation_is_finite_and_exact():
+    # A truncation 0.1 standard deviations wide, which float32 cannot hold in
+    # a raw polynomial basis.
+    s1, truth, _ = _truncnorm_response(-0.05, 0.05, order=6)
+    assert np.isfinite(s1)
+    assert s1 == pytest.approx(truth, abs=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [(-3.0, 3.0), (-1.0, 2.0), (0.0, np.inf), (3.0, np.inf), (-np.inf, -5.0), (-0.05, 0.05)],
+)
+def test_truncated_family_is_orthonormal_against_its_measure(a, b):
+    from scipy import stats
+
+    from jaxgsa.pce._engine import _truncated_1d, truncated_gaussian_family
+
+    order = 8
+    mean, std, family = truncated_gaussian_family(a, b, order)
+    dist = stats.truncnorm(a, b)
+    assert mean == pytest.approx(dist.mean(), abs=1e-9)
+    assert std == pytest.approx(dist.std(), abs=1e-9)
+    # Degree-16 integrands peak far out in a tail, so the grid reaches 20 sigma.
+    grid = np.linspace(max(a, -20.0), min(b, 20.0), 400001)
+    pdf = dist.pdf(grid)
+    pdf /= np.trapezoid(pdf, grid)
+    with jax.enable_x64():
+        basis = np.asarray(
+            _truncated_1d(
+                jnp.asarray((grid - mean) / std, dtype=jnp.float64),
+                np.asarray(family.alpha),
+                np.asarray(family.root_beta),
+                order,
+            )
+        )
+    gram = np.trapezoid(basis[:, :, None] * basis[:, None, :] * pdf[:, None, None], grid, axis=0)
+    np.testing.assert_allclose(gram, np.eye(order + 1), atol=2e-6)
+
+
+def test_wide_truncation_family_reproduces_hermite():
+    from jaxgsa.pce._engine import truncated_gaussian_family
+
+    _, std, family = truncated_gaussian_family(-12.0, 12.0, 10)
+    assert std == pytest.approx(1.0, abs=1e-12)
+    np.testing.assert_allclose(family.alpha, 0.0, atol=1e-12)
+    np.testing.assert_allclose(family.root_beta[1:], np.sqrt(np.arange(1, 11)), atol=1e-10)
+
+
+def test_truncated_basis_survives_predict_and_grouped_mapping():
+    # D above the grouped-map cut-over, mixing a truncated input with the rest:
+    # the grouped map and the column loop must agree, and predict must run.
+    d = 20
+    problem = _mixed_problem(d)
+    X = _inputs(d) * 4 - 1
+    for order in (3, 8):
+        col, col_types = _map_by_column(X, problem, order)
+        grp, grp_types = _map_by_group(X, problem, order)
+        assert col_types == grp_types
+        np.testing.assert_allclose(np.asarray(col), np.asarray(grp), rtol=1e-6, atol=1e-7)
+    problem = jaxgsa.Problem.from_dict(
+        {
+            "a": GaussianInputSpec(dist="gaussian", mean=1.0, variance=4.0, low=0.0, high=5.0),
+            "b": (0.0, 1.0),
+        }
+    )
+    rng = np.random.default_rng(0)
+    X = np.stack([rng.uniform(0, 5, 500), rng.uniform(0, 1, 500)], 1).astype(np.float32)
+    Y = X[:, 0] ** 2 + X[:, 1]
+    result = pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
+    assert isinstance(result, pce.PCEResult)
+    pred = np.asarray(result.predict(jnp.asarray(X)))
+    np.testing.assert_allclose(pred, Y, atol=1e-2, rtol=1e-3)

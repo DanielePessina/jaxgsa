@@ -29,8 +29,7 @@ from jaxgsa import pce
 from jaxgsa.benchmarks import ishigami
 from jaxgsa.problem import Problem
 
-# A truncated Gaussian narrow enough to take the Legendre route (its bounds
-# sit well inside _WIDE_TRUNCATION_Z), so the truncated CDF really runs.
+# A truncated Gaussian, so the truncated-normal recurrence really runs.
 TRUNCATED_PROBLEM = Problem.from_dict(
     {
         "x1": {"dist": "gaussian", "mean": 0.0, "variance": 1.0, "low": -1.5, "high": 2.0},

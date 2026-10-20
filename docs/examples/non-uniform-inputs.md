@@ -296,16 +296,14 @@ and one autodiff sweep recover the exact top five.
   re-reading bounds.
 - `jaxgsa.hdmr.analyze()` handles Gaussian and truncated Gaussian inputs by
   mapping through the CDF onto `[0, 1]` before it fits the surrogate.
-- `jaxgsa.pce.analyze()` picks its polynomial family from how tight the
-  truncation is. A narrow truncation is a different measure, so it goes through
-  the truncated CDF and onto Legendre. A wide one, meaning every declared bound
-  at least 5 standard deviations out, keeps Hermite, because forcing Legendre
-  there makes the fit visibly worse. On Oakley-O'Hagan at order 3 the
-  leave-one-out RMSE went from 0.93 to 1.70 and the largest `S1` error from
-  0.0023 to 0.0054. The $\pm 3\sigma$ truncation declared on this page counts as
-  narrow, so PCE would put it on Legendre. Above order 7 Legendre wins even for
-  a wide truncation, because the Hermite Gram defect against a truncated measure
-  grows with degree.
+- `jaxgsa.pce.analyze()` gives a truncated Gaussian input the orthonormal
+  polynomials of its own truncated distribution. Hermite polynomials stop being
+  orthogonal against a truncated normal as the degree grows, and the old route
+  through the truncated CDF onto Legendre fitted a Gaussian-shaped input badly.
+  The new basis is exact for every truncation width and every order. A
+  polynomial response now gives its `S1` to float rounding, where the old
+  basis was off by 0.004 to 0.05. Untruncated Gaussian inputs keep Hermite, and
+  uniform inputs keep Legendre.
 
 ## See also
 

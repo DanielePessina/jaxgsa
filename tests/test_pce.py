@@ -336,44 +336,34 @@ class TestTruncatedGaussianBasis:
         }
         return Problem.from_dict(params, truncate_gaussians=q)
 
-    def test_truncation_selects_the_stable_basis_by_width_and_order(self):
+    def test_a_truncated_gaussian_gets_its_own_recurrence_at_every_width_and_order(self):
         from jaxgsa.pce._analyze import _map_to_reference
+        from jaxgsa.pce._engine import TruncatedFamily
 
-        problem = self._problem(2, q=1e-12)  # |z| = 7.03
-        X = jax.random.normal(jax.random.PRNGKey(0), (32, 2))
-        _, input_types = _map_to_reference(X, problem, 3)
+        for q, scale in ((1e-12, 1.0), (1e-3, 0.5)):  # |z| = 7.03 and 3.09
+            problem = self._problem(2, q=q)
+            X = jax.random.normal(jax.random.PRNGKey(0), (32, 2)) * scale
+            for order in (3, 10):
+                _, input_types = _map_to_reference(X, problem, order)
+                assert all(isinstance(kind, TruncatedFamily) for kind in input_types)
+                assert len(input_types[0].alpha) == order
+        # An untruncated Gaussian keeps Hermite.
+        _, input_types = _map_to_reference(X, self._problem(2), 10)
         assert input_types == ("gaussian", "gaussian")
-        problem = self._problem(2, q=1e-3)  # |z| = 3.09
-        X = jax.random.normal(jax.random.PRNGKey(0), (32, 2)) * 0.5
-        _, input_types = _map_to_reference(X, problem, 3)
-        assert input_types == ("uniform", "uniform")
-        problem = self._problem(2, q=1e-12)
-        X = jax.random.normal(jax.random.PRNGKey(0), (32, 2))
-        _, input_types = _map_to_reference(X, problem, 10)
-        assert input_types == ("uniform", "uniform")
 
-    def test_a_saturated_cdf_stays_off_the_upper_edge_in_float32(self):
-        """T4: the unit clip has to bite in the dtype the map runs in.
+    def test_a_sample_beyond_a_truncation_bound_maps_to_a_finite_reference_value(self):
+        """A sample at or past a bound must not turn into inf or NaN.
 
-        The Legendre route clips its CDF values into
-        ``[UNIT_CLIP, 1 - UNIT_CLIP]`` so a sample at or past a truncation
-        bound stays distinguishable from the bound itself. At
-        ``UNIT_CLIP = 1e-12`` the upper half of that clip did nothing in
-        float32, because ``1 - 1e-12`` rounds back to exactly 1.0 there,
-        while the same expression in float64 clipped properly.
-
-        Only the upper edge is asserted. The lower one is exactly ``-1.0`` in
-        float32 whatever the clip does, because the affine ``2u - 1`` that
-        follows it cannot represent ``2e-12 - 1`` as anything else, and that
-        is a property of the map rather than of the clip.
+        The affine map is finite for any sample, which the old CDF route
+        needed a dtype-aware clip to achieve.
         """
         from jaxgsa.pce._analyze import _map_to_reference
 
         problem = self._problem(1, q=1e-3)  # bounds at |z| = 3.09
         X = jnp.asarray([[0.0], [3.09], [40.0]], dtype=jnp.float32)
-        xi, input_types = _map_to_reference(X, problem, 3)
-        assert input_types == ("uniform",)
-        assert np.all(np.asarray(xi) < 1.0)
+        xi, _ = _map_to_reference(X, problem, 3)
+        assert np.all(np.isfinite(np.asarray(xi)))
+        assert np.all(np.diff(np.asarray(xi)[:, 0]) > 0)
 
     @pytest.mark.slow
     def test_wide_truncation_matches_unbounded_accuracy(self):

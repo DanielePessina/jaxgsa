@@ -42,11 +42,9 @@ from jaxgsa._core.irregular import (
     _is_irregular_y,
     analyze_irregular,
 )
-from jaxgsa._core.precision import unit_clip_bounds
 from jaxgsa._core.result import CIInfo
-from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa._core.surrogate import _PredictPlan
-from jaxgsa._core.transforms import GROUPED_MIN_D, _in_column_order, _truncnorm_cdf
+from jaxgsa._core.transforms import GROUPED_MIN_D, _in_column_order
 from jaxgsa._core.validation import (
     _is_constant_slice,
     _prepare_Y,
@@ -54,6 +52,7 @@ from jaxgsa._core.validation import (
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.pce._engine import (
+    TruncatedFamily,
     build_design_matrix,
     build_multi_index,
     hat_diagonal,
@@ -61,9 +60,10 @@ from jaxgsa.pce._engine import (
     r_pivot_share,
     ridge_qr,
     sobol_from_coefficients,
+    truncated_gaussian_family,
 )
 from jaxgsa.pce._result import PCEResult
-from jaxgsa.problem import CategoricalSpec, Problem, UniformSpec
+from jaxgsa.problem import CategoricalSpec, GaussianSpec, Problem, UniformSpec
 
 # Keyword-only parameters the irregular engine forwards unchanged to the
 # per-channel recursive analyze() calls. verbose is excluded:
@@ -81,28 +81,6 @@ _IRREGULAR_KWARGS = (
     "keep_replicates",
 )
 
-# A truncated Gaussian is treated as effectively unbounded, and so kept on the
-# Hermite basis, when both of its bounds sit at least this many standard
-# deviations from the mean. Below the threshold the truncated measure differs
-# enough from the standard normal that Hermite polynomials are no longer
-# orthogonal against it.
-#
-# M12: this gate and the order cap below must be calibrated at the same
-# width. Measured max |G - I| for orthonormalised He_0..He_P under a
-# truncated N(0, 1) at |z| = 5.0: 1.5e-3 (P=3), 3.1e-2 (P=5), 2.0e-1 (P=7) --
-# large enough that a response with its variance concentrated in a degree-7
-# mode returned S1 that missed the true split by 0.05 with no warning. At
-# |z| = 7.03, the width used below, the same defects are 4.0e-8 (P=3),
-# 2.8e-5 (P=6), 9.5e-3 (P=10): negligible up to the order cap this module
-# enforces.
-_WIDE_TRUNCATION_Z = 7.0
-
-# Above this polynomial degree the Hermite Gram defect against even a very wide
-# truncated normal stops being negligible, so Legendre is the safer basis.
-# Measured max |G - I| for orthonormalised He_0..He_P against the truncated
-# normal at |z| = 7.03: 4.0e-8 (P=3), 2.8e-5 (P=6), 9.5e-3 (P=10).
-_MAX_HERMITE_ORDER_UNDER_TRUNCATION = 7
-
 # Fewest rows the fit can still run on after ``on_invalid="drop"`` removed
 # some. Two is the floor of the arithmetic itself: a sample variance, which
 # every index divides by, is undefined below it. `_auto_order` never drops
@@ -112,78 +90,23 @@ _MAX_HERMITE_ORDER_UNDER_TRUNCATION = 7
 _MIN_ROWS = 2
 
 
-def _truncated_gaussian_is_wide(
-    lo: float | None, hi: float | None, mean: float, std: float
-) -> bool:
-    """Decide whether a truncated Gaussian is wide enough to stay on Hermite.
-
-    The test uses the standardized bound ``|z| = |bound - mean| / std``. Both
-    declared sides must sit at least ``_WIDE_TRUNCATION_Z`` standard deviations
-    out. A one-sided truncation is judged by its bounded side alone.
-
-    Args:
-        lo: Lower truncation bound, or ``None`` when the side is open.
-        hi: Upper truncation bound, or ``None`` when the side is open.
-        mean: Marginal mean.
-        std: Marginal standard deviation.
-
-    Returns:
-        ``True`` when every declared bound is at least ``_WIDE_TRUNCATION_Z``
-        standardized units from the mean.
-    """
-    z = [abs(bound - mean) / std for bound in (lo, hi) if bound is not None]
-    return bool(z) and min(z) >= _WIDE_TRUNCATION_Z
-
-
-def _order_forced_legendre(problem: Problem, order: int) -> list[str]:
-    """Name the inputs that a high order moves from Hermite to Legendre.
-
-    A wide truncated Gaussian stays on Hermite while the order is at most
-    ``_MAX_HERMITE_ORDER_UNDER_TRUNCATION``. Above that cap it goes through
-    its CDF onto Legendre, which has to approximate the steep inverse normal
-    CDF and fits worse. Only the order causes this switch, which is why it
-    deserves a warning. A narrow truncation moves to Legendre at any order
-    and is not reported.
-
-    Args:
-        problem: Problem whose ``input_specs`` decide the per-dimension map.
-        order: Effective maximum polynomial degree of the expansion.
-
-    Returns:
-        Names of the inputs that the order alone moved to Legendre.
-    """
-    if order <= _MAX_HERMITE_ORDER_UNDER_TRUNCATION:
-        return []
-    names = []
-    for name, spec in zip(problem.names, problem.input_specs, strict=True):
-        if isinstance(spec, CategoricalSpec | UniformSpec):
-            continue
-        if spec.low is None and spec.high is None:
-            continue
-        std = math.sqrt(float(spec.variance))
-        if _truncated_gaussian_is_wide(spec.low, spec.high, spec.mean, std):
-            names.append(name)
-    return names
-
-
-def _map_to_reference(X: Array, problem: Problem, order: int) -> tuple[Array, tuple[str, ...]]:
+def _map_to_reference(
+    X: Array, problem: Problem, order: int
+) -> tuple[Array, tuple[str | TruncatedFamily, ...]]:
     """Map physical inputs to the orthogonal polynomial reference domain.
 
     This is the Wiener-Askey rule. Uniform inputs use Legendre, mapped to
     [-1, 1]. Untruncated Gaussian inputs use Hermite, standardized to
     N(0, 1).
 
-    A truncated Gaussian picks its basis from how tight the truncation is.
-    A narrow truncation is a genuinely different measure, so the input goes
-    through its truncated CDF and onto Legendre. A wide truncation keeps
-    Hermite. Wide means every declared bound sits at least
-    ``_WIDE_TRUNCATION_Z`` standard deviations from the mean, which is almost
-    the standard normal. Hermite is both cheaper and far more accurate there,
-    because the Legendre route has to approximate the steep inverse normal
-    CDF with low-order polynomials, and that measurably degrades the fit.
-    Requesting an order above ``_MAX_HERMITE_ORDER_UNDER_TRUNCATION`` forces
-    Legendre again, because the Hermite Gram defect against the truncated
-    measure grows with degree.
+    A truncated Gaussian has no classical family, so it gets the orthonormal
+    polynomials of its own measure. The input is standardised by the mean and
+    standard deviation of the truncated distribution, and the recurrence comes
+    from :func:`jaxgsa.pce._engine.truncated_gaussian_family`. The basis is
+    exactly orthonormal for every truncation width and every order. The two
+    older routes were not. Raw Hermite polynomials lose orthogonality against a
+    truncated normal as the degree grows, and the Legendre route through the
+    truncated CDF has to approximate the steep inverse normal CDF.
 
     Args:
         X: Inputs in physical units, shape ``(N, D)``.
@@ -192,16 +115,48 @@ def _map_to_reference(X: Array, problem: Problem, order: int) -> tuple[Array, tu
 
     Returns:
         Tuple of the reference-domain inputs, shape ``(N, D)``, and a
-        length-``D`` tuple of ``"uniform"`` / ``"gaussian"`` tags telling
-        ``build_design_matrix`` which 1-D polynomial family each dimension
-        needs.
+        length-``D`` tuple of tags telling ``build_design_matrix`` which 1-D
+        polynomial family each dimension needs: ``"uniform"``,
+        ``"gaussian"``, or a :class:`~jaxgsa.pce._engine.TruncatedFamily`.
     """
     if problem.n_params < GROUPED_MIN_D:
         return _map_by_column(X, problem, order)
     return _map_by_group(X, problem, order)
 
 
-def _map_by_column(X: Array, problem: Problem, order: int) -> tuple[Array, tuple[str, ...]]:
+def _gaussian_standardisation(
+    spec: GaussianSpec, order: int
+) -> tuple[float, float, str | TruncatedFamily]:
+    """Find the centre, scale and polynomial family of a Gaussian input.
+
+    The values are host floats computed in double precision, so a column is
+    mapped by ``(x - centre) / scale`` in whatever dtype ``x`` has.
+
+    Args:
+        spec: A Gaussian input spec, truncated or not.
+        order: Effective maximum polynomial degree of the expansion.
+
+    Returns:
+        ``(centre, scale, family)``. An untruncated input gives its mean, its
+        standard deviation and ``"gaussian"``.
+    """
+    mean = spec.mean
+    # math, not jnp: the standard deviation is a property of the declared
+    # marginal, so it must stay a host float. Under `jit` a `jnp` call on
+    # it returns a tracer, and `float()` on a tracer raises -- which is
+    # what made the reference map untraceable for a Gaussian input.
+    std = math.sqrt(float(spec.variance))
+    if spec.low is None and spec.high is None:
+        return mean, std, "gaussian"
+    a = -math.inf if spec.low is None else (spec.low - mean) / std
+    b = math.inf if spec.high is None else (spec.high - mean) / std
+    mean_t, std_t, family = truncated_gaussian_family(a, b, order)
+    return mean + std * mean_t, std * std_t, family
+
+
+def _map_by_column(
+    X: Array, problem: Problem, order: int
+) -> tuple[Array, tuple[str | TruncatedFamily, ...]]:
     """Map physical inputs to the reference domain, one column at a time.
 
     See :func:`_map_to_reference` for the rule and why this loop is kept for
@@ -217,8 +172,7 @@ def _map_by_column(X: Array, problem: Problem, order: int) -> tuple[Array, tuple
     """
     D = problem.n_params
     cols = []
-    input_types: list[str] = []
-    hermite_safe_order = order <= _MAX_HERMITE_ORDER_UNDER_TRUNCATION
+    input_types: list[str | TruncatedFamily] = []
     for d in range(D):
         spec = problem.input_specs[d]
         if isinstance(spec, CategoricalSpec):
@@ -232,38 +186,16 @@ def _map_by_column(X: Array, problem: Problem, order: int) -> tuple[Array, tuple
             input_types.append("uniform")
             continue
 
-        mean, lo, hi = spec.mean, spec.low, spec.high
-        # math, not jnp: the standard deviation is a property of the declared
-        # marginal, so it must stay a host float. Under `jit` a `jnp` call on
-        # it returns a tracer, and `float()` on a tracer raises -- which is
-        # what made the reference map untraceable for a Gaussian input.
-        std = math.sqrt(float(spec.variance))
-        truncated = lo is not None or hi is not None
-        if truncated and not (
-            hermite_safe_order and _truncated_gaussian_is_wide(lo, hi, mean, std)
-        ):
-            a = -np.inf if lo is None else (lo - mean) / std
-            b = np.inf if hi is None else (hi - mean) / std
-            u = _truncnorm_cdf((X[:, d] - mean) / std, a, b)
-            # The clip keeps u strictly inside (0, 1), so a sample at or
-            # beyond a truncation bound stays distinguishable from the bound
-            # itself. In float32 its upper half did nothing at all --
-            # ``1 - UNIT_CLIP`` is exactly 1.0 there -- so the bound is
-            # brought inside u's own dtype instead. The lower bound stays at
-            # UNIT_CLIP, which float32 represents exactly; widening it for
-            # symmetry would discard information and move numbers for
-            # nothing. See unit_clip_bounds.
-            u = jnp.clip(u, *unit_clip_bounds(UNIT_CLIP, u.dtype))
-            cols.append(2.0 * u - 1.0)
-            input_types.append("uniform")
-        else:
-            cols.append((X[:, d] - mean) / std)
-            input_types.append("gaussian")
+        centre, scale, family = _gaussian_standardisation(spec, order)
+        cols.append((X[:, d] - centre) / scale)
+        input_types.append(family)
 
     return jnp.column_stack(cols), tuple(input_types)
 
 
-def _map_by_group(X: Array, problem: Problem, order: int) -> tuple[Array, tuple[str, ...]]:
+def _map_by_group(
+    X: Array, problem: Problem, order: int
+) -> tuple[Array, tuple[str | TruncatedFamily, ...]]:
     """Map physical inputs to the reference domain, one op per map family.
 
     Args:
@@ -278,19 +210,16 @@ def _map_by_group(X: Array, problem: Problem, order: int) -> tuple[Array, tuple[
     X = jnp.asarray(X)
     dtype = X.dtype if jnp.issubdtype(X.dtype, jnp.floating) else jnp.result_type(X.dtype, float)
     X = X.astype(dtype)
-    hermite_safe_order = order <= _MAX_HERMITE_ORDER_UNDER_TRUNCATION
 
     # Columns are grouped by map and each group goes through one broadcast op,
     # so the number of eager dispatches does not grow with D. Per-column
     # constants are computed on the host in double precision and cast to the
     # column dtype, which is what a Python-float operand becomes inside a
     # single-column op, so, run eagerly, the result is bit-identical to a column loop.
-    input_types: list[str] = ["gaussian"] * D
+    input_types: list[str | TruncatedFamily] = ["gaussian"] * D
     uniform: list[int] = []
-    standard: list[int] = []  # Hermite: (x - mean) / std
-    lower: list[int] = []  # truncated CDF -> Legendre, interval not in the upper tail
-    upper: list[int] = []  # truncated CDF -> Legendre, interval in the upper tail
-    consts: dict[int, tuple[float, ...]] = {}
+    standard: list[int] = []  # Gaussian, truncated or not: (x - centre) / scale
+    consts: dict[int, tuple[float, float]] = {}
     for d in range(D):
         spec = problem.input_specs[d]
         if isinstance(spec, CategoricalSpec):
@@ -305,52 +234,22 @@ def _map_by_group(X: Array, problem: Problem, order: int) -> tuple[Array, tuple[
             consts[d] = (spec.low, spec.high - spec.low)
             continue
 
-        mean, lo, hi = spec.mean, spec.low, spec.high
-        # math, not jnp: the standard deviation is a property of the declared
-        # marginal, so it must stay a host float. Under `jit` a `jnp` call on
-        # it returns a tracer, and `float()` on a tracer raises -- which is
-        # what made the reference map untraceable for a Gaussian input.
-        std = math.sqrt(float(spec.variance))
-        truncated = lo is not None or hi is not None
-        if truncated and not (
-            hermite_safe_order and _truncated_gaussian_is_wide(lo, hi, mean, std)
-        ):
-            a = -np.inf if lo is None else (lo - mean) / std
-            b = np.inf if hi is None else (hi - mean) / std
-            (upper if a > 0.0 else lower).append(d)
-            input_types[d] = "uniform"
-            consts[d] = (mean, std, a, b)
-        else:
-            standard.append(d)
-            consts[d] = (mean, std)
+        centre, scale, family = _gaussian_standardisation(spec, order)
+        standard.append(d)
+        input_types[d] = family
+        consts[d] = (centre, scale)
 
-    def column_consts(group: list[int], n: int) -> list[Array]:
-        values = np.asarray([consts[d][:n] for d in group], dtype=np.float64)
-        return [jnp.asarray(values[:, j], dtype=dtype) for j in range(n)]
+    def column_consts(group: list[int]) -> list[Array]:
+        values = np.asarray([consts[d] for d in group], dtype=np.float64)
+        return [jnp.asarray(values[:, j], dtype=dtype) for j in range(2)]
 
     parts: list[tuple[list[int], Array]] = []
     if uniform:
-        low, width = column_consts(uniform, 2)
+        low, width = column_consts(uniform)
         parts.append((uniform, 2.0 * (X[:, uniform] - low) / width - 1.0))
     if standard:
-        mean, std = column_consts(standard, 2)
-        parts.append((standard, (X[:, standard] - mean) / std))
-    for group in (lower, upper):
-        if group:
-            mean, std = column_consts(group, 2)
-            a_host = np.asarray([consts[d][2] for d in group], dtype=np.float64)
-            b_host = np.asarray([consts[d][3] for d in group], dtype=np.float64)
-            u = _truncnorm_cdf((X[:, group] - mean) / std, a_host, b_host)
-            # The clip keeps u strictly inside (0, 1), so a sample at or
-            # beyond a truncation bound stays distinguishable from the bound
-            # itself. In float32 its upper half did nothing at all --
-            # ``1 - UNIT_CLIP`` is exactly 1.0 there -- so the bound is
-            # brought inside u's own dtype instead. The lower bound stays at
-            # UNIT_CLIP, which float32 represents exactly; widening it for
-            # symmetry would discard information and move numbers for
-            # nothing. See unit_clip_bounds.
-            u = jnp.clip(u, *unit_clip_bounds(UNIT_CLIP, u.dtype))
-            parts.append((group, 2.0 * u - 1.0))
+        centre, scale = column_consts(standard)
+        parts.append((standard, (X[:, standard] - centre) / scale))
 
     return _in_column_order(parts, D), tuple(input_types)
 
@@ -441,7 +340,7 @@ class _PCEFit(NamedTuple):
 
 
 @lru_cache(maxsize=32)
-def _get_streamed_steps(input_types: tuple[str, ...], order: int):
+def _get_streamed_steps(input_types: tuple[str | TruncatedFamily, ...], order: int):
     """Build and cache the two jitted per-batch steps of the streamed fit.
 
     The streamed fit used to rebuild the design block and run its
@@ -510,7 +409,7 @@ def _fit_pce_streamed(
     X_ref: Array,
     Y_flat: Array,
     multi_index: np.ndarray,
-    input_types: tuple[str, ...],
+    input_types: tuple[str | TruncatedFamily, ...],
     order: int,
     ridge: float,
     batch_size: int | None,
@@ -1306,18 +1205,6 @@ def analyze(
             skip_file_prefixes=(PACKAGE_DIR,),
             category=JaxgsaWarning,
         )
-    switched = _order_forced_legendre(problem, fit.order)
-    if switched:
-        warnings.warn(
-            f"{namespace}: order {fit.order} is above {_MAX_HERMITE_ORDER_UNDER_TRUNCATION}, "
-            f"so the truncated Gaussian input(s) {switched} use a Legendre basis "
-            "through the truncated CDF instead of Hermite. That basis fits a "
-            "Gaussian-shaped input less accurately and can degrade the indices. "
-            f"Use order <= {_MAX_HERMITE_ORDER_UNDER_TRUNCATION} to keep Hermite.",
-            skip_file_prefixes=(PACKAGE_DIR,),
-            category=JaxgsaWarning,
-        )
-
     # Sobol indices are extracted analytically from the coefficients
     # (Sudret 2008), batched over all slices: no extra sampling, no loops.
     # Per-slice LOO RMSE (cv_rmse) and in-sample RMSE are goodness-of-fit

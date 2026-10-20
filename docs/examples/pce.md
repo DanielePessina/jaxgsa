@@ -253,8 +253,9 @@ of `multi_index` gives the polynomial degree of term `t` in each dimension, so
 `coefficients[1:]` and grouping by which columns of `multi_index[1:]` are
 non-zero is exactly how the indices above were computed.
 
-The basis follows the marginal. Uniform and truncated-Gaussian inputs get
-Legendre polynomials, untruncated Gaussian inputs get Hermite. You do not
+The basis follows the marginal. Uniform inputs get Legendre polynomials,
+untruncated Gaussian inputs get Hermite, and a truncated Gaussian input gets
+the orthonormal polynomials of its own truncated distribution. You do not
 choose it.
 
 ## Emulation

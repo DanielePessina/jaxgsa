@@ -37,6 +37,20 @@
 - `pce.analyze` with `n_bootstrap > 0` warns when some resamples fit a
   near-singular design, and gives the count. The rank check ran on the full
   sample only.
+- A truncated Gaussian input now gets the orthonormal polynomials of its own
+  truncated distribution, at every truncation width and every order. This
+  replaces two routes that were not exact. Raw Hermite polynomials lose
+  orthogonality against a truncated normal as the degree grows. The Legendre
+  route through the truncated CDF has to approximate the steep inverse normal
+  CDF. The order-7 switch between the two, and its warning, are gone. On a
+  wide truncation (+-8 sigma) at order 8, S1 went from 0.7141 (true 0.7273)
+  with `cv_rmse` 0.23, to 0.7273 with `cv_rmse` 5e-6. For a narrow truncation,
+  `cv_rmse` of a cubic response fell from 0.052 to 2e-6. The basis is built on
+  the host in float64 and evaluated by a three-term recurrence, so it is
+  accurate in float32 too. Narrow (0.1 sigma wide) and far one-sided (z >= 3,
+  z >= 38) truncations give exact indices. This also holds for `shapley` with
+  the PCE backend. Untruncated Gaussian and uniform inputs are bitwise
+  unchanged.
 
 ### Changed values
 
@@ -44,6 +58,12 @@
   from the PCE backend. Ishigami, N = 1000, orders 3, 5 and 7: at most 4.2e-7
   in float32 and 6.7e-16 in float64, for S1, ST, S2, `cv_rmse` and the
   bootstrap intervals. Fits that 1.1.2 refused in float32 now succeed.
+- PCE values change for every truncated Gaussian input, and so do Shapley
+  values from the PCE backend. The old S1 error on a polynomial response was
+  4e-3 to 5e-2 on the Legendre route (every truncation narrower than 7 sigma,
+  and every order above 7). It is now 1e-12 in float64 and below 1e-6 in
+  float32. A truncation of 7 sigma or wider at order 7 or lower moves by at
+  most the old Hermite defect, 2e-4.
 
 ### Performance
 
