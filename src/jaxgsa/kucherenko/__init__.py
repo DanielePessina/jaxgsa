@@ -38,9 +38,12 @@ Gating: ``sample`` conditions on the problem's declared dependence, either a
 ``problem.correlation`` or a custom sampler declared with
 ``problem.with_sampler(f, sampler_dimension=k)``, so it is exempt from the
 correlated-design refusal that ``sobol``, ``morris``, and ``efast`` apply. It
-refuses categorical parameters. The copula conditionals need a continuous
-marginal CDF on every coordinate. Use :mod:`jaxgsa.optimal_transport` or
-:mod:`jaxgsa.borgonovo` for categorical inputs.
+refuses categorical parameters unless the problem has a custom sampler. The
+copula conditionals need a continuous marginal CDF on every coordinate, but a
+custom sampler draws every conditional itself, so it can stratify on a
+categorical input such as sex. Without one, use
+:mod:`jaxgsa.optimal_transport` or :mod:`jaxgsa.borgonovo` for categorical
+inputs.
 
 A custom sampler maps uniform points to physical input rows. It receives exactly
 three call shapes: joint draws (``fixed_indices=()``), draws that keep ``x_i``

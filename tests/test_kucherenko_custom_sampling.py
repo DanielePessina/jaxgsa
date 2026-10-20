@@ -201,3 +201,47 @@ def test_custom_time_resolved_and_irregular_outputs_keep_dependence_metadata() -
         assert isinstance(channel, kucherenko.KucherenkoResult)
         assert channel.dependence == "custom"
     np.testing.assert_allclose(irregular.channels["a"].S1, regular.S1[:, :1], atol=1e-6)
+
+
+def _sex_sampler(
+    u: np.ndarray,
+    *,
+    conditioning_rows: np.ndarray | None = None,
+    fixed_indices: tuple[int, ...] = (),
+) -> np.ndarray:
+    """sex ~ Bernoulli(0.5), x | sex ~ N(sex, 1): exact joint and conditionals."""
+    out = np.zeros((u.shape[0], 2)) if conditioning_rows is None else conditioning_rows.copy()
+    if 0 not in fixed_indices:
+        if 1 in fixed_indices:
+            # Posterior of sex given x: odds phi(x - 1) / phi(x) = exp(x - 1/2).
+            p1 = 1.0 / (1.0 + np.exp(0.5 - out[:, 1]))
+            out[:, 0] = (u[:, 0] < p1).astype(float)
+        else:
+            out[:, 0] = (u[:, 0] >= 0.5).astype(float)
+    if 1 not in fixed_indices:
+        out[:, 1] = out[:, 0] + ndtri(np.clip(u[:, 1], 1e-15, 1 - 1e-15))
+    return out
+
+
+SEX_PROBLEM = Problem.from_dict(
+    {
+        "sex": {"dist": "categorical", "probs": [0.5, 0.5]},
+        "x": {"dist": "gaussian", "mean": 0.5, "variance": 1.25},
+    }
+)
+
+
+def test_categorical_input_is_accepted_with_a_custom_sampler() -> None:
+    """With Y = x: S1(sex) = Var(sex) / Var(Y) = 0.25 / 1.25, ST(x) = 1 / 1.25, ST(sex) = 0."""
+    problem = SEX_PROBLEM.with_sampler(_sex_sampler, sampler_dimension=2)
+    design = kucherenko.sample(problem, base_n=2**14, seed=3, verbose=False)
+    result = kucherenko.analyze(design, jnp.asarray(design.samples[:, 1]), verbose=False)
+    assert isinstance(result, kucherenko.KucherenkoResult)
+    np.testing.assert_allclose(result.S1[0], 0.2, atol=0.02)
+    np.testing.assert_allclose(result.ST, [0.0, 0.8], atol=0.02)
+    assert set(np.unique(design.samples[:, 0])) == {0.0, 1.0}
+
+
+def test_categorical_input_without_a_custom_sampler_is_still_refused() -> None:
+    with pytest.raises(ValueError, match="categorical"):
+        kucherenko.sample(SEX_PROBLEM, base_n=64, seed=0, verbose=False)

@@ -4,6 +4,10 @@
 
 Pre-release for testing. Some fixes change index values where the old values were wrong. See Fixed and Changed values.
 
+### Added
+
+- `kucherenko.sample` now accepts categorical inputs when the problem has a custom sampler (`problem.with_sampler`). The sampler draws every conditional itself, so it can stratify on an input such as sex. Measured on a sex-stratified NLME case with exact values: all 40 indices within 1.5 standard errors over 8 seeds. Without a custom sampler a categorical input still raises.
+
 ### Fixed
 
 - `hdmr.analyze` with `order >= 2` no longer counts the same leftover once per

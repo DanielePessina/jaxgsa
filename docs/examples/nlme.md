@@ -227,5 +227,9 @@ where every index has a closed form, the four recipes gave:
   the population the copula describes.
 - **Random effects must be independent of the covariates.** This is the usual
   NLME assumption.
-- **Categorical covariates** such as sex need a custom sampler for recipe 3.
-  See [categorical inputs](/examples/categorical-inputs).
+- **Categorical covariates** such as sex need a custom sampler in recipes 1
+  and 3, declared with `problem.with_sampler(f, sampler_dimension=k)`. The
+  sampler draws the covariates jointly and given any fixed subset, for example
+  sex first and then age and weight from a Gaussian per sex. The Gaussian
+  copula alone cannot condition on a categorical input, so `kucherenko`
+  refuses a categorical input without a custom sampler.

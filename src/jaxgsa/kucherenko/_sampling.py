@@ -304,8 +304,9 @@ def sample(
             given, if ``base_n`` is not a power of two, if ``subsets`` is not
             ``"singletons"`` or ``"all"``, if
             ``subsets="all"`` and the problem has more than 12 parameters, if
-            the problem has fewer than two parameters or any
-            categorical parameter, if ``n_samples < 2`` or ``base_n < 2``, if a ``seed`` is
+            the problem has fewer than two parameters, if it has a
+            categorical parameter and no custom sampler, if
+            ``n_samples < 2`` or ``base_n < 2``, if a ``seed`` is
             given with ``scramble=False`` (the unscrambled sequence is
             deterministic, so the seed would do nothing), or if a custom
             sampler returns invalid rows.
@@ -313,7 +314,10 @@ def sample(
     check_seed(seed, "jaxgsa.kucherenko.sample")
     check_budget_choice(n_samples, base_n, "jaxgsa.kucherenko.sample")
     check_seed_scramble(scramble, seed, "jaxgsa.kucherenko.sample")
-    _raise_categorical_design(problem, "jaxgsa.kucherenko.sample")
+    # The Gaussian copula cannot condition on a categorical input. A custom
+    # sampler draws every conditional itself, so it can.
+    if problem.dependence != "custom":
+        _raise_categorical_design(problem, "jaxgsa.kucherenko.sample")
     D = problem.n_params
     if D < 2:
         raise ValueError(f"Kucherenko indices need at least 2 parameters, got {D}")
