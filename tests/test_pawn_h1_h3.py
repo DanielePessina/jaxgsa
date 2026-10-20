@@ -33,6 +33,7 @@ def test_quantile_interval_is_centred_on_the_estimate() -> None:
             verbose=False,
             keep_replicates=True,
         )
+    assert isinstance(r, pawn.PAWNResult)
     assert r.ci is not None and r.ci.replicates is not None
     draws = np.asarray(r.ci.replicates["pawn"])
     point = np.asarray(r.pawn)

@@ -341,7 +341,8 @@ def _count_cumsum(oh: Array) -> Array:
         oh: 0/1 flags, shape ``(N, ...)``, in a float dtype.
 
     Returns:
-        Cumulative counts, same shape as ``oh``, dtype int32.
+        Cumulative counts, same shape as ``oh``, an integer dtype
+        (int32, or int64 when x64 promotes the block-total sum).
     """
     n = oh.shape[0]
     b = min(_CUMSUM_BLOCK, n)
