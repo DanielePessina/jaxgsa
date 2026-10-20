@@ -1,8 +1,8 @@
 # Changelog
 
-## 1.2.0 (unreleased)
+## 1.2.0b1 (2026-10-20, pre-release)
 
-Some fixes change index values where the old values were wrong. See Fixed.
+Pre-release for testing. Some fixes change index values where the old values were wrong. See Fixed and Changed values.
 
 ### Fixed
 
