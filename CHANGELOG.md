@@ -6,6 +6,15 @@ Some fixes change index values where the old values were wrong. See Fixed.
 
 ### Fixed
 
+- `vkoga.analyze` now raises a `ValueError` when an input column of `X` is
+  constant, equal to another column, or a linear combination of earlier
+  columns (same check as `pce` and `hdmr`). Before, a duplicated input gave
+  `S1` 0.86 against a true 0.79, and a constant input gave `ST` 0.18 against
+  a true 0. Duplicate rows are still allowed.
+- `vkoga` with independent inputs now sets `S_U = S_TC`, so `S_C` is exactly
+  0. Before, the fitted component functions left a spurious `S_C` up to
+  8e-3 (Ishigami, `x2`) and an `S_IU` of 0.012 where the exact value is 0.
+  `S_TC` and `S_TU` do not change.
 - `pce`, and `shapley` with the PCE backend, now raise a `ValueError` when an
   input is a linear combination of other inputs, such as `c = 1 - a`,
   `c = 2 * a` or `c = a + b`. 1.1.2 caught only exact copies. An affine copy
@@ -75,6 +84,16 @@ Some fixes change index values where the old values were wrong. See Fixed.
 
 ### Changed values
 
+- `vkoga` with correlated inputs and a non-Gaussian marginal (uniform and
+  other Legendre cases) now fits its component functions at degree 10, not 6.
+  This removes a truncation bias in `S_U`, `S_C` and `S_IU` (Ishigami with
+  rho = 0.5, `x2` `S_C` 0.0437 to 0.0354, reference 0.0359). The fit falls
+  back to degree 6 when `n_variance` is below two rows per coefficient, and
+  warns when even that is under-determined. Gaussian marginals do not change.
+- `vkoga` cross-validation compiles once per data shape, not once per
+  dataset. In float32 the chosen `gamma` and `ridge` can differ from 1.1.x on
+  many datasets, because the old choice was rounding noise. In float64 they
+  do not change.
 - The PCE fit now uses QR (see Fixed). Index values change only by float
   rounding, listed below. The solver is also slower (see Performance).
 - PCE values change by float rounding in every fit, and so do Shapley values
@@ -94,6 +113,8 @@ Some fixes change index values where the old values were wrong. See Fixed.
 
 ### Performance
 
+- `vkoga` cross-validation no longer recompiles for each new dataset. This
+  saves 0.5 to 1.0 s per analysis, about 30 to 40 percent of the search time.
 - The PCE fit is slower, because QR does more work than the normal
   equations. Steady-state `analyze` takes 2 to 3 times longer at large sizes:
   about 270 ms to 800 ms for D = 6, order 6, N = 20000 (924 terms; 3 to 3.5

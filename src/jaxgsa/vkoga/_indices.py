@@ -74,9 +74,15 @@ from jaxgsa.problem import GaussianSpec, Problem
 
 # Degree of the marginal basis used to recover the first-order component
 # functions f_i. The basis itself depends on each parameter's marginal (see
-# _component_basis_kinds). Six terms capture the smooth univariate shapes a
-# kernel surrogate produces without making the joint least squares ill-posed.
-_COMPONENT_DEGREE = 6
+# _component_basis_kinds). Degree 6 leaves a truncation bias: on independent
+# Ishigami it gave S_C = 8e-3 where the exact value is 0, and degree 10 brings
+# that to 6e-5. Hermite stays at 6, because higher Hermite degrees are unstable
+# on non-linear Gaussian models (degree 16 gave S_U 0.0037 against 0.020).
+_LEGENDRE_DEGREE = 10
+_HERMITE_DEGREE = 6
+# Legendre falls back to this degree when the sample is too small for the
+# wider fit (fewer than two rows per fitted coefficient).
+_LEGENDRE_FALLBACK_DEGREE = 6
 
 # Largest dimension a scipy Sobol' engine has direction numbers for. The
 # inner draw in _total_uncorrelated_and_conditional uses ``draws.self_dimension``
@@ -254,7 +260,15 @@ def estimate_correlated_indices(
     # propagates that honestly, matching the convention in hdmr._fit._get_stats_step.
     safe_variance = np.where(variance > 0.0, variance, np.nan)
 
-    coefficients = _fit_component_functions(U_var, Z_var, Y_var, basis_kinds)
+    # Under independence f_i = E(Y|X_i) - E(Y) and E(f_i|X_-i) = 0, so
+    # S_U = S_TC exactly. The fit and the f_hat accumulation are skipped.
+    independent = problem.dependence == "independent"
+    degrees = _component_degrees(n_variance, basis_kinds) if not independent else ()
+    coefficients = (
+        None
+        if independent
+        else _fit_component_functions(U_var, Z_var, Y_var, basis_kinds, degrees)
+    )
 
     n_slices = Y_var.shape[1]
     S_TC = np.empty((n_slices, D), dtype=np.float64)
@@ -290,8 +304,9 @@ def estimate_correlated_indices(
                 draws=draws,
                 index=i,
                 queue=queue,
-                component=coefficients[:, i, :],
+                component=None if coefficients is None else coefficients[:, i, :],
                 basis_kind=basis_kinds[i],
+                degree=0 if independent else degrees[i],
                 n_outer=n_outer,
                 n_inner=n_inner,
                 n_slices=n_slices,
@@ -309,14 +324,17 @@ def estimate_correlated_indices(
         # itself that X_-i already determines through the correlation. V(f_i)
         # is a marginal quantity, so it comes from the joint variance sample
         # rather than from the nested conditional draws.
+        if coefficients is None:
+            S_U[:, i] = S_TC[:, i]
+            continue
         value = _component_value(U_var[:, i], Z_var[:, i], basis_kinds[i])
-        f_i = _evaluate_component(value, coefficients[:, i, :], basis_kinds[i])
+        f_i = _evaluate_component(value, coefficients[:, i, :], basis_kinds[i], degrees[i])
         S_U[:, i] = np.maximum(f_i.var(axis=0) - conditional_component_var, 0.0)
 
     S_TC /= safe_variance[:, None]
     S_TU /= safe_variance[:, None]
     S_U /= safe_variance[:, None]
-    S_U = _clip_independent_part(S_U, S_TU, param_names)
+    S_U = _clip_independent_part(S_U, S_TU, param_names, independent=independent)
     return CorrelatedIndices(
         S_TC=S_TC,
         S_TU=S_TU,
@@ -331,7 +349,11 @@ def estimate_correlated_indices(
 
 
 def _clip_independent_part(
-    S_U: np.ndarray, S_TU: np.ndarray, param_names: Sequence[str] | None = None
+    S_U: np.ndarray,
+    S_TU: np.ndarray,
+    param_names: Sequence[str] | None = None,
+    *,
+    independent: bool = False,
 ) -> np.ndarray:
     """Hold ``S_U <= S_TU`` so ``S_IU`` cannot go negative, and report the clip.
 
@@ -341,7 +363,7 @@ def _clip_independent_part(
     definitional invariant of the split.
 
     The two indices come from different estimators, and only ``S_TU`` sees the
-    surrogate directly. On a model with interactions the degree-6 additive
+    surrogate directly. On a model with interactions the additive
     projection ``f_i`` absorbs interaction variance that it cannot represent as
     a function of ``X_i`` alone, so under a correlated measure the raw ``S_U``
     can exceed ``S_TU``. Clipping restores the invariant. A clip wider than
@@ -356,6 +378,8 @@ def _clip_independent_part(
         S_TU: Total uncorrelated index normalised by ``V(Y)``, shape ``(S, D)``.
         param_names: Names to report clipped parameters by. ``None`` falls
             back to column positions.
+        independent: ``True`` when ``S_U`` is ``S_TC`` (independent inputs),
+            which changes the warning text.
 
     Returns:
         ``S_U`` clipped elementwise to at most ``S_TU``.
@@ -372,6 +396,16 @@ def _clip_independent_part(
         # Name the parameters like the zero-variance warning does; fall back
         # to column positions when the caller has no names to give.
         params = [param_names[j] for j in cols] if param_names is not None else cols
+        if independent:
+            warnings.warn(
+                f"jaxgsa.vkoga: S_TC exceeded S_TU by up to {float(excess[flagged].max()):.3g} "
+                f"of the output variance for parameter(s) {params}; S_U was clipped to S_TU. "
+                "With independent inputs the two should agree, so the gap is estimator "
+                "noise. Raise n_outer and n_inner.",
+                stacklevel=4,
+                category=JaxgsaWarning,
+            )
+            return np.minimum(S_U, S_TU)
         warnings.warn(
             f"jaxgsa.vkoga: S_U exceeded S_TU by up to {float(excess[flagged].max()):.3g} "
             f"of the output variance for parameter(s) {params}; S_U was clipped to S_TU so "
@@ -476,8 +510,47 @@ def _component_value(u: np.ndarray, z: np.ndarray, kind: str) -> np.ndarray:
     return z if kind == "hermite" else u
 
 
+def _component_degrees(n_variance: int, basis_kinds: Sequence[str]) -> tuple[int, ...]:
+    """Pick each parameter's component-fit degree for the sample size.
+
+    Legendre parameters use degree 10 when ``n_variance`` holds at least two
+    rows per fitted coefficient, and degree 6 otherwise. Hermite parameters
+    always use degree 6.
+
+    Args:
+        n_variance: Rows in the component-fit sample.
+        basis_kinds: Per-parameter basis choice, length ``D``.
+
+    Returns:
+        Length-``D`` tuple of degrees.
+
+    Warns:
+        JaxgsaWarning: If the least squares is under-determined even at
+            degree 6.
+    """
+    wide = tuple(_HERMITE_DEGREE if k == "hermite" else _LEGENDRE_DEGREE for k in basis_kinds)
+    if n_variance >= 2 * sum(wide):
+        return wide
+    narrow = tuple(
+        _HERMITE_DEGREE if k == "hermite" else _LEGENDRE_FALLBACK_DEGREE for k in basis_kinds
+    )
+    if n_variance < 2 * sum(narrow):
+        warnings.warn(
+            f"jaxgsa.vkoga: n_variance={n_variance} is below twice the {sum(narrow)} "
+            "coefficients of the component fit, so the fit is under-determined and "
+            "S_U, S_C and S_IU are unreliable. Raise n_variance.",
+            stacklevel=4,
+            category=JaxgsaWarning,
+        )
+    return narrow
+
+
 def _fit_component_functions(
-    U: np.ndarray, Z: np.ndarray, Y: np.ndarray, basis_kinds: Sequence[str]
+    U: np.ndarray,
+    Z: np.ndarray,
+    Y: np.ndarray,
+    basis_kinds: Sequence[str],
+    degrees: Sequence[int],
 ) -> np.ndarray:
     """Fit the additive first-order component functions ``f_i``.
 
@@ -493,26 +566,34 @@ def _fit_component_functions(
         Y: Surrogate outputs, shape ``(N, S)``.
         basis_kinds: Per-parameter basis choice from
             :func:`_component_basis_kinds`, length ``D``.
+        degrees: Per-parameter degree from :func:`_component_degrees`.
 
     Returns:
-        Basis coefficients, shape ``(degree, D, S)``.
+        Basis coefficients, shape ``(max_degree, D, S)``, zero-padded for
+        parameters with a lower degree.
     """
     N, D = U.shape
     columns = []
     for d, kind in enumerate(basis_kinds):
         value = _component_value(U[:, d], Z[:, d], kind)
         basis_fn = _hermite_basis if kind == "hermite" else _legendre_basis
-        columns.append(basis_fn(value, _COMPONENT_DEGREE))
-    basis = np.stack(columns, axis=1)  # (N, D, degree)
-    design = basis.reshape(N, D * _COMPONENT_DEGREE)
+        columns.append(basis_fn(value, degrees[d]))
+    design = np.concatenate(columns, axis=1)  # (N, sum(degrees))
 
     gram = design.T @ design
     gram.flat[:: gram.shape[0] + 1] += _COMPONENT_RIDGE * N
-    coefficients = np.linalg.solve(gram, design.T @ (Y - Y.mean(axis=0)))
-    return coefficients.reshape(D, _COMPONENT_DEGREE, -1).transpose(1, 0, 2)
+    solved = np.linalg.solve(gram, design.T @ (Y - Y.mean(axis=0)))
+    out = np.zeros((max(degrees), D, solved.shape[1]), dtype=np.float64)
+    start = 0
+    for d, degree in enumerate(degrees):
+        out[:degree, d, :] = solved[start : start + degree]
+        start += degree
+    return out
 
 
-def _evaluate_component(value: np.ndarray, coefficients: np.ndarray, kind: str) -> np.ndarray:
+def _evaluate_component(
+    value: np.ndarray, coefficients: np.ndarray, kind: str, degree: int
+) -> np.ndarray:
     """Evaluate one component function ``f_i``.
 
     Args:
@@ -521,12 +602,14 @@ def _evaluate_component(value: np.ndarray, coefficients: np.ndarray, kind: str) 
         coefficients: Coefficients for that parameter, shape ``(degree, S)``.
         kind: ``"hermite"`` or ``"legendre"``, from
             :func:`_component_basis_kinds`.
+        degree: This parameter's degree from :func:`_component_degrees`.
+            ``coefficients`` may be longer; the extra rows are ignored.
 
     Returns:
         Component values, shape ``(..., S)``.
     """
     basis_fn = _hermite_basis if kind == "hermite" else _legendre_basis
-    return basis_fn(value, _COMPONENT_DEGREE) @ coefficients
+    return basis_fn(value, degree) @ coefficients[:degree]
 
 
 def _outer_chunk(n_outer: int, n_inner: int, n_columns: int, batch_size: int | None) -> int:
@@ -738,8 +821,9 @@ def _total_uncorrelated_and_conditional(
     draws: Draws,
     index: int,
     queue: _PredictQueue,
-    component: np.ndarray,
+    component: np.ndarray | None,
     basis_kind: str,
+    degree: int,
     n_outer: int,
     n_inner: int,
     n_slices: int,
@@ -762,9 +846,11 @@ def _total_uncorrelated_and_conditional(
         draws: Joint and conditional draws of the inputs.
         index: Position of the parameter ``X_i`` being resampled.
         queue: Prediction queue for the fitted surrogate.
-        component: Basis coefficients of ``f_i``, shape ``(degree, S)``.
+        component: Basis coefficients of ``f_i``, shape ``(max_degree, S)``,
+            or ``None`` to skip the component accumulation (independent inputs).
         basis_kind: ``"hermite"`` or ``"legendre"``, the basis ``component``
             was fitted in (see :func:`_component_basis_kinds`).
+        degree: Degree used for this parameter's component fit.
         n_outer: Outer (conditioning) sample size.
         n_inner: Inner (conditional) sample size per outer point.
         n_slices: Number of output slices ``S``.
@@ -782,7 +868,7 @@ def _total_uncorrelated_and_conditional(
     outer = draws.joint(sobol_uniforms(n_outer, draws.dimension, seed=_qmc_seed(outer_stream)))
 
     inner_var = np.empty((n_outer, n_slices), dtype=np.float64)
-    f_hat = np.empty((n_outer, n_slices), dtype=np.float64)
+    f_hat = np.zeros((n_outer, n_slices), dtype=np.float64)
     n_columns = draws.self_dimension + 3 * outer.shape[1] + n_slices
     chunk = _outer_chunk(n_outer, n_inner, n_columns, batch_size)
     # A fresh inner block per outer point (see _inner_noise). A single shared
@@ -808,8 +894,12 @@ def _total_uncorrelated_and_conditional(
             # E(f_i | X_-i), averaged over the same inner draws of X_i. Its
             # variance over the outer sample is the correlation-explained part
             # of f_i that Equation (25) removes.
+            if component is None:
+                continue
             u_self = U[:, index].reshape(-1, n_inner)
             value = _component_value(u_self, probit(u_self), basis_kind)
-            f_hat[start:stop] = _evaluate_component(value, component, basis_kind).mean(axis=1)
+            f_hat[start:stop] = _evaluate_component(value, component, basis_kind, degree).mean(
+                axis=1
+            )
 
     return lambda: (inner_var.mean(axis=0), f_hat.var(axis=0))

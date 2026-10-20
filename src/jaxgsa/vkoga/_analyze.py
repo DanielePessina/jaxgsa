@@ -36,7 +36,15 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import apply_batched, resolve_batch_size
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.dependence import Draws, draws_for
-from jaxgsa._core.entry import _user_stacklevel, at_least, bootstrap_checks, prepare, require
+from jaxgsa._core.entry import (
+    _METHOD_ALIAS,
+    _user_stacklevel,
+    at_least,
+    bootstrap_checks,
+    prepare,
+    require,
+)
+from jaxgsa._core.fit_quality import check_degenerate_inputs
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -254,7 +262,9 @@ def analyze(
             of range, if ``key`` is ``None``, if ``on_invalid`` is not one of
             the three policies, or
             if ``on_invalid="raise"`` (the default) and ``X`` or ``Y`` holds a
-            non-finite value.
+            non-finite value, or if an input column of ``X`` is constant,
+            equal to another column, or a linear combination of the columns
+            before it to within rounding error. Duplicate rows are allowed.
         RuntimeError: If every cross-validation score is non-finite. Non-finite
             training data no longer reaches this check; it is now a genuine
             solver failure.
@@ -332,6 +342,12 @@ def analyze(
     seed = _seed_from_key(key)
     assert ctx.X is not None  # a given-data method always passes X to prepare()
     X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
+    # A constant, duplicated or linearly dependent input column is off the
+    # manifold the surrogate is asked to extrapolate to, so its indices come
+    # out wrong with no error. Skipped when non-finite rows were let through
+    # (`on_invalid="propagate"`): the check reads the inputs and needs them finite.
+    if bool(jnp.all(jnp.isfinite(X))):
+        check_degenerate_inputs(_METHOD_ALIAS.get() or "jaxgsa.vkoga", X, problem.names)
     # The clock starts before the hyperparameter search and the greedy fit:
     # for this method the fit is the expensive work, not just the indices.
     t0 = _verbose.tic()
