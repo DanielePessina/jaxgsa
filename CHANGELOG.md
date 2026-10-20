@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0 (unreleased)
+
+### Fixed
+
+- PCE warnings about a reduced order, a poor fit and an overfit now name the
+  function you called. Through `jaxgsa.shapley.analyze` they said
+  `jaxgsa.pce` and pointed at a line inside the package. They now say
+  `jaxgsa.shapley.analyze` and point at your line. Values do not change.
+
 ## 1.1.2
 
 This release fixes bugs and makes several methods faster. Correct index

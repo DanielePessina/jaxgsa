@@ -1246,6 +1246,9 @@ def analyze(
         problem, X, Y, order=order, ridge=ridge, fit_ratio=fit_ratio, batch_size=batch_size
     )
     T, K = fit.coefficients.shape[:2]
+    # Messages name the public entry point the caller used: jaxgsa.shapley
+    # runs this function under its own alias.
+    namespace = _METHOD_ALIAS.get() or "jaxgsa.pce"
     if fit.order < order:
         # The fit is coarser than requested; surface it so callers do not
         # mistake a truncated expansion for the order they asked for. The
@@ -1253,15 +1256,11 @@ def analyze(
         # free of host-side side effects. `effective_order` answers the same
         # question without a fit.
         warnings.warn(
-            f"jaxgsa.pce: PCE order reduced from {order} to {fit.order} to keep the "
+            f"{namespace}: PCE order reduced from {order} to {fit.order} to keep the "
             f"term count within the sample budget (fit_ratio={fit_ratio}, N={X.shape[0]})",
-            stacklevel=2,
+            skip_file_prefixes=(PACKAGE_DIR,),
             category=JaxgsaWarning,
         )
-
-    # Messages name the public entry point the caller used: jaxgsa.shapley
-    # runs this function under its own alias.
-    namespace = _METHOD_ALIAS.get() or "jaxgsa.pce"
     switched = _order_forced_legendre(problem, fit.order)
     if switched:
         warnings.warn(
@@ -1329,7 +1328,7 @@ def analyze(
     # resolve a strong nonlinearity, and the indices of a cubic that is not
     # this model look exactly like the indices of this model.
     warn_variance_fit(
-        "jaxgsa.pce",
+        namespace,
         explained_variance,
         quantity="explained_variance",
         advice_low=(
@@ -1341,7 +1340,7 @@ def analyze(
         advice_high="Check the output for a near-constant slice.",
     )
     warn_cv_overfit(
-        "jaxgsa.pce",
+        namespace,
         loo,
         y_std,
         explained_variance,

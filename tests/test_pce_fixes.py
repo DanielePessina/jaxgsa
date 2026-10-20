@@ -327,3 +327,36 @@ def test_grouped_transforms_one_sided_tails_keep_column_order():
         grp, grp_types = _map_by_group(X, problem, order)
         assert col_types == grp_types
         assert np.array_equal(np.asarray(col), np.asarray(grp), equal_nan=True)
+
+
+def _warn_sources(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        call()
+    return [(str(w.message), w.filename) for w in caught if issubclass(w.category, JaxgsaWarning)]
+
+
+def test_pce_warnings_name_the_shapley_entry_point_and_point_at_the_caller():
+    # An order reduction, a poor fit and an overfit each warn from inside the
+    # PCE. Called through shapley.analyze they must name that function and point
+    # at the caller's own line, not at a frame inside the package.
+    rng = np.random.default_rng(0)
+    problem = jaxgsa.Problem(["a", "b", "c"], [(0, 1)] * 3)
+    X = rng.uniform(0, 1, (30, 3)).astype(np.float32)
+    Y = np.sin(12 * X[:, 0]) + rng.standard_normal(30).astype(np.float32)
+    Xj, Yj = jnp.asarray(X), jnp.asarray(Y)
+
+    def through_shapley():
+        jaxgsa.shapley.analyze(problem, Xj, Yj, backend="pce", order=6, verbose=False)
+
+    def direct():
+        pce.analyze(problem, Xj, Yj, order=6, verbose=False)
+
+    shap = _warn_sources(through_shapley)
+    assert shap, "expected at least the order-reduced warning"
+    for message, filename in shap:
+        assert message.startswith("jaxgsa.shapley"), message
+        assert filename == __file__
+    for message, filename in _warn_sources(direct):
+        assert message.startswith("jaxgsa.pce"), message
+        assert filename == __file__
