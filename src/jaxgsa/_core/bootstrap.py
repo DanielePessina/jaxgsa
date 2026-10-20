@@ -91,7 +91,8 @@ def bootstrap_draws(
     sequential ``lax.map`` over the replicates, so the program compiles once
     and a repeat call compiles nothing. Each replicate draws ``N`` row
     indices with replacement from its own key, split from ``key`` in order.
-    The working set is one replicate, as in a Python loop.
+    Only one replicate runs at a time. Peak memory is still higher than in a
+    Python loop, because the streamed fit's row batches unroll under one jit.
 
     Args:
         key: PRNG key. The same key gives the same row draws.

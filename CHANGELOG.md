@@ -131,7 +131,7 @@ Some fixes change index values where the old values were wrong. See Fixed.
   with categorical inputs change only by float rounding. Measured against
   1.1.2: at most about 1.5e-7 absolute in float32, and about 2e-16 absolute
   in x64. `borgonovo` with categorical inputs shares the change.
-- `hdmr.analyze`, `pce.analyze` and `shapley.analyze` run bootstrap replicates in one cached `jax.jit` with a sequential `lax.map`, not a Python loop. The program compiles once and a repeat call compiles nothing. Steady state is about 1.7 to 3 times faster; the first HDMR call with 100 replicates drops from 4.2 s to 1.0 s. Peak memory at N=32768 with 20 HDMR replicates rose from 478 to 576 MB.
+- `hdmr.analyze`, `pce.analyze` and `shapley.analyze` run bootstrap replicates in one cached `jax.jit` with a sequential `lax.map`, not a Python loop. The program compiles once and a repeat call compiles nothing. Steady state is faster: about 7 times for HDMR (0.95 s to 0.13 s at N=1024, 50 replicates) and about 1.1 times for PCE. The first call is not faster, because compile time dominates it. Peak memory at N=32768 with 20 HDMR replicates rose from 478 to 576 MB.
 
 ### Docs
 
