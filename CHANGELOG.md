@@ -224,6 +224,7 @@ Pre-release for testing. Some fixes change index values where the old values wer
 
 ### Docs
 
+- New page, "Population PK (NLME)": four recipes for covariates and random effects. They give the index of each random effect, the covariate share of the variance, Shapley effects of correlated covariates, and the full index of each kinetic parameter. Each recipe was checked against exact values on a linear test case.
 - OT: the `tol` docs now give the cost of a trajectory solve. The time is in Sinkhorn iterations, not the loop over outputs. The float64 default `tol=1e-9` is about twice as slow as `1e-5`, and it stays the default.
 
 ## 1.1.2
