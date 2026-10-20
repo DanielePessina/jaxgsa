@@ -1,12 +1,20 @@
 # Changelog
 
-## 1.2.0b1 (2026-10-20, pre-release)
+## 1.2.0 (unreleased)
 
-Pre-release for testing. Some fixes change index values where the old values were wrong. See Fixed and Changed values.
+Changes since 1.2.0b1.
 
 ### Added
 
 - `kucherenko.sample` now accepts categorical inputs when the problem has a custom sampler (`problem.with_sampler`). The sampler draws every conditional itself, so it can stratify on an input such as sex. Measured on a sex-stratified NLME case with exact values: all 40 indices within 1.5 standard errors over 8 seeds. Without a custom sampler a categorical input still raises.
+
+### Docs
+
+- New page, "Population PK (NLME)": four recipes for covariates and random effects. They give the index of each random effect, the covariate share of the variance, Shapley effects of correlated covariates, and the full index of each kinetic parameter. Each recipe was checked against exact values on a linear test case.
+
+## 1.2.0b1 (2026-10-20, pre-release)
+
+Pre-release for testing. Some fixes change index values where the old values were wrong. See Fixed and Changed values.
 
 ### Fixed
 
@@ -228,7 +236,6 @@ Pre-release for testing. Some fixes change index values where the old values wer
 
 ### Docs
 
-- New page, "Population PK (NLME)": four recipes for covariates and random effects. They give the index of each random effect, the covariate share of the variance, Shapley effects of correlated covariates, and the full index of each kinetic parameter. Each recipe was checked against exact values on a linear test case.
 - OT: the `tol` docs now give the cost of a trajectory solve. The time is in Sinkhorn iterations, not the loop over outputs. The float64 default `tol=1e-9` is about twice as slow as `1e-5`, and it stays the default.
 
 ## 1.1.2
