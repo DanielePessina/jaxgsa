@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from functools import lru_cache
 from typing import Literal, NamedTuple, cast
 
@@ -82,6 +82,7 @@ from jaxgsa._core.irregular import (
     analyze_irregular,
 )
 from jaxgsa._core.partition import (
+    PartitionGroup,
     _mask_from_counts,
     plan_partition,
     replicate_blocks,
@@ -478,7 +479,7 @@ def _get_delta_kernel(
 
 
 def _resolve_slice_chunks(
-    groups: Sequence[tuple[Array | jax.ShapeDtypeStruct, ...]],
+    groups: list[tuple[Array, Array]],
     Y_cols: Array,
     grid_size: int,
     slice_chunk_size: int | None,
@@ -1174,17 +1175,13 @@ def analyze(
     # the memory budget. A block is a set of whole replicates, so blocking
     # changes no value.
     plan = plan_partition(problem, X, all_idx, M, dims_levels, method="jaxgsa.borgonovo.analyze")
-    # Shapes of the first block's groups, kept for the verbose summary. The
-    # tensors themselves are freed before the next block is built.
-    group_shapes: list[tuple[jax.ShapeDtypeStruct, ...]] = []
+    groups: list[PartitionGroup] = []
     col_order = plan.col_order
     d_parts, s1_parts, degen_parts = [], [], []
     floored_cols = None
     for idx_block, groups_block in replicate_blocks(plan):
-        if not group_shapes:
-            group_shapes = [
-                tuple(jax.ShapeDtypeStruct(a.shape, a.dtype) for a in g) for g in groups_block
-            ]
+        if not groups:
+            groups = groups_block  # the first block, for the verbose summary
         d_b, s1_b, degen_b, floored_b = _run_delta_kernel(
             Y_cols,
             idx_block,
@@ -1200,7 +1197,6 @@ def analyze(
         s1_parts.append(s1_b)
         degen_parts.append(degen_b)
         floored_cols = floored_b if floored_cols is None else floored_cols | floored_b
-        del groups_block, idx_block
     assert floored_cols is not None
     d_all = jnp.concatenate(d_parts, axis=0) if len(d_parts) > 1 else d_parts[0]
     s1_all = jnp.concatenate(s1_parts, axis=0) if len(s1_parts) > 1 else s1_parts[0]
@@ -1312,7 +1308,7 @@ def analyze(
         elapsed = _verbose.stop(t0, result.delta)
         # Same resolver the kernel loop ran, on the same layout: cheap
         # arithmetic, reported rather than re-derived by hand.
-        cs, _ = _resolve_slice_chunks(group_shapes, Y_cols, grid_size, slice_chunk_size)
+        cs, _ = _resolve_slice_chunks(groups, Y_cols, grid_size, slice_chunk_size)
         origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
         _verbose.analysis_summary(
             method="jaxgsa.borgonovo.analyze",

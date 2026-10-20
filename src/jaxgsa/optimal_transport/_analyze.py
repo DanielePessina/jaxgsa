@@ -1448,7 +1448,7 @@ def analyze(
     # tensors rectangular without padding continuous classes up to a
     # categorical level size, or the other way round. Each group is
     # (cls_idx, counts); masks and quantile lookups are derived in-kernel
-    # from the counts. plan_partition also returns plan.group_levels,
+    # from the counts. build_partition_groups also returns group_levels,
     # the declared level count per group in the same order, so a caller
     # never needs to rebuild it from cont_dims/cat_dims.
     t0 = _verbose.tic()

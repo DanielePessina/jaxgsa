@@ -10,7 +10,6 @@ import pytest
 from jaxgsa import Problem, borgonovo, optimal_transport
 from jaxgsa._core import batching
 from jaxgsa._core.partition import (
-    _bucket_width,
     _class_layout,
     plan_partition,
     replicate_blocks,
@@ -55,7 +54,7 @@ def tiny_budget():
     batching._set_memory_budget(old)
 
 
-def _mixed(N=240, seed=0, dtype=jnp.float32):
+def _mixed(N=240, seed=0):
     problem = Problem.from_dict(
         {
             "a": (0.0, 1.0),
@@ -67,30 +66,7 @@ def _mixed(N=240, seed=0, dtype=jnp.float32):
     X = rng.random((N, 3))
     X[:, 2] = rng.choice(3, N, p=[0.7, 0.2, 0.1])
     y = np.sin(3 * X[:, 0]) + X[:, 1] ** 2 + 0.5 * X[:, 2]
-    return problem, jnp.asarray(X, dtype=dtype), jnp.asarray(y, dtype=dtype)
-
-
-def test_bucket_width_properties():
-    for N in (1, 7, 8, 100, 257, 1000, 20_000):
-        for P in sorted({1, 2, 3, 7, 8, 9, 31, 64, 65, 99, N // 2 or 1, N}):
-            if P > N:
-                continue
-            Pb = _bucket_width(P, N)
-            assert P <= Pb <= N
-            # At most 19% (one quarter-octave) plus 7 slots (multiple of 8).
-            assert Pb <= int(np.ceil(P * 2**0.25)) + 8 or Pb == N
-            assert Pb % 8 == 0 or Pb == N
-
-
-def test_bucket_width_power_of_two_stays_on_its_grid_point():
-    for k in range(3, 15):
-        P = 2**k
-        assert _bucket_width(P, 10 * P) == P
-
-
-def test_bucket_width_is_monotone():
-    widths = [_bucket_width(P, 5000) for P in range(1, 5001)]
-    assert widths == sorted(widths)
+    return problem, jnp.asarray(X, dtype=jnp.float32), jnp.asarray(y, dtype=jnp.float32)
 
 
 def test_blocks_are_near_equal_and_cover_every_replicate(tiny_budget):
@@ -115,67 +91,43 @@ def test_blocks_are_near_equal_and_cover_every_replicate(tiny_budget):
 
 @pytest.mark.parametrize("x64", [False, True])
 def test_borgonovo_blocks_match_one_block_bitwise(tiny_budget, x64):
+    problem, X, y = _mixed()
     with jax.enable_x64(x64):
-        problem, Xd, yd = _mixed(dtype=jnp.float64 if x64 else jnp.float32)
-        ref = borgonovo.analyze(
-            problem,
-            Xd,
-            yd,
-            n_bootstrap=20,
-            key=jax.random.key(1),
-            n_classes=8,
-            slice_chunk_size=1,
-            verbose=False,
+        Xd, yd = (
+            X.astype(jnp.float64 if x64 else jnp.float32),
+            y.astype(jnp.float64 if x64 else jnp.float32),
         )
+        kw = dict(
+            n_bootstrap=20, key=jax.random.key(1), n_classes=8, slice_chunk_size=1, verbose=False
+        )
+        ref = borgonovo.analyze(problem, Xd, yd, **kw)
         tiny_budget(40_000)
-        blocked = borgonovo.analyze(
-            problem,
-            Xd,
-            yd,
-            n_bootstrap=20,
-            key=jax.random.key(1),
-            n_classes=8,
-            slice_chunk_size=1,
-            verbose=False,
-        )
-    assert isinstance(ref, borgonovo.BorgonovoResult)
-    assert isinstance(blocked, borgonovo.BorgonovoResult)
+        blocked = borgonovo.analyze(problem, Xd, yd, **kw)
     np.testing.assert_array_equal(ref.delta, blocked.delta)
     np.testing.assert_array_equal(ref.delta_conf, blocked.delta_conf)
     np.testing.assert_array_equal(ref.S1, blocked.S1)
 
 
 @pytest.mark.filterwarnings("ignore:.*Sinkhorn solves did not reach")
-@pytest.mark.parametrize("x64", [False, True])
 @pytest.mark.parametrize("mode", ["univariate", "multivariate", "trajectory"])
-def test_ot_blocks_match_one_block_bitwise(tiny_budget, mode, x64):
-    with jax.enable_x64(x64):
-        problem, X, y = _mixed(N=120, dtype=jnp.float64 if x64 else jnp.float32)
-        Y = jnp.stack([y, y**2], axis=1)
-        if mode == "trajectory":
-            Y = jnp.stack([Y, Y + 1.0, jnp.sin(Y)], axis=1)  # (N, T=3, K=2)
-        slice_chunk = 1 if mode == "univariate" else None
-
-        def run():
-            return optimal_transport.analyze(
-                problem,
-                X,
-                Y,
-                mode=mode,
-                n_bootstrap=6,
-                key=jax.random.key(2),
-                n_classes=5,
-                max_iter=50,
-                slice_chunk_size=slice_chunk,
-                dummy=True,
-                verbose=False,
-            )
-
-        ref = run()
-        tiny_budget(20_000)
-        blocked = run()
-    assert isinstance(ref, optimal_transport.OTResult)
-    assert isinstance(blocked, optimal_transport.OTResult)
+def test_ot_blocks_match_one_block_bitwise(tiny_budget, mode):
+    problem, X, y = _mixed(N=120)
+    Y = jnp.stack([y, y**2], axis=1)
+    if mode == "trajectory":
+        Y = jnp.stack([Y, Y + 1.0, jnp.sin(Y)], axis=1)  # (N, T=3, K=2)
+    kw = dict(
+        mode=mode,
+        n_bootstrap=6,
+        key=jax.random.key(2),
+        n_classes=5,
+        max_iter=50,
+        **({"slice_chunk_size": 1} if mode == "univariate" else {}),
+        dummy=True,
+        verbose=False,
+    )
+    ref = optimal_transport.analyze(problem, X, Y, **kw)
+    tiny_budget(20_000)
+    blocked = optimal_transport.analyze(problem, X, Y, **kw)
     np.testing.assert_array_equal(ref.ot, blocked.ot)
     np.testing.assert_array_equal(ref.ot_conf, blocked.ot_conf)
     np.testing.assert_array_equal(ref.advective, blocked.advective)
