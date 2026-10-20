@@ -155,7 +155,7 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24  # @jax-js/jax needs Float16Array (Node >= 24)
           cache: npm
