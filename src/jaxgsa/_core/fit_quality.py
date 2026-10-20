@@ -434,7 +434,7 @@ def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> N
         raise ValueError(
             f"{namespace}: the input(s) {constant} have the same value in every row. "
             "A constant input has no variance, so the fit cannot estimate its "
-            "indices from this sample, and the Gram matrix of the design is "
+            "indices from this sample, and the design is "
             "singular. Remove the input from the problem, or sample it over its "
             "range."
         )
@@ -452,7 +452,7 @@ def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> N
         raise ValueError(
             f"{namespace}: the inputs {duplicates} are equal in every row. Two "
             "identical inputs cannot be told apart, so the fit cannot estimate "
-            "their indices, and the Gram matrix of the design is singular. Remove "
+            "their indices, and the design is singular. Remove "
             "one input of each pair, or sample them independently."
         )
     dependent = _linear_dependence(X, names)
@@ -462,7 +462,7 @@ def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> N
             f"{namespace}: the inputs are linearly dependent to within rounding "
             f"error: {'; '.join(described)}. A copy such as c = 2 * a, c = 1 - a "
             "or c = a + b cannot be told apart from its parents, so the fit "
-            "cannot estimate their indices, and the Gram matrix of the design is "
+            "cannot estimate their indices, and the design is "
             "singular. Remove the dependent input, or sample the inputs "
             "independently."
         )

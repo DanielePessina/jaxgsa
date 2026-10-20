@@ -113,9 +113,32 @@ def bootstrap_draws(
         key,
         tuple(operands),
         replicate_fn=replicate_fn,
-        static=static,
+        static=_hashable_static(static),
         n_bootstrap=n_bootstrap,
     )
+
+
+def _hashable_static(static: tuple[tuple[str, Any], ...]) -> tuple[tuple[str, Any], ...]:
+    """Turn scalar arrays in a static tuple into Python scalars.
+
+    A jit static argument must be hashable. A 0-d JAX or NumPy array, for
+    example ``ridge=jnp.asarray(1e-6)``, is not, so it becomes a Python scalar.
+
+    Args:
+        static: ``(name, value)`` pairs, possibly nested in tuples.
+
+    Returns:
+        The same pairs with every 0-d array replaced by its Python value.
+    """
+
+    def fix(value: Any) -> Any:
+        if isinstance(value, tuple):
+            return tuple(fix(v) for v in value)
+        if hasattr(value, "ndim") and hasattr(value, "item") and value.ndim == 0:
+            return value.item()
+        return value
+
+    return fix(static)
 
 
 def _bootstrap_ci_endpoints(
