@@ -82,10 +82,8 @@ from jaxgsa._core.irregular import (
     analyze_irregular,
 )
 from jaxgsa._core.partition import (
-    PartitionGroup,
     _mask_from_counts,
-    plan_partition,
-    replicate_blocks,
+    build_partition_groups,
 )
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import _prepare_Y, _validate_output, as_key
@@ -1170,37 +1168,22 @@ def analyze(
         all_idx = identity
     R = all_idx.shape[0]
 
-    # Canonical partition-group layout, shared with optimal_transport. The
-    # class tensors are built per block of replicates, so they stay inside
-    # the memory budget. A block is a set of whole replicates, so blocking
-    # changes no value.
-    plan = plan_partition(problem, X, all_idx, M, dims_levels, method="jaxgsa.borgonovo.analyze")
-    groups: list[PartitionGroup] = []
-    col_order = plan.col_order
-    d_parts, s1_parts, degen_parts = [], [], []
-    floored_cols = None
-    for idx_block, groups_block in replicate_blocks(plan):
-        if not groups:
-            groups = groups_block  # the first block, for the verbose summary
-        d_b, s1_b, degen_b, floored_b = _run_delta_kernel(
-            Y_cols,
-            idx_block,
-            groups_block,
-            col_order,
-            grid_size=grid_size,
-            bw_factor=bw_factor,
-            degenerate_tol=degenerate_tol,
-            degenerate_bw=degenerate_bw,
-            slice_chunk_size=slice_chunk_size,
-        )
-        d_parts.append(d_b)
-        s1_parts.append(s1_b)
-        degen_parts.append(degen_b)
-        floored_cols = floored_b if floored_cols is None else floored_cols | floored_b
-    assert floored_cols is not None
-    d_all = jnp.concatenate(d_parts, axis=0) if len(d_parts) > 1 else d_parts[0]
-    s1_all = jnp.concatenate(s1_parts, axis=0) if len(s1_parts) > 1 else s1_parts[0]
-    degen_all = jnp.concatenate(degen_parts, axis=0) if len(degen_parts) > 1 else degen_parts[0]
+    # Canonical partition-group layout, shared with optimal_transport.
+    groups, _, col_order = build_partition_groups(
+        problem, X, all_idx, M, dims_levels, method="jaxgsa.borgonovo.analyze"
+    )
+
+    d_all, s1_all, degen_all, floored_cols = _run_delta_kernel(
+        Y_cols,
+        all_idx,
+        groups,
+        col_order,
+        grid_size=grid_size,
+        bw_factor=bw_factor,
+        degenerate_tol=degenerate_tol,
+        degenerate_bw=degenerate_bw,
+        slice_chunk_size=slice_chunk_size,
+    )
     if bool(floored_cols.any()):
         warnings.warn(
             "jaxgsa.borgonovo: at least one conditioning class is too narrow for the "
@@ -1470,9 +1453,9 @@ def indices(
     # bootstrap axis exists only for the interval and the bias correction,
     # and both are policy.
     all_idx = jnp.arange(N, dtype=jnp.int32)[None, :]
-    plan = plan_partition(problem, X, all_idx, M, dims_levels, method="jaxgsa.borgonovo.indices")
-    groups = plan.groups_for(slice(None))
-    col_order = plan.col_order
+    groups, _, col_order = build_partition_groups(
+        problem, X, all_idx, M, dims_levels, method="jaxgsa.borgonovo.indices"
+    )
     d_all, s1_all, _, _ = _run_delta_kernel(
         Y_cols,
         all_idx,
