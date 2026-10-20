@@ -115,8 +115,10 @@ Some fixes change index values where the old values were wrong. See Fixed.
 
 ### Performance
 
-- `vkoga` cross-validation no longer recompiles for each new dataset. The scorer compiles once, so repeated analyses skip about 0.5 s of compile
-  time. Wall-clock gains on small cases are within run-to-run noise.
+- `vkoga` cross-validation no longer recompiles for each new dataset. The
+  scorer compiles once, so repeated analyses skip some compile time (about
+  0.2 to 0.4 s per new dataset in one small test). Wall-clock gains on small
+  cases are within run-to-run noise.
 - The PCE fit is slower, because QR does more work than the normal
   equations. Steady-state `analyze` takes 2 to 3 times longer at large sizes:
   about 270 ms to 800 ms for D = 6, order 6, N = 20000 (924 terms; 3 to 3.5
