@@ -1176,7 +1176,7 @@ def test_independent_inputs_have_exactly_zero_correlated_part():
     X = jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 256, seed=5)
     with single_precision_warning():
         result = jaxgsa.vkoga.analyze(
-            UNIFORM_PROBLEM, X, jnp.asarray(_uniform_scalar(X)), **SMALL_KWARGS
+            UNIFORM_PROBLEM, jnp.asarray(X), jnp.asarray(_uniform_scalar(X)), **SMALL_KWARGS
         )
     assert isinstance(result, VKOGAResult)
     np.testing.assert_array_equal(np.asarray(result.S_C), 0.0)
