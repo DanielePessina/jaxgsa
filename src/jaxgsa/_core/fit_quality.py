@@ -73,8 +73,8 @@ CV_RATIO_THRESHOLD = math.sqrt(1.0 - POORFIT_THRESHOLD)
 # the QR factor of the fit, which never squares the condition number, so it is
 # finite and accurate in float32 down to about 1e-11.
 #
-# The share alone cannot prove that the indices are undefined, in either
-# dtype. Accurate high-order Hermite fits and exactly dependent designs give
+# In float64 the share alone cannot prove that the indices are undefined.
+# Accurate high-order Hermite fits and exactly dependent designs give
 # shares in overlapping ranges, so no fixed limit separates them. Order 20 on
 # two Gaussian inputs gives 1.7e-9 and exact indices, while a three-level
 # input on 2000 rows gives 1.7e-10 and a two-level input 1e-11. The ridge
@@ -83,8 +83,15 @@ CV_RATIO_THRESHOLD = math.sqrt(1.0 - POORFIT_THRESHOLD)
 # combination of inputs, are read off the inputs instead
 # (:func:`check_degenerate_inputs`). The share only warns. An input that
 # copies another up to 1e-3 noise gives about 3e-10 on 2000 rows, and its
-# copy then gets a total index of 0.08 instead of 0.
+# copy then gets a total index of 0.08 instead of 0. In float64 the share
+# only warns.
 ILL_CONDITIONED_PIVOT_THRESHOLD = 1e-9
+
+# float32 raises below this share, as in 1.1.2. Rounding in float32 is far
+# larger than in float64, so a share this small cannot be told from a
+# singular design. Measured on Gaussian inputs, N=6000: share 1.3e-8 gives a
+# total index off by 2e-3, and share 1.8e-9 off by 0.05.
+SINGULAR_PIVOT_THRESHOLD_F32 = 1e-5
 
 # float32 needs a higher line for a warning. The leave-one-out error divides
 # a residual by ``1 - h``, where ``h`` is the leverage of the row. A design
@@ -94,8 +101,8 @@ ILL_CONDITIONED_PIVOT_THRESHOLD = 1e-9
 # is off by 3%, share 9.8e-5 is off by a factor 45 (0.23 against 0.005), and
 # share 1.6e-6 by a factor 2000. The indices stay exact far longer (to 1e-5 at
 # a share of 1.4e-7), so the warning is about ``cv_rmse`` first. It fires
-# below 1e-3. float64 never reaches the line before it reaches the one above.
-PRECISION_PIVOT_THRESHOLD_F32 = 1e-3
+# below 1e-4. float64 never reaches the line before it reaches the one above.
+AMBIGUOUS_PIVOT_THRESHOLD_F32 = 1e-4
 
 # Limit on the residual of an input that is a linear combination of others.
 #
@@ -279,30 +286,16 @@ def warn_cv_overfit(
     )
 
 
-@jax.jit
-def min_pivot_share(gram: Array) -> Array:
-    """The smallest unexplained share of any column of a Gram matrix.
-
-    Args:
-        gram: Symmetric Gram matrix, shape ``(n_terms, n_terms)``, with any
-            ridge already added.
-
-    Returns:
-        ``min_j L[j, j]**2 / G[j, j]``, a scalar in ``[0, 1]``. NaN when the
-        Cholesky factorisation fails or a column is all zeros.
-    """
-    chol = jnp.linalg.cholesky(gram)
-    return jnp.min(jnp.diagonal(chol) ** 2 / jnp.diagonal(gram))
-
-
 def warn_gram_rank_replicates(namespace: str, pivot_share: Array, *, advice: str) -> None:
     """Warn when bootstrap resamples fit near-singular designs.
 
     :func:`check_gram_rank` judges the one fit on the full sample and can
     refuse it. A bootstrap replicate is a fit on repeated rows, which can
     only lose rank, and the replicates run in a loop that cannot stop for one
-    bad draw. This counts the replicates that :func:`check_gram_rank` would
-    have refused or warned about, and warns once with that count.
+    bad draw. This counts the replicates with a share below
+    :data:`ILL_CONDITIONED_PIVOT_THRESHOLD` (or not finite), in both dtypes,
+    and warns once with that count. It does not count the float32 precision
+    band that :func:`check_gram_rank` also warns about.
 
     Args:
         namespace: The public function the message speaks for.
@@ -311,8 +304,8 @@ def warn_gram_rank_replicates(namespace: str, pivot_share: Array, *, advice: str
         advice: What to do about it. Appended to the message.
 
     Warns:
-        JaxgsaWarning: If any replicate share is not finite or is below the
-            warning limit of its dtype.
+        JaxgsaWarning: If any replicate share is not finite or is below
+            :data:`ILL_CONDITIONED_PIVOT_THRESHOLD`.
     """
     shares = np.asarray(pivot_share)
     limit = ILL_CONDITIONED_PIVOT_THRESHOLD
@@ -489,12 +482,13 @@ def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
         advice: What to do about it. Appended to the message.
 
     Raises:
-        ValueError: If ``pivot_share`` is not finite.
+        ValueError: If ``pivot_share`` is not finite, or in float32 is below
+            :data:`SINGULAR_PIVOT_THRESHOLD_F32`.
 
     Warns:
         JaxgsaWarning: If ``pivot_share`` is below
             :data:`ILL_CONDITIONED_PIVOT_THRESHOLD`, or in float32 below
-            :data:`PRECISION_PIVOT_THRESHOLD_F32`.
+            :data:`AMBIGUOUS_PIVOT_THRESHOLD_F32`.
     """
     is_f64 = jnp.asarray(pivot_share).dtype == jnp.float64
     share = float(pivot_share)
@@ -510,6 +504,14 @@ def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
             "factor is not finite. The coefficients are not identified, so the "
             f"indices are undefined.{precision} {advice}"
         )
+    if not is_f64 and share < SINGULAR_PIVOT_THRESHOLD_F32:
+        raise ValueError(
+            f"{namespace}: the design is numerically singular in float32: one basis "
+            f"column has only {share:.1e} of its variance left after the earlier "
+            "columns explain it, below "
+            f"{SINGULAR_PIVOT_THRESHOLD_F32:.0e}. The coefficients are not identified, "
+            f"so the indices are undefined.{precision} {advice}"
+        )
     if share < ILL_CONDITIONED_PIVOT_THRESHOLD:
         warnings.warn(
             f"{namespace}: the design is near singular: one basis column has only "
@@ -520,7 +522,7 @@ def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
             skip_file_prefixes=(PACKAGE_DIR,),
             category=JaxgsaWarning,
         )
-    elif not is_f64 and share < PRECISION_PIVOT_THRESHOLD_F32:
+    elif not is_f64 and share < AMBIGUOUS_PIVOT_THRESHOLD_F32:
         warnings.warn(
             f"{namespace}: one basis column has only {share:.1e} of its variance "
             "left after the earlier columns explain it. float32 carries about 7 "

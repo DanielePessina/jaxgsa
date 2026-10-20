@@ -189,11 +189,11 @@ asked for.
 ## Batching
 
 `batch_size` sizes row blocks during the fit. It never changes the algorithm.
-Both paths solve the same normal equations and compute the same exact
+Both paths solve the same ridge least squares by QR and compute the same exact
 leave-one-out error, so they differ only in float32 summation order.
 
 Leave it at `None` and the memory budget decides. jaxgsa estimates the
-resident cost of the design matrix, the Gram factorization and the LOO
+resident cost of the design matrix, the QR factorization and the LOO
 residuals; under the budget it runs a single pass, over it streams over
 auto-sized blocks. The budget defaults to about 512 MiB and moves with
 `jaxgsa.config.set_memory_budget`.

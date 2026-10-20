@@ -479,15 +479,29 @@ def _fit_pce_streamed(
     X_p = pad_rows(X_ref, n_pad)
     Y_p = pad_rows(Y_flat, n_pad)
     w = jnp.concatenate([jnp.ones((N,), dtype=dtype), jnp.zeros((n_pad,), dtype=dtype)])
-    rows = [(i * b, i * b + b) for i in range(n_batches)]
+    # Equal-width batches stacked on a leading axis, so ``lax.scan`` can fold
+    # them. A scan traces under ``jit``, ``grad`` and ``lax.map``, which a
+    # Python loop over the batches does not do without unrolling.
+    X_batches = X_p.reshape(n_batches, b, *X_p.shape[1:])
+    Y_batches = Y_p.reshape(n_batches, b, *Y_p.shape[1:])
+    w_batches = w.reshape(n_batches, b)
 
     acc_qr, acc_loo = _get_streamed_steps(input_types, order)
 
     # Pass 1: fold the batches into the QR factor, starting from the ridge rows.
-    R = jnp.sqrt(jnp.asarray(ridge, dtype=dtype)) * jnp.eye(n_terms, dtype=dtype)
-    z = jnp.zeros((n_terms, M), dtype=dtype)
-    for lo, hi in rows:
-        R, z = acc_qr(X_p[lo:hi], Y_p[lo:hi], w[lo:hi], R, z)
+    # The step may promote (float32 data with the float64 multi-index under
+    # x64), and a scan carry keeps one type, so the carry starts at the type
+    # the step returns.
+    R0 = jnp.sqrt(jnp.asarray(ridge, dtype=dtype)) * jnp.eye(n_terms, dtype=dtype)
+    z0 = jnp.zeros((n_terms, M), dtype=dtype)
+    R_type, z_type = jax.eval_shape(acc_qr, X_batches[0], Y_batches[0], w_batches[0], R0, z0)
+    R = R0.astype(R_type.dtype)
+    z = z0.astype(z_type.dtype)
+
+    def qr_step(carry: tuple[Array, Array], batch: tuple[Array, Array, Array]):
+        return acc_qr(*batch, *carry), None
+
+    (R, z), _ = jax.lax.scan(qr_step, (R, z), (X_batches, Y_batches, w_batches))
     coeffs_flat = solve_triangular(R, z, lower=False)  # (n_terms, M)
 
     if diagnostics:
@@ -495,9 +509,16 @@ def _fit_pce_streamed(
         # leverage comes from the shared hat_diagonal helper, which only needs
         # the small (n_terms, n_terms) factor, so this path holds nothing that
         # scales with N and applies the same clip as the single-pass path.
-        sse = (jnp.zeros((M,), dtype=dtype), jnp.zeros((M,), dtype=dtype))
-        for lo, hi in rows:
-            sse = acc_loo(X_p[lo:hi], Y_p[lo:hi], w[lo:hi], coeffs_flat, R, sse)
+        sse0 = (jnp.zeros((M,), dtype=dtype), jnp.zeros((M,), dtype=dtype))
+        sse_type = jax.eval_shape(
+            acc_loo, X_batches[0], Y_batches[0], w_batches[0], coeffs_flat, R, sse0
+        )
+        sse = (sse0[0].astype(sse_type[0].dtype), sse0[1].astype(sse_type[1].dtype))
+
+        def loo_step(carry: tuple[Array, Array], batch: tuple[Array, Array, Array]):
+            return acc_loo(*batch, coeffs_flat, R, carry), None
+
+        sse, _ = jax.lax.scan(loo_step, sse, (X_batches, Y_batches, w_batches))
         loo_flat = jnp.sqrt(sse[0] / N)  # == sqrt(mean(loo_residuals^2, axis=0))
         rmse_flat = jnp.sqrt(sse[1] / N)  # in-sample, from the same residuals
     else:
@@ -802,7 +823,7 @@ def _fit_pce_core(
     width always wins over the budget: ``batch_size >= N`` degenerates to
     the single-pass path, as one full row block, even when the single pass
     is over budget. The streamed fit solves the
-    same normal equations and computes the same exact LOO. It differs only
+    same ridge least squares and computes the same exact LOO. It differs only
     in float32 summation order.
 
     Nothing here warns. The order it actually fitted at comes back on
@@ -1029,7 +1050,7 @@ def indices(
     needs a concrete value and a tracer has none.
 
     Use :func:`analyze` for ordinary analysis. Nothing here checks the
-    inputs, so a single NaN reaches the normal equations and turns every
+    inputs, so a single NaN reaches the QR factorisation and turns every
     index into NaN without a word. Nothing here reports the fit quality
     either: ``cv_rmse`` and ``explained_variance`` are what tell you whether
     a PCE index means anything, and only :func:`analyze` computes them.
@@ -1209,7 +1230,7 @@ def analyze(
             One row is one unit here, so ``"drop"`` removes the affected
             ``(X, Y)`` pairs and fits on the rest. See
             :mod:`jaxgsa._core.invalid`. The check matters for PCE: a single
-            NaN reaches the normal equations and poisons every coefficient,
+            NaN reaches the QR factorisation and poisons every coefficient,
             every leave-one-out RMSE and every index.
         verbose: If ``True`` (default), print a short summary to stdout: the
             problem and the data, the wall-clock timing, and the top

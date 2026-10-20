@@ -616,9 +616,9 @@ def r_pivot_share(R: Array) -> Array:
     For column ``j`` of the augmented design ``A``, ``R[j, j]**2`` is the part
     of ``|A_j|**2`` that the columns before it do not explain, and
     ``|A_j|**2`` is the squared norm of column ``j`` of ``R``. The ratio is
-    the same quantity as :func:`jaxgsa._core.fit_quality.min_pivot_share`
-    reads off the Gram matrix, but it never goes through a Cholesky
-    factorisation, so it stays finite in float32.
+    the squared Cholesky pivot of the Gram matrix over its diagonal, but it
+    never goes through a Cholesky factorisation, so it stays finite in
+    float32.
 
     Args:
         R: Upper-triangular factor, shape ``(n_terms, n_terms)``.

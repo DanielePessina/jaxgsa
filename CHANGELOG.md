@@ -16,28 +16,26 @@
   function you called. Through `jaxgsa.shapley.analyze` they said
   `jaxgsa.pce` and pointed at a line inside the package. They now say
   `jaxgsa.shapley.analyze` and point at your line. Values do not change.
-
 - The PCE fit now solves the ridge least squares by QR, not by the normal
   equations. The normal equations square the condition number of the design.
   In float32 that lost every digit at high order: a Hermite fit on three
   Gaussian inputs at order 12 (N = 6000) raised "the Gram matrix of the design
   is numerically singular". The same fit now returns the exact indices
-  (ST = 0.8062, 0.1938, 0.0310) at orders 12 and 14. Order 16 is off by about
-  2e-3 in float32, and the fit warns about it. This also holds for `shapley`
+  (ST = 0.8062, 0.1938, 0.0310) at orders 12 and 13, with a precision
+  warning. Order 14 and above still raise in float32. This also holds for `shapley`
   with the PCE backend. The streamed fit (`batch_size`) uses a tall-skinny QR
   that folds in one batch at a time, so its memory stays within the budget.
 - The rank check reads the pivot share from the QR factor. It is finite in
-  float32, so float32 no longer refuses a fit because a Cholesky factor
-  failed. Both dtypes now warn when the share is below 1e-9 (the design is
-  near singular), and float32 also warns below 1e-3. There the leave-one-out
-  error `cv_rmse` can be wrong by a large factor, because `1 - h` (h is the
-  leverage of a row) is mostly rounding noise, while the indices stay exact
-  much longer. Measured on three Gaussian inputs, N = 6000: at share 9.8e-5
-  float32 gives `cv_rmse` 0.23 against 0.005 in float64, and the warning now
-  fires there. A non-finite share still raises. Constant, duplicated
-  and linearly dependent inputs still raise, because they are read off the
-  inputs. A design that is singular for another reason, such as a three-level
-  input at order 3, now warns in float32, where 1.1.2 could raise.
+  float32, so a failed Cholesky factor no longer refuses a fit. The limits
+  are the same as in 1.1.2. float32 raises below 1e-5 and warns below 1e-4.
+  float64 only warns, below 1e-9. Measured on three Gaussian
+  inputs, N = 6000: share 1.3e-8 gives a total index off by 2e-3, and share
+  1.8e-9 off by 0.05. In the warning band the leave-one-out error `cv_rmse`
+  can be wrong by a large factor, because `1 - h` (h is the leverage of a
+  row) is mostly rounding noise, while the indices stay exact much longer.
+  At share 9.8e-5 float32 gives `cv_rmse` 0.23 against 0.005 in float64. A
+  non-finite share raises. Constant, duplicated and linearly dependent inputs
+  raise in both dtypes, because they are read off the inputs.
 - `pce.analyze` with `n_bootstrap > 0` warns when some resamples fit a
   near-singular design, and gives the count. The rank check ran on the full
   sample only.
@@ -55,22 +53,15 @@
   z >= 38) truncations give exact indices. This also holds for `shapley` with
   the PCE backend. Untruncated Gaussian and uniform inputs are bitwise
   unchanged.
-- `pce.analyze`, `pce.indices` and `shapley` with the PCE backend no longer
-  recompile the fit for every new number of rows. The rows are padded to a
-  bucket (eight buckets per octave, so at most 12.5% extra rows), and a 0/1
-  row mask keeps the extra rows out of every sum. Row counts 497, 498 and 499
-  now share one compiled fit. The first `analyze` call at a new row count in
-  the same bucket took 0.8 s and now takes 0.4 s (N = 500, D = 6). The shared
-  input checks still compile small programs for each new row count.
 
 ### Changed values
 
 - PCE values change by float rounding in every fit, and so do Shapley values
   from the PCE backend. Ishigami, N = 1000, orders 3, 5 and 7: at most 7e-7
   in float32 and 1.4e-15 in float64, for S1, ST, S2, `cv_rmse` and the
-  bootstrap intervals (the Shapley PCE backend reaches 6.9e-7 in float32). Fits that 1.1.2 refused in float32 now succeed. Row
-  padding changes the order of the sums, which adds float rounding of the same
-  size and no more.
+  bootstrap intervals (the Shapley PCE backend reaches 6.9e-7 in float32).
+  Fits that 1.1.2 refused in float32 now succeed. Row padding changes the
+  order of the sums, which adds float rounding of the same size and no more.
 - PCE values change for every truncated Gaussian input, and so do Shapley
   values from the PCE backend. The old S1 error on a polynomial response was
   4e-3 to 5e-2 on the Legendre route (every truncation narrower than 7 sigma,
@@ -84,10 +75,19 @@
   equations. Steady-state `analyze` takes 2 to 3 times longer at large sizes:
   about 270 ms to 800 ms for D = 6, order 6, N = 20000 (924 terms; 3 to 3.5
   times), and 152 ms to 312 ms for D = 10, order 3, N = 50000. Small fits
-  (D = 3, order 5, N = 1000) go from about 1.9 ms to about 3 ms. The estimate of fit memory, which decides when the
-  fit streams, grows from 2 to 4 arrays of the design size. Row padding adds
-  up to 12.5% more work for a row count just above a bucket edge, for example
-  N = 513 runs as 576 rows.
+  (D = 3, order 5, N = 1000) go from about 1.9 ms to about 3 ms. The estimate
+  of fit memory, which decides when the fit streams, grows from 2 to 4 arrays
+  of the design size. The streamed fit is a `lax.scan` over the row batches,
+  so it also traces under `lax.map`.
+- `pce.analyze`, `pce.indices` and `shapley` with the PCE backend no longer
+  recompile the heavy fit programs for every new number of rows. The rows are
+  padded to a bucket (eight buckets per octave, so at most 12.5% extra rows),
+  and a 0/1 row mask keeps the extra rows out of every sum. Row counts 497,
+  498 and 499 now share one compiled fit. The first `analyze` call at a new
+  row count in the same bucket took 0.8 s and now takes about 0.4 s (N = 500,
+  D = 6). Small programs for the padding and the shared input checks still
+  compile for each new row count. Padding adds up to 12.5% more work for a
+  row count just above a bucket edge, for example N = 513 runs as 576 rows.
 - The new check for linearly dependent inputs runs on the host and costs
   0.73 s at N = 100000, D = 200. It runs once per `analyze` call.
 
