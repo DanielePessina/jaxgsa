@@ -68,6 +68,7 @@ import numpy as np
 
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.dependence import Draws, probit, sobol_uniforms
+from jaxgsa._core.entry import _user_stacklevel
 from jaxgsa._core.legendre import legendre_orthonormal
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import GaussianSpec, Problem
@@ -402,7 +403,7 @@ def _clip_independent_part(
                 f"of the output variance for parameter(s) {params}; S_U was clipped to S_TU. "
                 "With independent inputs the two should agree, so the gap is estimator "
                 "noise. Raise n_outer and n_inner.",
-                stacklevel=4,
+                stacklevel=_user_stacklevel() - 1,
                 category=JaxgsaWarning,
             )
             return np.minimum(S_U, S_TU)
@@ -412,8 +413,7 @@ def _clip_independent_part(
             "that S_IU stays non-negative. The additive component functions cannot represent "
             "this model's interactions under the correlated measure, so read S_U, S_C and "
             "S_IU for those parameters as indicative only. S_TC and S_TU are unaffected.",
-            # 1 here, 2 estimate_correlated_indices, 3 vkoga.analyze, 4 the caller.
-            stacklevel=4,
+            stacklevel=_user_stacklevel() - 1,
             category=JaxgsaWarning,
         )
     return np.minimum(S_U, S_TU)
@@ -539,7 +539,7 @@ def _component_degrees(n_variance: int, basis_kinds: Sequence[str]) -> tuple[int
             f"jaxgsa.vkoga: n_variance={n_variance} is below twice the {sum(narrow)} "
             "coefficients of the component fit, so the fit is under-determined and "
             "S_U, S_C and S_IU are unreliable. Raise n_variance.",
-            stacklevel=4,
+            stacklevel=_user_stacklevel() - 1,
             category=JaxgsaWarning,
         )
     return narrow

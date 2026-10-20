@@ -84,6 +84,7 @@ Some fixes change index values where the old values were wrong. See Fixed.
 
 ### Changed values
 
+- `vkoga` with independent inputs: `S_C` is now exactly 0 and `S_IU` drops (Ishigami `x2` `S_IU` 0.0119 to 0.0035). See Fixed.
 - `vkoga` with correlated inputs and a non-Gaussian marginal (uniform and
   other Legendre cases) now fits its component functions at degree 10, not 6.
   This removes a truncation bias in `S_U`, `S_C` and `S_IU` (Ishigami with
@@ -114,7 +115,8 @@ Some fixes change index values where the old values were wrong. See Fixed.
 ### Performance
 
 - `vkoga` cross-validation no longer recompiles for each new dataset. This
-  saves 0.5 to 1.0 s per analysis, about 30 to 40 percent of the search time.
+  The scorer compiles once, so repeated analyses skip about 0.5 s of compile
+  time. Wall-clock gains on small cases are within run-to-run noise.
 - The PCE fit is slower, because QR does more work than the normal
   equations. Steady-state `analyze` takes 2 to 3 times longer at large sizes:
   about 270 ms to 800 ms for D = 6, order 6, N = 20000 (924 terms; 3 to 3.5

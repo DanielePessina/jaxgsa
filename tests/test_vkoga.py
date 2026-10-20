@@ -21,6 +21,7 @@ warns about single precision.
 from __future__ import annotations
 
 import warnings
+from typing import Any
 
 import jax
 import numpy as np
@@ -51,7 +52,7 @@ UNIFORM_PROBLEM = Problem(names=("u1", "u2"), bounds=((0.0, 1.0),) * 2)
 # Explicit gamma/ridge skip the 10x10 cross-validation grid; small greedy and
 # estimator budgets keep each fit well under a second. All sample sizes are
 # powers of two so the Sobol' engines stay balanced (and silent).
-SMALL_KWARGS = dict(
+SMALL_KWARGS: dict[str, Any] = dict(
     gamma=3.0,
     ridge=1e-6,
     max_centers=64,
@@ -1135,7 +1136,6 @@ def test_degenerate_training_inputs_raise():
     problem = Problem(names=("a", "b", "c"), bounds=((0.0, 1.0),) * 3)
     X = np.asarray(jaxgsa.sampling.monte_carlo(problem, 128, seed=3))
     y = X[:, 0] + X[:, 1] ** 2
-    kwargs = {**SMALL_KWARGS, "key": jax.random.key(0)}
     cases = {
         "same value in every row": np.column_stack([X[:, 0], X[:, 1], np.full(128, 0.5)]),
         "equal in every row": np.column_stack([X[:, 0], X[:, 1], X[:, 0]]),
@@ -1143,7 +1143,18 @@ def test_degenerate_training_inputs_raise():
     }
     for message, Xd in cases.items():
         with pytest.raises(ValueError, match=message):
-            jaxgsa.vkoga.analyze(problem, Xd, y, **kwargs)
+            jaxgsa.vkoga.analyze(
+                problem,
+                Xd,
+                y,
+                gamma=3.0,
+                ridge=1e-6,
+                max_centers=64,
+                n_outer=64,
+                n_inner=16,
+                n_variance=512,
+                key=jax.random.key(0),
+            )
 
 
 def test_duplicate_rows_are_still_accepted():
