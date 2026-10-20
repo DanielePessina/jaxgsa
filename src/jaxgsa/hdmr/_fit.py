@@ -1122,9 +1122,10 @@ def _fit_hdmr(
             )(X_p, w_full, c2_idx, c3_idx, beta2, beta3, A, BtB, jnp.stack(rhs))
             C2_chunks = list(C2_stack)
             n_pair_coef = n2 * n_intervals * n_intervals
-            if n_pair_coef > N:
+            n_coef = n_pair_coef + m1 * n1
+            if n_coef > 0.8 * N:
                 warnings.warn(
-                    f"jaxgsa.hdmr: order 2 has {n_pair_coef} pair coefficients for "
+                    f"jaxgsa.hdmr: order 2 has {n_coef} coefficients for "
                     f"{N} samples. The pair fit can interpolate the data, so pair "
                     "indices may be too small or too large. Use more samples, "
                     "fewer inputs or a smaller n_intervals.",

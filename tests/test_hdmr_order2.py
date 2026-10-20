@@ -66,7 +66,7 @@ def test_order2_beats_order1_and_sum_of_s_stays_near_one(x64, D, N):
     if clean:
         assert [str(w.message) for w in caught if "jaxgsa.hdmr" in str(w.message)] == []
     if D == 23 and N == 1024:
-        assert any("pair coefficients" in str(w.message) for w in caught)
+        assert any("coefficients for" in str(w.message) for w in caught)
     test1 = _nrmse(o1.predict(Xj[N:]), Y[N:])
     test2 = _nrmse(o2.predict(Xj[N:]), Y[N:])
     train2 = _nrmse(o2.predict(Xj[:N]), Y[:N])
