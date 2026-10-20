@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- `pce`, and `shapley` with the PCE backend, now raise a `ValueError` when an
+  input is a linear combination of other inputs, such as `c = 1 - a`,
+  `c = 2 * a` or `c = a + b`. 1.1.2 caught only exact copies. An affine copy
+  gave a singular design: float32 raised, but float64 warned and returned
+  wrong indices. The check reads the inputs, so it does not depend on the
+  dtype or on `ridge`. It raises when the combination holds to within 100
+  times the rounding error of the input dtype. A copy with more noise, for
+  example 1e-3, still goes to the near-singular warning.
 - PCE warnings about a reduced order, a poor fit and an overfit now name the
   function you called. Through `jaxgsa.shapley.analyze` they said
   `jaxgsa.pce` and pointed at a line inside the package. They now say

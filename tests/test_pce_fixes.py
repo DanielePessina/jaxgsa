@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import warnings
 
 import jax
@@ -360,3 +361,59 @@ def test_pce_warnings_name_the_shapley_entry_point_and_point_at_the_caller():
     for message, filename in _warn_sources(direct):
         assert message.startswith("jaxgsa.pce"), message
         assert filename == __file__
+
+
+@pytest.mark.parametrize("ridge", [1e-8, 1.0])
+@pytest.mark.parametrize(
+    ("make", "parents"),
+    [
+        (lambda a, b: 1.0 - a, "['a']"),
+        (lambda a, b: 2.0 * a, "['a']"),
+        (lambda a, b: a + b, "['a', 'b']"),
+        (lambda a, b: 0.3 * a + 0.7 * b + 5.0, "['a', 'b']"),
+        (lambda a, b: 1000.0 + a, "['a']"),
+    ],
+)
+def test_affine_copy_of_other_inputs_raises_in_both_dtypes(make, parents, ridge):
+    # 1.1.2 let these through in float64 with one warning, and the indices of
+    # the copy were wrong. The check reads the inputs, so the dtype and the
+    # ridge cannot hide it.
+    problem, X, _ = _three_inputs()
+    X[:, 2] = make(X[:, 0].astype(np.float64), X[:, 1].astype(np.float64)).astype(X.dtype)
+    Y = 2 * X[:, 0] + X[:, 1] ** 2
+    with pytest.raises(ValueError, match=rf"c = linear combination of {re.escape(parents)}"):
+        pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, ridge=ridge, verbose=False)
+
+
+def test_affine_copy_message_names_the_shapley_entry_point():
+    problem, X, _ = _three_inputs()
+    X[:, 2] = 1.0 - X[:, 0]
+    Y = 2 * X[:, 0] + X[:, 1] ** 2
+    with pytest.raises(ValueError, match=r"^jaxgsa\.shapley\.analyze: .*linearly dependent"):
+        jaxgsa.shapley.analyze(problem, jnp.asarray(X), jnp.asarray(Y), backend="pce")
+
+
+def test_noisy_copy_above_rounding_error_is_not_called_linearly_dependent():
+    # 1e-3 noise is far above the rounding error of either dtype. It is the
+    # pivot share's case (test_near_duplicated_input_is_flagged_in_both_dtypes).
+    problem, X, rng = _three_inputs()
+    X[:, 2] = np.clip(X[:, 0] + 1e-3 * rng.standard_normal(2000), 0, 1).astype(np.float32)
+    Y = 2 * X[:, 0] + X[:, 1] ** 2
+    try:
+        pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
+    except ValueError as error:
+        assert "linearly dependent" not in str(error)
+
+
+def test_independent_input_with_large_offset_is_not_called_dependent():
+    # 1e5 + U(0, 1) is stored with a spacing of 0.008 in float32, yet it is
+    # independent of the others and must fit.
+    problem = jaxgsa.Problem(["a", "b", "c"], [(0, 1), (0, 1), (1e5, 1e5 + 1)])
+    rng = np.random.default_rng(3)
+    X = np.c_[rng.uniform(0, 1, (2000, 2)), 1e5 + rng.uniform(0, 1, 2000)]
+    X = X.astype(np.float64 if jax.config.jax_enable_x64 else np.float32)
+    Y = X[:, 0] + X[:, 1]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=1, verbose=False)
+    assert isinstance(result, pce.PCEResult)
