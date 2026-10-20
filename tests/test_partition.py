@@ -16,6 +16,12 @@ from jaxgsa._core.partition import (
     replicate_blocks,
 )
 
+# Blocking changes the order of sums, so results agree to rounding, not
+# bitwise: 1 float32 ulp was measured on Linux CI (Daniele, 2026-10-20: no
+# bitwise checks on floats).
+_RTOL = {False: 1e-5, True: 1e-12}
+_ATOL = {False: 1e-6, True: 1e-14}
+
 
 def test_n60_m22_uses_exact_integer_edges():
     """``N=60, M=22``: edge 11 is ``11 * 60 // 22 = 30``, not 29.
@@ -114,7 +120,7 @@ def test_blocks_are_near_equal_and_cover_every_replicate(tiny_budget):
 
 
 @pytest.mark.parametrize("x64", [False, True])
-def test_borgonovo_blocks_match_one_block_bitwise(tiny_budget, x64):
+def test_borgonovo_blocks_match_one_block(tiny_budget, x64):
     with jax.enable_x64(x64):
         problem, Xd, yd = _mixed(dtype=jnp.float64 if x64 else jnp.float32)
         ref = borgonovo.analyze(
@@ -140,15 +146,17 @@ def test_borgonovo_blocks_match_one_block_bitwise(tiny_budget, x64):
         )
     assert isinstance(ref, borgonovo.BorgonovoResult)
     assert isinstance(blocked, borgonovo.BorgonovoResult)
-    np.testing.assert_array_equal(ref.delta, blocked.delta)
-    np.testing.assert_array_equal(ref.delta_conf, blocked.delta_conf)
-    np.testing.assert_array_equal(ref.S1, blocked.S1)
+    np.testing.assert_allclose(ref.delta, blocked.delta, rtol=_RTOL[x64], atol=_ATOL[x64])
+    np.testing.assert_allclose(
+        ref.delta_conf, blocked.delta_conf, rtol=_RTOL[x64], atol=_ATOL[x64]
+    )
+    np.testing.assert_allclose(ref.S1, blocked.S1, rtol=_RTOL[x64], atol=_ATOL[x64])
 
 
 @pytest.mark.filterwarnings("ignore:.*Sinkhorn solves did not reach")
 @pytest.mark.parametrize("x64", [False, True])
 @pytest.mark.parametrize("mode", ["univariate", "multivariate", "trajectory"])
-def test_ot_blocks_match_one_block_bitwise(tiny_budget, mode, x64):
+def test_ot_blocks_match_one_block(tiny_budget, mode, x64):
     with jax.enable_x64(x64):
         problem, X, y = _mixed(N=120, dtype=jnp.float64 if x64 else jnp.float32)
         Y = jnp.stack([y, y**2], axis=1)
@@ -176,8 +184,8 @@ def test_ot_blocks_match_one_block_bitwise(tiny_budget, mode, x64):
         blocked = run()
     assert isinstance(ref, optimal_transport.OTResult)
     assert isinstance(blocked, optimal_transport.OTResult)
-    np.testing.assert_array_equal(ref.ot, blocked.ot)
-    np.testing.assert_array_equal(ref.ot_conf, blocked.ot_conf)
-    np.testing.assert_array_equal(ref.advective, blocked.advective)
-    np.testing.assert_array_equal(ref.diffusive, blocked.diffusive)
-    np.testing.assert_array_equal(ref.ot_dummy, blocked.ot_dummy)
+    np.testing.assert_allclose(ref.ot, blocked.ot, rtol=_RTOL[x64], atol=_ATOL[x64])
+    np.testing.assert_allclose(ref.ot_conf, blocked.ot_conf, rtol=_RTOL[x64], atol=_ATOL[x64])
+    np.testing.assert_allclose(ref.advective, blocked.advective, rtol=_RTOL[x64], atol=_ATOL[x64])
+    np.testing.assert_allclose(ref.diffusive, blocked.diffusive, rtol=_RTOL[x64], atol=_ATOL[x64])
+    np.testing.assert_allclose(ref.ot_dummy, blocked.ot_dummy, rtol=_RTOL[x64], atol=_ATOL[x64])

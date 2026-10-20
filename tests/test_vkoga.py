@@ -1180,8 +1180,9 @@ def test_independent_inputs_have_exactly_zero_correlated_part():
         )
     assert isinstance(result, VKOGAResult)
     np.testing.assert_array_equal(np.asarray(result.S_C), 0.0)
+    # Rounding-level agreement: 2e-8 in float32 was measured on Linux CI.
     np.testing.assert_allclose(
-        np.asarray(result.S_IU), np.asarray(result.S_TU) - np.asarray(result.S_TC), atol=1e-12
+        np.asarray(result.S_IU), np.asarray(result.S_TU) - np.asarray(result.S_TC), atol=1e-6
     )
 
 
