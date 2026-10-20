@@ -350,7 +350,7 @@ def _ot_1d_kernel(
 
     ``groups`` is a tuple of canonical ``(cls_idx, counts)``
     partition-group layouts from
-    :func:`jaxgsa._core.partition.build_partition_groups`. The kernel
+    :func:`jaxgsa._core.partition.replicate_blocks`. The kernel
     processes every group in one call and concatenates the results on the
     parameter axis in group order. It computes the per-replicate column
     statistics (resample gather, sort, mean, variance) once and shares
@@ -564,7 +564,7 @@ def _joint_kernel(
 
     ``groups`` is a tuple of canonical ``(cls_idx, counts)``
     partition-group layouts from
-    :func:`jaxgsa._core.partition.build_partition_groups`. Results
+    :func:`jaxgsa._core.partition.replicate_blocks`. Results
     concatenate on the parameter axis in group order, and the shared
     per-replicate cloud statistics are computed once. ``dm_grids`` gives,
     per group, the flat ``d * Mg + m`` class slots to solve. A categorical
@@ -1037,9 +1037,9 @@ def _dummy_class_indices(key: Array, starts: Array, N: int, P: int) -> Array:
 
     Args:
         key: PRNG key for the random assignment.
+        starts: First position of every class in the permutation, ``(M,)``.
         N: Number of samples.
         P: Padded class width.
-        starts: First position of every class in the permutation, ``(M,)``.
 
     Returns:
         Class indices ``(1, 1, M, P)``; entries past a class's size are

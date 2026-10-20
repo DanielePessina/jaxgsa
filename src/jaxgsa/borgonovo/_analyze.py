@@ -287,7 +287,7 @@ def _get_delta_kernel(
         constant. ``floored`` flags each column where a degenerate class
         engaged the bandwidth floor. ``groups`` is a tuple of canonical
         ``(cls_idx, counts)`` partition-group layouts from
-        :func:`jaxgsa._core.partition.build_partition_groups`. The kernel
+        :func:`jaxgsa._core.partition.replicate_blocks`. The kernel
         processes every group in one call, computing the shared
         per-replicate statistics once, and concatenates the results on the
         parameter axis in group order. Zero-size classes carry zero weight.
@@ -506,7 +506,7 @@ def _resolve_slice_chunks(
 
     Args:
         groups: Canonical partition groups from
-            :func:`jaxgsa._core.partition.build_partition_groups`.
+            :func:`jaxgsa._core.partition.replicate_blocks`.
         Y_cols: Output columns ``(N, T*K)``, read for its dtype and width.
         grid_size: Number of output-grid points.
         slice_chunk_size: Caller override, or ``None`` for the budget.
