@@ -613,6 +613,74 @@ def _acc_cross_gram12(B1_b: Array, B2_b: Array, G12: Array) -> Array:
 
 
 @jax.jit
+def _acc_gram22(B2_b: Array, G22: Array) -> Array:
+    """Accumulate the full pair Gram over all pairs, one row batch.
+
+    Args:
+        B2_b: Second-order basis, shape ``(b, m2, n2)``.
+        G22: Running Gram, shape ``(K, K)`` with ``K = n2 * m2`` in the flat
+            pair layout ``k = j * m2 + m``.
+
+    Returns:
+        The updated ``G22``.
+    """
+    B2f = B2_b.transpose(0, 2, 1).reshape(B2_b.shape[0], -1)
+    return G22 + B2f.T @ B2f
+
+
+def _dense_pair_fits(n2: int, m2: int, itemsize: int) -> bool:
+    """Return whether to solve the projected pair system directly.
+
+    Only in float64. The direct solve holds about three ``K x K`` arrays (the
+    Gram, its projected copy and the factor), with ``K = n2 * m2``, so it must
+    fit the memory budget. In float32 an underdetermined pair system (more
+    free coefficients than rows) makes the direct solve unstable: measured at
+    D = 15, N = 1024, test NRMSE 1.7 against 0.17 with CG, which stops early
+    and so regularizes.
+    """
+    K = n2 * m2
+    return itemsize >= 8 and 3 * K * K * itemsize <= get_memory_budget()
+
+
+@jax.jit
+def _dense_pair_solve(
+    G22: Array, G12: Array, A: Array, BtB: Array, rhs: Array, ridge: Array
+) -> Array:
+    """Solve all pair terms jointly by one direct solve.
+
+    The projected pair Gram is ``G22 - G12^T A`` (the Schur complement of the
+    first-order block). It is formed once and solved for every lane, which is
+    far cheaper than conjugate gradients whenever ``n2 * m2`` is moderate:
+    each CG step is a full pass over the rows, and the projected normal
+    matrix is ill-conditioned, so CG needs hundreds of steps and stalls in
+    float32.
+
+    Args:
+        G22: Full pair Gram, ``(K, K)``, flat layout ``k = j * m2 + m``.
+        G12: First-order to pair cross-Gram, ``(P, m2, n2)``.
+        A: Projection of the pair basis onto the first-order space,
+            ``(P, m2, n2)``.
+        BtB: Projected per-term Gram blocks, ``(n2, m2, m2)``, for the ridge
+            scale.
+        rhs: Right-hand sides, ``(n_chunks, cs, n2, m2)``.
+        ridge: Relative ridge, a scalar.
+
+    Returns:
+        The pair coefficients, ``(n_chunks, cs, m2, n2)``.
+    """
+    n_chunks, cs, n2, m2 = rhs.shape
+    K = n2 * m2
+    A_f = A.transpose(0, 2, 1).reshape(A.shape[0], K)
+    G12_f = G12.transpose(0, 2, 1).reshape(G12.shape[0], K)
+    Gt = G22 - G12_f.T @ A_f
+    Gt = (Gt + Gt.T) / 2
+    lam = ridge * jnp.mean(jnp.diagonal(BtB, axis1=-2, axis2=-1), axis=-1)  # (n2,)
+    lam_flat = jnp.repeat(lam, m2)
+    sol = jnp.linalg.solve(Gt + jnp.diag(lam_flat), rhs.reshape(n_chunks * cs, K).T)
+    return sol.T.reshape(n_chunks, cs, n2, m2).transpose(0, 1, 3, 2)
+
+
+@jax.jit
 def _acc_pair_normal(
     B1_b: Array,
     B2_b: Array,
@@ -1077,6 +1145,8 @@ def _fit_hdmr(
         colsum = jnp.zeros((m_basis, n_terms), dtype=dtype)
         BtY = [jnp.zeros((cs, n_terms, m_basis), dtype=dtype) for _ in lanes]
         G12 = jnp.zeros((P, m_basis, n_terms), dtype=dtype)
+        dense = term_order == 2 and _dense_pair_fits(n_terms, m_basis, jnp.dtype(dtype).itemsize)
+        G22 = jnp.zeros((n_terms * m_basis,) * 2 if dense else (0, 0), dtype=dtype)
         # Solving order ``k`` needs the bases up through order ``k`` to
         # reconstruct the exact sequential residual. Do not build a higher
         # order basis that this pass cannot consume.
@@ -1087,6 +1157,8 @@ def _fit_hdmr(
             BtB, colsum = _acc_gram(B_new, BtB, colsum)
             if term_order == 2:
                 G12 = _acc_cross_gram12(B_all[0], B_new, G12)
+                if dense:
+                    G22 = _acc_gram22(B_new, G22)
             for j, (s, e) in enumerate(lanes):
                 BtY[j] = _acc_higher_moment(
                     B_new,
@@ -1117,12 +1189,20 @@ def _fit_hdmr(
                     C1_chunks[j].reshape(cs, P) @ G1_flat
                 )
                 rhs.append(BtY[j] - jnp.einsum("pmj,lp->ljm", A, r1))
-            C2_stack, rel = _get_pair_solve(
-                n_intervals, b, n_row_batches, _PAIR_ITER_FACTOR * max_iter, term_ridge
-            )(X_p, w_full, c2_idx, c3_idx, beta2, beta3, A, BtB, jnp.stack(rhs))
+            if dense:
+                C2_stack = _dense_pair_solve(
+                    G22, G12, A, BtB, jnp.stack(rhs), jnp.asarray(term_ridge, dtype=dtype)
+                )
+                rel = None
+            else:
+                C2_stack, rel = _get_pair_solve(
+                    n_intervals, b, n_row_batches, _PAIR_ITER_FACTOR * max_iter, term_ridge
+                )(X_p, w_full, c2_idx, c3_idx, beta2, beta3, A, BtB, jnp.stack(rhs))
             C2_chunks = list(C2_stack)
-            n_pair_coef = n2 * n_intervals * n_intervals
-            n_coef = n_pair_coef + m1 * n1
+            # Free coefficients: each 1-D basis sums to one, so an input adds
+            # m1 - 1 functions beyond the constant, and a projected pair adds
+            # (m1 - 1)^2 (its tensor basis minus both 1-D spans).
+            n_coef = n1 * (m1 - 1) + n2 * (m1 - 1) ** 2
             if n_coef > 0.8 * N:
                 warnings.warn(
                     f"jaxgsa.hdmr: order 2 has {n_coef} coefficients for "
@@ -1134,12 +1214,17 @@ def _fit_hdmr(
                 )
             tol = _pair_tol(float(jnp.finfo(dtype).eps))
             # The check needs a concrete value; under jit or vmap there is none.
-            if not isinstance(rel, jax.core.Tracer) and float(rel) >= max(tol, _PAIR_WARN_REL):
+            if (
+                rel is not None
+                and not isinstance(rel, jax.core.Tracer)
+                and float(rel) >= max(tol, _PAIR_WARN_REL)
+            ):
                 warnings.warn(
-                    f"jaxgsa.hdmr: the joint second-order solve did not converge in "
-                    f"{_PAIR_ITER_FACTOR * max_iter} steps (10 x max_iter), relative "
-                    f"residual {float(rel):.1e}. "
-                    "Raise max_iter or ridge.",
+                    f"jaxgsa.hdmr: the joint second-order solve stopped at relative "
+                    f"residual {float(rel):.1e}, at the cap of "
+                    f"{_PAIR_ITER_FACTOR * max_iter} steps (10 x max_iter) or after "
+                    f"{_PAIR_STALL} steps without progress (float32). Raise ridge, "
+                    "use float64, or raise max_iter.",
                     category=JaxgsaWarning,
                     stacklevel=3,
                 )

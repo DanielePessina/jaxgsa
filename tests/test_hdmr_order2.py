@@ -44,7 +44,7 @@ def _nrmse(pred, y) -> float:
     return float(np.sqrt(np.mean((np.asarray(pred) - y) ** 2) / np.var(y)))
 
 
-# N = 1024 at D = 23 has 253 pairs of about 25 free coefficients for 1024 rows.
+# N = 1024 at D = 23 has 253 pairs of 16 free coefficients each for 1024 rows.
 # Measured: order 2 still beats order 1 there (0.17 against 0.19), by a thin
 # margin, so the cell stays in with a looser ratio than the others.
 @pytest.mark.parametrize("N", [1024, 4096])
@@ -64,7 +64,11 @@ def test_order2_beats_order1_and_sum_of_s_stays_near_one(x64, D, N):
         warnings.simplefilter("always")
         o2 = _fit(problem, Xj[:N], Yj[:N], order=2, n_intervals=3)
     if clean:
-        assert [str(w.message) for w in caught if "jaxgsa.hdmr" in str(w.message)] == []
+        # The coefficient-count warning is about the sample size, not the
+        # solve: at D = 9, n_intervals = 3 there are 945 free coefficients
+        # for 1024 rows, so it fires there. Nothing else may.
+        msgs = [str(w.message) for w in caught if "jaxgsa.hdmr" in str(w.message)]
+        assert [m for m in msgs if "coefficients for" not in m] == []
     if D == 23 and N == 1024:
         assert any("coefficients for" in str(w.message) for w in caught)
     test1 = _nrmse(o1.predict(Xj[N:]), Y[N:])

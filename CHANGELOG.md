@@ -15,11 +15,15 @@ Pre-release for testing. Some fixes change index values where the old values wer
   projected off the first-order space and all pairs are solved together. At the
   default ridge, sum of `S` is 1.000 and test NRMSE is 0.009 to 0.15 at D = 5
   to 23 (0.01 at D = 5, 0.15 at D = 23, N = 1024; 0.025 at D = 23, N = 4096).
-  The joint solve gets 10 x `max_iter` CG steps. It stops early when the
-  residual stops improving, which float32 needs. It warns when the residual
-  stays above 1e-2. It also warns when first-order and pair coefficients together exceed 0.8 of
-  the samples (D = 23 or D = 15 at N = 1024): the pairs then fit the data too closely and the
-  true pair `S2` reads too small (0.005 against 0.034). Every `order >= 2` fit
+  In float64, when the full pair system fits the memory budget (up to about
+  D = 15 at the default `n_intervals`), it is solved directly. Otherwise it
+  is solved by CG with up to 10 x `max_iter` steps, which stops early when
+  the residual stops improving (float32 needs this) and warns when the
+  residual stays above 1e-2. A fit warns when its free coefficients exceed
+  0.8 of the samples. A pair adds `(n_intervals + 2)^2` free coefficients,
+  so this happens at D = 23 with N = 4096 and at D = 9 with N = 1024 and
+  `n_intervals=3`. The pairs then fit the data too closely and the true pair
+  `S2` can read too small (0.005 against 0.034 at D = 23, N = 1024). Every `order >= 2` fit
   changes: pair and total-order indices move (Ishigami at 1000 rows: `ST` of
   `x3` 0.287 to 0.221, analytic 0.244; `ST` of `x2` 0.339 to 0.325; `S1` does
   not move). In-sample error above test error was the same overshoot, and is
@@ -174,6 +178,10 @@ Pre-release for testing. Some fixes change index values where the old values wer
   scorer compiles once, so repeated analyses skip some compile time (about
   0.2 to 0.4 s per new dataset in one small test). Wall-clock gains on small
   cases are within run-to-run noise.
+- `hdmr.analyze` at `order >= 2` is slower than in 1.1.2, because the pairs
+  are now solved jointly. Steady state, float64, D = 15: 0.3 to 0.5 s (direct
+  solve). D = 23, N = 4096: about 9 to 13 s with CG, against 1.2 s for the
+  old, wrong fit.
 - The PCE fit is slower, because QR does more work than the normal
   equations. Steady-state `analyze` takes 2 to 3 times longer at large sizes:
   about 270 ms to 800 ms for D = 6, order 6, N = 20000 (924 terms; 3 to 3.5
