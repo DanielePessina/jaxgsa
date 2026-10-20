@@ -215,7 +215,7 @@ def _pair_boundaries(y: Array, t: Array) -> tuple[Array, Array]:
     return right_lo, left_lo
 
 
-def _pairwise_quantile_by_selection(x: Array, q: float) -> Array:
+def _pairwise_quantile_by_selection(x: Array, q: float, *, skip_zero: bool = False) -> Array:
     """Take a linear quantile of all ``N^2`` squared distances without forming them.
 
     This returns bit for bit what ``jnp.quantile`` returns on
@@ -235,6 +235,11 @@ def _pairwise_quantile_by_selection(x: Array, q: float) -> Array:
     Args:
         x: Values, shape ``(N,)``.
         q: Quantile in [0, 1], as a Python float.
+        skip_zero: If true, ignore the zero-distance pairs (the diagonal and
+            tied values) and return the median of the non-zero pairs. ``q``
+            is then not used for columns with tied values. For a column with
+            no ties the result equals the ``q`` quantile, bit for bit. If
+            every pair is zero, the result is 0.
 
     Returns:
         Scalar quantile, in the dtype of ``x``.
@@ -263,7 +268,7 @@ def _pairwise_quantile_by_selection(x: Array, q: float) -> Array:
         right, left = _pair_boundaries(y, t)
         return jnp.sum((right - left).astype(count_dtype)), right, left
 
-    def select(rank: int) -> Array:
+    def select(rank: int | Array) -> Array:
         """Return the bit pattern of the entry at 0-based ``rank``."""
         r = jnp.asarray(rank, dtype=count_dtype)
 
@@ -276,7 +281,23 @@ def _pairwise_quantile_by_selection(x: Array, q: float) -> Array:
         return jax.lax.fori_loop(0, n_bits - 1, step, jnp.zeros((), dtype=uint))
 
     low_rank, high_rank, high_weight = _linear_quantile_plan(q, n * n)
-    lo_bits = select(low_rank)
+    low_r: int | Array = low_rank
+    high_r: int | Array = high_rank
+    n_zero: Array | None = None
+    if skip_zero:
+        # Zero distances: the N diagonal entries plus every tied pair.
+        n_zero = count_at_or_below(jnp.zeros((), dtype=uint))[0]
+        n_nonzero_pairs = (jnp.asarray(n * n, dtype=count_dtype) - n_zero) // 2
+        is_tie_free = n_zero == n
+        # The non-zero entries fill the top of the sorted array, each twice.
+        # Positions Z + M - 1 and Z + M, weight 1/2, give their median.
+        dyn_low = n_zero + n_nonzero_pairs - 1
+        low_r = jnp.where(is_tie_free, jnp.asarray(low_rank, dtype=count_dtype), dyn_low)
+        high_r = jnp.where(is_tie_free, jnp.asarray(high_rank, dtype=count_dtype), dyn_low + 1)
+        high_weight = jnp.where(
+            is_tie_free, high_weight, jnp.asarray(0.5, dtype=high_weight.dtype)
+        )
+    lo_bits = select(low_r)
     low_value = jax.lax.bitcast_convert_type(lo_bits, x.dtype)
 
     # The next distinct value above ``low_value`` sits at a row boundary:
@@ -287,8 +308,13 @@ def _pairwise_quantile_by_selection(x: Array, q: float) -> Array:
     left_next = jnp.where(left > 0, (y[jnp.maximum(left - 1, 0)] - y) ** 2, top)
     next_value = jnp.minimum(jnp.min(right_next), jnp.min(left_next))
     high_value = jnp.where(
-        n_at_or_below >= jnp.asarray(high_rank + 1, dtype=count_dtype), low_value, next_value
+        n_at_or_below >= jnp.asarray(high_r, dtype=count_dtype) + 1, low_value, next_value
     )
+    if n_zero is not None:
+        # Every pair is zero: no non-zero distance exists. Return 0.
+        all_zero = n_zero == n * n
+        low_value = jnp.where(all_zero, 0.0, low_value)
+        high_value = jnp.where(all_zero, 0.0, high_value)
 
     blended = jnp.quantile(jnp.stack([low_value, high_value]), high_weight)
     return jnp.where(finite, blended, jnp.nan)
@@ -297,9 +323,14 @@ def _pairwise_quantile_by_selection(x: Array, q: float) -> Array:
 def _median_bandwidth_sq(x: Array) -> Array:
     """Compute the median-heuristic squared bandwidth for one variable.
 
-    The median heuristic takes the median of the ``M = (N^2 - N) / 2``
-    off-diagonal pairwise squared distances. The N diagonal zeros are excluded
-    because they carry no information about the spread of the sample.
+    The median heuristic takes the median of the non-zero pairwise squared
+    distances. For a column with no tied values these are the
+    ``M = (N^2 - N) / 2`` off-diagonal pairs. Zero distances (the diagonal and
+    tied values) carry no information about the spread of the sample, and an
+    atom holding more than half of the pairs would otherwise pull the median
+    to 0 and collapse the kernel to an equality test. A column with
+    near-ties (not exact ones) can still collapse; :func:`_warn_collapsed_median`
+    warns about it.
 
     Building the strict upper triangle to do that costs two index arrays and a
     gathered copy. It is not needed: the diagonal zeros are the *smallest*
@@ -333,11 +364,11 @@ def _median_bandwidth_sq(x: Array) -> Array:
         x: Values for one variable, shape ``(N,)``.
 
     Returns:
-        Scalar median of the off-diagonal squared distances, floored at 1e-20.
+        Scalar median of the non-zero squared distances, floored at 1e-20.
     """
     N = x.shape[0]
     q = (N**2 + N - 1) / (2 * (N**2 - 1))
-    return jnp.maximum(_pairwise_quantile_by_selection(x, q), 1e-20)
+    return jnp.maximum(_pairwise_quantile_by_selection(x, q, skip_zero=True), 1e-20)
 
 
 def _center_kernel(K: Array) -> Array:
@@ -702,15 +733,25 @@ def _warn_constant_inputs(problem: Problem, X: Array) -> None:
     )
 
 
-def _collapsed_median_labels(values: np.ndarray) -> list[int]:
-    """Return the columns whose median heuristic collapses to the floor.
+_NEAR_COLLAPSE_RATIO = 1e-6
+"""Warn when the median non-zero squared distance is below this share of the variance."""
 
-    The median of the off-diagonal pairwise squared distances is exactly 0
-    when more than half of the ``N (N - 1) / 2`` pairs are equal, which
-    happens when one value holds a large share of the sample. A column with
-    exactly two distinct values is left alone: the equality-indicator kernel
-    the floor produces is the right kernel for it. A constant column is left
-    alone too, since it has its own warning.
+_COLLAPSE_CHECK_MAX_ROWS = 2048
+"""Rows used by the host near-collapse check (an even stride subsample)."""
+
+
+def _collapsed_median_labels(values: np.ndarray) -> list[int]:
+    """Return the columns whose median heuristic nearly collapses.
+
+    The heuristic takes the median over the non-zero pairwise squared
+    distances, so exact atoms are handled. Near-ties are not: a column where
+    most values sit within a tiny distance of each other (a spike plus
+    noise of order 1e-6) makes that median tiny against the spread of the
+    column, and the kernel then separates only the near-equal values. A
+    column is flagged when the median non-zero squared distance is below
+    ``1e-6`` times its variance. A constant column is left alone, since it
+    has its own warning. Large samples are checked on an even stride
+    subsample of at most 2048 rows.
 
     Args:
         values: Samples, shape ``(N, C)``.
@@ -719,30 +760,33 @@ def _collapsed_median_labels(values: np.ndarray) -> list[int]:
         Indices of the affected columns.
     """
     n = values.shape[0]
-    n_pairs = n * (n - 1) // 2
+    if n > _COLLAPSE_CHECK_MAX_ROWS:
+        values = values[:: -(-n // _COLLAPSE_CHECK_MAX_ROWS)]
     bad = []
     for c in range(values.shape[1]):
-        col = values[:, c]
+        col = values[:, c].astype(np.float64)
         col = col[np.isfinite(col)]
-        uniq, counts = np.unique(col, return_counts=True)
-        if uniq.size <= 2:
+        var = float(np.var(col)) if col.size else 0.0
+        if var == 0.0:
             continue
-        equal_pairs = int(np.sum(counts.astype(np.int64) * (counts.astype(np.int64) - 1) // 2))
-        if 2 * equal_pairs > n_pairs:
+        d2 = (col[:, None] - col[None, :]) ** 2
+        nonzero = d2[np.triu_indices(col.size, k=1)]
+        nonzero = nonzero[nonzero > 0]
+        if nonzero.size and float(np.median(nonzero)) < _NEAR_COLLAPSE_RATIO * var:
             bad.append(c)
     return bad
 
 
 def _warn_collapsed_median(problem: Problem, X: Array, Y3: Array, stacklevel: int) -> None:
-    """Warn when the median heuristic collapses for an input or an output slice.
+    """Warn when the median heuristic nearly collapses for an input or an output slice.
 
-    When more than half of the sample pairs share one value, the median
-    squared distance is 0 and the heuristic falls to its 1e-20 floor. The
-    Gaussian kernel then reads 1 for equal values and 0 for any other pair,
-    and the indices react strongly to tiny perturbations of the rest of the
-    sample. The check reads concrete values, so it lives here and not in
-    :func:`indices`. ``bandwidth`` multiplies the heuristic, so it cannot
-    rescue a collapsed one.
+    The heuristic ignores exact ties, so atoms (a spike of zeros) are fine.
+    Near-ties are not: when the median non-zero squared distance is below
+    1e-6 times the variance, the Gaussian kernel reads about 1 for
+    near-equal values and 0 for the rest, and the indices react strongly to
+    tiny perturbations. The check reads concrete values, so it lives here and
+    not in :func:`indices`. ``bandwidth`` multiplies the heuristic, so it
+    cannot rescue a collapsed one.
 
     Args:
         problem: Problem definition, used to name the parameters.
@@ -751,8 +795,8 @@ def _warn_collapsed_median(problem: Problem, X: Array, Y3: Array, stacklevel: in
         stacklevel: Stack level that points the warning at the caller's line.
 
     Warns:
-        JaxgsaWarning: If an input or an output slice has more than half of
-            its sample pairs equal and more than two distinct values.
+        JaxgsaWarning: If an input or an output slice has a median non-zero
+            squared distance below 1e-6 times its variance.
     """
     x_host = np.asarray(X)
     y_host = np.asarray(Y3)
@@ -764,12 +808,13 @@ def _warn_collapsed_median(problem: Problem, X: Array, Y3: Array, stacklevel: in
     if not parts:
         return
     warnings.warn(
-        f"jaxgsa.hsic: the median heuristic failed for {', '.join(parts)}: more than half "
-        "of the samples share one value, so the median squared distance is 0 and the "
-        "kernel only tests whether two values are equal. The indices then react strongly "
-        "to tiny changes in the other samples. The bandwidth multiplier cannot fix this. "
-        "Analyse the non-zero part of the variable separately, or use a method that does "
-        "not rely on a bandwidth.",
+        f"jaxgsa.hsic: the median heuristic failed for {', '.join(parts)}: most values lie "
+        "within a tiny distance of each other (near-ties), so the median non-zero squared "
+        "distance is below 1e-6 times the variance and the kernel only tests whether two "
+        "values are nearly equal. The indices then react strongly to tiny changes in the "
+        "other samples. The bandwidth multiplier cannot fix this. Round the near-equal "
+        "values to exact ties, analyse the non-zero part of the variable separately, or "
+        "use a method that does not rely on a bandwidth.",
         stacklevel=stacklevel,
         category=JaxgsaWarning,
     )

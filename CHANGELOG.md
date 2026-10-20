@@ -81,6 +81,9 @@ Some fixes change index values where the old values were wrong. See Fixed.
   an edge change bin.
 - OT: with float64 on, the overlap weights of categorical inputs in `mode="univariate"` were rounded to float32. They now use the working dtype.
 - `hdmr.analyze` now raises `ValueError` for a constant input, two equal inputs, or an input that is a linear combination of others (for example `c = a`). Before, the fit split the effect between `a` and `c` in any proportion without an error (S1 of `a` 0.000 and of `c` 0.796). It uses the same check as `pce.analyze`.
+- `hsic.analyze` and `hsic.indices`: the median bandwidth now uses the median of the non-zero pairwise squared distances. Before, an atom holding more than half of the sample (for example 75% zeros) pulled the median to 0 and the kernel only tested equality. Columns with no tied values are bitwise unchanged. The 1.1.2 warning now fires on near-ties instead (median non-zero squared distance below 1e-6 times the variance), because those still collapse. The binary-column exemption is gone: a two-valued column now gets a real bandwidth.
+- `pawn.analyze` bootstrap intervals with `ci_method="quantile"` were biased upward. The KS maximum is not differentiable at a zero gap, so the replicates sit above the point estimate (null parameter, N=1000: point 0.072, replicate mean 0.111). The draws are now mean-centred on the point estimate before the quantiles are read. `ci.replicates` keeps the raw draws. The interval is not a confidence interval for the population index.
+- `pawn` KS statistics were off by 1 ulp because XLA turns the division into a reciprocal multiply. A constant output gave 6e-8 instead of 0. The gap is now computed from exact integer counts. Cumulative bin counts are int32, so they stay exact above N=2^24.
 
 ### Changed values
 
@@ -112,6 +115,9 @@ Some fixes change index values where the old values were wrong. See Fixed.
   most the old Hermite defect, 2e-4.
 - OT with categorical inputs, `mode="univariate"`, float64 only: `ot` changes by about 1e-11 to 1e-10 absolute (below 1e-9 relative), `diffusive` by up to a few 1e-9 relative, and the `ot` confidence interval endpoints by about 1e-10 absolute. The old values carried float32 rounding. Float32 runs and continuous inputs are bitwise unchanged.
 - Bootstrap intervals (`*_conf`) and `ci.replicates` of `hdmr`, `pce` and `shapley` change at rounding level. The row draws are the same. The largest change is 6e-5 in float32 (HDMR) and 4e-14 in float64. PCE and Shapley with the PCE backend are equal to about 1e-16 in float64. Point estimates do not change.
+- `hsic` with tied values in an input or output: `R2` and `T` change because the bandwidth changes. Spike output (75% zeros), N=400: `R2` 0.0151 to 0.0066 and `T` 0.0304 to 0.0151 for the second parameter. Two-valued inputs change `T` only. Data with no ties is bitwise unchanged.
+- `pawn_conf` with `ci_method="quantile"` and `n_bootstrap>0` moves down by the mean bootstrap excess: about 0.03 for a null parameter at N=1000, about 0.006 for a strong one. The width is unchanged. `"gaussian"` intervals do not change.
+- `pawn` point values and bootstrap draws change by at most 1 ulp (6e-8 in float32). A constant output now gives exactly 0.
 
 ### Performance
 

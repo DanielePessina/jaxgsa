@@ -60,6 +60,7 @@ References:
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 from functools import lru_cache, partial
 from typing import Literal, NamedTuple, cast
@@ -321,23 +322,26 @@ def _check_categorical_codes(problem: Problem, X: Array) -> None:
 # Rows per block in the blocked cumulative sum. A power of two keeps the
 # triangular matmul small; the value changes speed, never the result.
 _CUMSUM_BLOCK = 64
+# Largest N with N*N < 2**32, for the uint32 KS numerator without x64.
+_MAX_UINT32_N = 65535
 
 
 def _count_cumsum(oh: Array) -> Array:
-    """Return the cumulative sum of ``oh`` along axis 0, exactly.
+    """Return the cumulative sum of ``oh`` along axis 0, as exact int32 counts.
 
-    ``oh`` holds 0/1 flags, so every partial sum is an integer of at most
-    ``N``. That is exact in float32 only while ``N < 2**24``, which is the
-    limit of this function. The result is therefore bit-for-bit
-    ``jnp.cumsum(oh, axis=0)``. It is built from a lower-triangular matmul
-    inside blocks of rows plus a cumulative sum of the block totals, which
-    XLA on CPU runs faster than its own reduce-window lowering of ``cumsum``.
+    ``oh`` holds 0/1 flags. Block sums are at most ``_CUMSUM_BLOCK``, so the
+    float matmul inside a block is exact. They are converted to int32 and
+    the offsets between blocks are summed in int32, so the counts stay exact
+    up to ``N = 2**31`` (float32 would round above ``2**24``). The result
+    equals ``jnp.cumsum(oh, axis=0)`` as integers. A lower-triangular matmul
+    inside blocks of rows plus a cumulative sum of the block totals runs
+    faster on CPU than the XLA reduce-window lowering of ``cumsum``.
 
     Args:
         oh: 0/1 flags, shape ``(N, ...)``, in a float dtype.
 
     Returns:
-        Cumulative counts, same shape and dtype as ``oh``.
+        Cumulative counts, same shape as ``oh``, dtype int32.
     """
     n = oh.shape[0]
     b = min(_CUMSUM_BLOCK, n)
@@ -351,6 +355,7 @@ def _count_cumsum(oh: Array) -> Array:
     blocks = flat.reshape(n_blocks, b, flat.shape[1])
     tri = jnp.tril(jnp.ones((b, b), dtype=flat.dtype))
     within = jnp.einsum("ij,njk->nik", tri, blocks, precision=jax.lax.Precision.HIGHEST)
+    within = within.astype(jnp.int32)
     totals = within[:, -1, :]
     offsets = jnp.cumsum(totals, axis=0) - totals
     out = (within + offsets[:, None, :]).reshape(n_blocks * b, -1)[:n]
@@ -386,12 +391,34 @@ def _ks_from_sorted(y_sorted: Array, bin_idx_sorted: Array, n_classes: int) -> A
     dtype = jnp.result_type(y_sorted.dtype, jnp.float32)
     param_bins = jnp.arange(n_classes)
     is_group_end = jnp.concatenate([y_sorted[:-1] != y_sorted[1:], jnp.array([True])])
-    uncond_cdf = jnp.arange(1, N + 1, dtype=dtype) / N
     oh = (bin_idx_sorted[:, :, None] == param_bins[None, None, :]).astype(dtype)
-    cnt = oh.sum(axis=0)
+    cnt = oh.sum(axis=0, dtype=jnp.int32)
     cum = _count_cumsum(oh)
-    ccdf = cum / jnp.maximum(cnt[None, :, :], 1.0)
-    diff = jnp.abs(uncond_cdf[:, None, None] - ccdf)
+    pos = jnp.arange(1, N + 1, dtype=jnp.int32)[:, None, None]
+    cnt_b = cnt[None, :, :]
+    if jax.config.jax_enable_x64:
+        int_t = jnp.int64
+    elif N <= _MAX_UINT32_N:
+        int_t = jnp.uint32
+    else:
+        int_t = None
+    if int_t is not None:
+        # |pos/N - cum/cnt| = |pos*cnt - cum*N| / (N*cnt). The numerator is an
+        # exact integer, so the gap is exactly 0 when the two ECDFs agree and
+        # there is one rounding step. N*N must fit the integer type.
+        lhs = pos.astype(int_t) * cnt_b.astype(int_t)
+        rhs = cum.astype(int_t) * jnp.asarray(N, dtype=int_t)
+        num = jnp.maximum(lhs, rhs) - jnp.minimum(lhs, rhs)
+        den = jnp.maximum(cnt_b, 1).astype(int_t) * jnp.asarray(N, dtype=int_t)
+        diff = num.astype(dtype) / den.astype(dtype)
+    else:
+        # N > 65535 without x64: true division. The barrier stops XLA from
+        # rewriting x/const as x*(1/const), which is off by 1 ulp.
+        d_n = jax.lax.optimization_barrier(jnp.full(cum.shape, N, dtype=dtype))
+        d_c = jax.lax.optimization_barrier(
+            jnp.broadcast_to(jnp.maximum(cnt_b, 1).astype(dtype), cum.shape)
+        )
+        diff = jnp.abs(pos.astype(dtype) / d_n - cum.astype(dtype) / d_c)
     diff = jnp.where(is_group_end[:, None, None], diff, -jnp.inf)
     ks = jnp.max(diff, axis=0)
     return jnp.where(cnt >= 2, ks, jnp.nan)
@@ -871,18 +898,25 @@ def analyze(
             shifts the output. ``"mean"`` weights all bins equally.
         n_bootstrap: Number of bootstrap resamples for confidence intervals.
             ``0`` disables the confidence intervals.
-        conf_level: Confidence level for the bootstrap intervals. The
-            bootstrap resamples rows with replacement. Resampling adds its
-            own noise to a KS gap that is already noisy, and the KS
-            statistic is a maximum of absolute gaps, so each replicate sits
-            above the point estimate on average. Weighted resampling with no
-            duplicated rows shows the same shift. The interval is therefore
-            biased upward and is widest
-            in relative terms for weak parameters. For a parameter with no
-            effect, the interval can lie entirely above the point estimate.
-            Read it as a rough scale of the sampling noise. Do not read it
-            as a coverage guarantee. Use a larger ``N`` or a different
-            statistic if you need to separate weak parameters from noise.
+        conf_level: Confidence level for the bootstrap intervals. The KS
+            statistic is a maximum of absolute gaps, and the maximum is not
+            differentiable at a zero gap. Each replicate adds its own noise
+            to a gap that is already noise, so the replicates sit above the
+            point estimate on average. This is not caused by duplicated
+            rows. For ``ci_method="quantile"`` the draws are therefore
+            shifted so that their mean equals the point estimate
+            (bias-corrected percentile, Efron and Tibshirani 1993, sec.
+            10.6) before the quantiles are read. ``ci.replicates`` keeps
+            the raw draws, so quantiles you compute from it differ from the
+            interval. The interval describes the sampling noise of the
+            estimator around its own expected value. It is NOT a confidence
+            interval for the population PAWN index: the estimator
+            overestimates that index by about ``1 / sqrt(N / n_classes)``,
+            which is larger than its noise. A plain bootstrap is
+            inconsistent for a maximum at a boundary (Andrews 2000,
+            Econometrica 68:399-405; Fang and Santos 2019, Rev. Econ.
+            Stud. 86:377-412). Use a larger ``N`` or a dummy-parameter
+            reference to separate weak parameters from noise.
         ci_method: How the interval endpoints are formed. ``"quantile"``
             (default) reads them off the empirical bootstrap distribution.
             ``"gaussian"`` centres them on the point estimate and takes
@@ -1011,14 +1045,24 @@ def analyze(
 
         # Squeeze the point estimate and the draws to the caller's own
         # layout first; interval() returns conf/ci already at that layout.
+        point_sq = ctx.squeeze(pawn_3d)
+        draws_sq = ctx.squeeze(boot_stack)
+        if ci_method == "quantile":
+            # Mean-centre the draws: the bootstrap excess over the point
+            # estimate is bias, not sampling spread. NaN draws are skipped.
+            draws_used = draws_sq - (jnp.nanmean(draws_sq, axis=0) - point_sq)
+        else:
+            draws_used = draws_sq
         confs, ci = interval(
-            {"pawn": ctx.squeeze(pawn_3d)},
-            {"pawn": ctx.squeeze(boot_stack)},
+            {"pawn": point_sq},
+            {"pawn": draws_used},
             level=conf_level,
             method=ci_method,
             n_bootstrap=n_bootstrap,
             keep_replicates=keep_replicates,
         )
+        if keep_replicates:
+            ci = dataclasses.replace(ci, replicates={"pawn": draws_sq})
         pawn_conf = confs["pawn"]
 
     pawn_out = ctx.squeeze(pawn_3d)
