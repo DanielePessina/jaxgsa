@@ -1085,7 +1085,8 @@ def _fit_hdmr(
             if not isinstance(rel, jax.core.Tracer) and float(rel) >= tol:
                 warnings.warn(
                     f"jaxgsa.hdmr: the joint second-order solve did not converge in "
-                    f"{_PAIR_ITER_FACTOR * max_iter} steps (10 x max_iter) (relative residual {float(rel):.1e}). "
+                    f"{_PAIR_ITER_FACTOR * max_iter} steps (10 x max_iter), relative "
+                    f"residual {float(rel):.1e}. "
                     "Raise max_iter or ridge.",
                     stacklevel=2,
                 )
