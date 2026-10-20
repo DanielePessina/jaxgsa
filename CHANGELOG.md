@@ -17,6 +17,43 @@
   `jaxgsa.pce` and pointed at a line inside the package. They now say
   `jaxgsa.shapley.analyze` and point at your line. Values do not change.
 
+- The PCE fit now solves the ridge least squares by QR, not by the normal
+  equations. The normal equations square the condition number of the design.
+  In float32 that lost every digit at high order: a Hermite fit on three
+  Gaussian inputs at order 12 (N = 6000) raised "the Gram matrix of the design
+  is numerically singular". The same fit now returns the exact indices
+  (ST = 0.8062, 0.1938, 0.0310) at orders 12 and 14. Order 16 is off by about
+  2e-3 in float32, and the fit warns about it. This also holds for `shapley`
+  with the PCE backend. The streamed fit (`batch_size`) uses a tall-skinny QR
+  that folds in one batch at a time, so its memory stays within the budget.
+- The rank check reads the pivot share from the QR factor. It is finite in
+  float32, so float32 no longer refuses a fit because a Cholesky factor
+  failed. Both dtypes now warn when the share is below 1e-9 (the design is
+  near singular), and float32 also warns below 1.4e-6, where it keeps fewer
+  than about 4 digits. A non-finite share still raises. Constant, duplicated
+  and linearly dependent inputs still raise, because they are read off the
+  inputs. A design that is singular for another reason, such as a three-level
+  input at order 3, now warns in float32, where 1.1.2 could raise.
+- `pce.analyze` with `n_bootstrap > 0` warns when some resamples fit a
+  near-singular design, and gives the count. The rank check ran on the full
+  sample only.
+
+### Changed values
+
+- PCE values change by float rounding in every fit, and so do Shapley values
+  from the PCE backend. Ishigami, N = 1000, orders 3, 5 and 7: at most 4.2e-7
+  in float32 and 6.7e-16 in float64, for S1, ST, S2, `cv_rmse` and the
+  bootstrap intervals. Fits that 1.1.2 refused in float32 now succeed.
+
+### Performance
+
+- The PCE fit is slower, because QR does more work than the normal
+  equations. Steady-state `analyze` takes 2 to 3 times longer at large sizes:
+  222 ms to 655 ms for D = 6, order 6, N = 20000 (924 terms), and 152 ms to
+  312 ms for D = 10, order 3, N = 50000. Small fits (D = 3, order 5, N = 1000)
+  take about 2 ms in both. The estimate of fit memory, which decides when the
+  fit streams, grows from 2 to 4 arrays of the design size.
+
 ## 1.1.2
 
 This release fixes bugs and makes several methods faster. Correct index

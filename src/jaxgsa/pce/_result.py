@@ -81,7 +81,7 @@ class PCEResult(SchemaResult, SurrogateResult):
             number, and a high ``explained_variance`` beside a ``cv_rmse``
             near ``Y.std()`` is the signature of an overfit.
         streamed: True when the fit ran the row-streamed path, False when it
-            ran in one pass. Both paths solve the same normal equations and
+            ran in one pass. Both paths solve the same least squares by QR and
             report the same leave-one-out error; they differ only in float32
             summation order and in peak memory. The streamed path engages
             when ``batch_size`` is an explicit int, or when the one-pass fit

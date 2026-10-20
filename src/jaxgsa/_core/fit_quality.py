@@ -65,31 +65,35 @@ OVERFIT_THRESHOLD = 1.3
 # of 0.020.
 CV_RATIO_THRESHOLD = math.sqrt(1.0 - POORFIT_THRESHOLD)
 
-# Limits on the pivot share of a Gram matrix, per dtype.
+# Limits on the pivot share of the design, per dtype.
 #
-# The pivot share of column j is the squared Cholesky pivot ``L[j, j]**2``
-# over the diagonal ``G[j, j]`` of the ridge-regularized Gram matrix: the
-# fraction of the column's variance that is left after the columns before it
-# explain it.
+# The pivot share of column j is the squared QR pivot ``R[j, j]**2`` over the
+# squared norm of the ridge-augmented column: the fraction of the column's
+# variance that is left after the columns before it explain it. It is read off
+# the QR factor of the fit, which never squares the condition number, so it is
+# finite and accurate in float32 down to about 1e-11.
 #
-# The share alone cannot prove that the indices are undefined in float64.
-# Accurate high-order Hermite fits and exactly dependent designs give shares
-# in overlapping ranges, so no fixed limit separates them. The provable cases,
-# a constant input and two identical inputs, are read off the inputs instead
-# (:func:`check_degenerate_inputs`). In float64 the share only warns, below
-# 1e-9. An input that copies another up to 1e-3 noise gives about 3e-10 on
-# 2000 rows, and its copy then gets a total index of 0.08 instead of 0.
-#
-# float32 cannot resolve the same range. Its rounding floor overlaps the
-# shares of singular designs: a three-level input on 2000 rows gives about
-# 1e-5 in float32, and the exact value moves with the jax version. Below 1e-5
-# float32 refuses the fit, and NaN (a failed factorisation) counts as below.
-# From 1e-5 to 1e-4 it warns, because the design may be singular and float32
-# cannot tell. The lowest well-posed float32 share measured is 1.5e-4 (D = 10,
-# order 4, fit_ratio = 1).
-ILL_CONDITIONED_PIVOT_THRESHOLD_F64 = 1e-9
-SINGULAR_PIVOT_THRESHOLD_F32 = 1e-5
-AMBIGUOUS_PIVOT_THRESHOLD_F32 = 1e-4
+# The share alone cannot prove that the indices are undefined, in either
+# dtype. Accurate high-order Hermite fits and exactly dependent designs give
+# shares in overlapping ranges, so no fixed limit separates them. Order 20 on
+# two Gaussian inputs gives 1.7e-9 and exact indices, while a three-level
+# input on 2000 rows gives 1.7e-10 and a two-level input 1e-11. The ridge
+# floors the share of any singular design near ``ridge / |column|**2``. The
+# provable cases, a constant input, two identical inputs and a linear
+# combination of inputs, are read off the inputs instead
+# (:func:`check_degenerate_inputs`). The share only warns. An input that
+# copies another up to 1e-3 noise gives about 3e-10 on 2000 rows, and its
+# copy then gets a total index of 0.08 instead of 0.
+ILL_CONDITIONED_PIVOT_THRESHOLD = 1e-9
+
+# float32 needs a higher line for a warning. A QR solve carries a relative
+# error of about ``eps``, and a pivot share ``s`` amplifies it by
+# ``1 / sqrt(s)``. The warning fires when ``eps / sqrt(s)`` passes 1e-4, which is
+# a share of 1.4e-6 in float32. Measured on two Gaussian inputs: order 14 has
+# share 1.4e-7 and its indices are exact to 1e-5 in float32; the order 16 and
+# order 20 fits (1.5e-8, 1.7e-9) are off by 3e-3 and 1e-2. float64 never
+# reaches the line before it reaches the one above.
+PRECISION_PIVOT_THRESHOLD_F32 = 1.4e-6
 
 # Limit on the residual of an input that is a linear combination of others.
 #
@@ -289,6 +293,40 @@ def min_pivot_share(gram: Array) -> Array:
     return jnp.min(jnp.diagonal(chol) ** 2 / jnp.diagonal(gram))
 
 
+def warn_gram_rank_replicates(namespace: str, pivot_share: Array, *, advice: str) -> None:
+    """Warn when bootstrap resamples fit near-singular designs.
+
+    :func:`check_gram_rank` judges the one fit on the full sample and can
+    refuse it. A bootstrap replicate is a fit on repeated rows, which can
+    only lose rank, and the replicates run in a loop that cannot stop for one
+    bad draw. This counts the replicates that :func:`check_gram_rank` would
+    have refused or warned about, and warns once with that count.
+
+    Args:
+        namespace: The public function the message speaks for.
+        pivot_share: The pivot share of each replicate, shape
+            ``(n_bootstrap,)``.
+        advice: What to do about it. Appended to the message.
+
+    Warns:
+        JaxgsaWarning: If any replicate share is not finite or is below the
+            warning limit of its dtype.
+    """
+    shares = np.asarray(pivot_share)
+    limit = ILL_CONDITIONED_PIVOT_THRESHOLD
+    n_bad = int(np.sum(~np.isfinite(shares) | (shares < limit)))
+    if n_bad:
+        warnings.warn(
+            f"{namespace}: {n_bad} of {shares.size} bootstrap replicates fitted a "
+            "near-singular design: one basis column has less than "
+            f"{limit:.0e} of its variance left after the earlier columns explain "
+            "it. The intervals built from these draws may be unreliable. "
+            f"{advice}",
+            skip_file_prefixes=(PACKAGE_DIR,),
+            category=JaxgsaWarning,
+        )
+
+
 @jax.jit
 def _input_fingerprints(X: Array) -> tuple[Array, Array]:
     """Per-column spread and a projection that identical columns share.
@@ -436,27 +474,25 @@ def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> N
 
 
 def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
-    """Refuse or warn on a fit whose Gram matrix is near singular.
+    """Refuse or warn on a fit whose design is near singular.
 
-    :func:`check_fit_finite` sees a singular Gram matrix only when it turns
-    into NaN, which happens in float32. In float64 the factorisation
-    succeeds and every number stays finite. This check reads the
-    conditioning directly. The limits depend on the dtype of
-    ``pivot_share``; see :data:`ILL_CONDITIONED_PIVOT_THRESHOLD_F64`.
+    :func:`check_fit_finite` sees a failed fit only when it turns into NaN.
+    This check reads the conditioning directly, from the pivot share of the
+    QR factor. The limits depend on the dtype of ``pivot_share``; see
+    :data:`ILL_CONDITIONED_PIVOT_THRESHOLD`.
 
     Args:
         namespace: The public function the message speaks for.
-        pivot_share: The output of :func:`min_pivot_share`.
+        pivot_share: The output of :func:`jaxgsa.pce._engine.r_pivot_share`.
         advice: What to do about it. Appended to the message.
 
     Raises:
-        ValueError: If ``pivot_share`` is not finite, or is below
-            :data:`SINGULAR_PIVOT_THRESHOLD_F32` in float32.
+        ValueError: If ``pivot_share`` is not finite.
 
     Warns:
-        JaxgsaWarning: If ``pivot_share`` is not refused but is below
-            :data:`ILL_CONDITIONED_PIVOT_THRESHOLD_F64` in float64 or
-            :data:`AMBIGUOUS_PIVOT_THRESHOLD_F32` in float32.
+        JaxgsaWarning: If ``pivot_share`` is below
+            :data:`ILL_CONDITIONED_PIVOT_THRESHOLD`, or in float32 below
+            :data:`PRECISION_PIVOT_THRESHOLD_F32`.
     """
     is_f64 = jnp.asarray(pivot_share).dtype == jnp.float64
     share = float(pivot_share)
@@ -468,36 +504,27 @@ def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
     )
     if not math.isfinite(share):
         raise ValueError(
-            f"{namespace}: the Gram matrix of the design is numerically singular: "
-            "its Cholesky factorisation failed. The coefficients are not "
-            f"identified, so the indices are undefined.{precision} {advice}"
+            f"{namespace}: the design is numerically singular: a column of its QR "
+            "factor is not finite. The coefficients are not identified, so the "
+            f"indices are undefined.{precision} {advice}"
         )
-    if not is_f64 and share < SINGULAR_PIVOT_THRESHOLD_F32:
-        raise ValueError(
-            f"{namespace}: the Gram matrix of the design is numerically singular: "
-            f"one basis column has only {share:.1e} of its variance left after the "
-            f"earlier columns explain it, below {SINGULAR_PIVOT_THRESHOLD_F32:.0e}. "
-            f"The coefficients are not identified, so the indices are undefined."
-            f"{precision} {advice}"
-        )
-    if is_f64 and share < ILL_CONDITIONED_PIVOT_THRESHOLD_F64:
+    if share < ILL_CONDITIONED_PIVOT_THRESHOLD:
         warnings.warn(
-            f"{namespace}: the Gram matrix of the design is near singular: one "
-            f"basis column has only {share:.1e} of its variance left after the "
-            "earlier columns explain it. Near-singular or dependent inputs make "
-            "the indices unreliable. A very high order on Gaussian inputs can "
-            f"also cause this, and its indices can still be accurate. {advice}",
+            f"{namespace}: the design is near singular: one basis column has only "
+            f"{share:.1e} of its variance left after the earlier columns explain "
+            "it. Near-singular or dependent inputs make the indices unreliable. A "
+            f"very high order on Gaussian inputs can also cause this, and its "
+            f"indices can still be accurate.{precision} {advice}",
             skip_file_prefixes=(PACKAGE_DIR,),
             category=JaxgsaWarning,
         )
-    elif not is_f64 and share < AMBIGUOUS_PIVOT_THRESHOLD_F32:
+    elif not is_f64 and share < PRECISION_PIVOT_THRESHOLD_F32:
         warnings.warn(
-            f"{namespace}: the Gram matrix of the design may be numerically "
-            f"singular: one basis column has only {share:.1e} of its variance left "
-            "after the earlier columns explain it. In float32 this cannot be told "
-            "apart from a singular design, so the indices may be undefined. Enable "
-            "jax x64 (jax.config.update('jax_enable_x64', True)) to resolve it. "
-            f"{advice}",
+            f"{namespace}: one basis column has only {share:.1e} of its variance "
+            "left after the earlier columns explain it. float32 carries about 7 "
+            "digits, and this conditioning costs it several of them, so the "
+            "indices may be off in the third digit or worse. Enable jax x64 "
+            f"(jax.config.update('jax_enable_x64', True)) to fit in float64. {advice}",
             skip_file_prefixes=(PACKAGE_DIR,),
             category=JaxgsaWarning,
         )

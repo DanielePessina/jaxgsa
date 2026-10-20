@@ -199,38 +199,25 @@ def test_degenerate_input_message_names_the_shapley_entry_point():
         jaxgsa.shapley.analyze(problem, jnp.asarray(X), jnp.asarray(Y), backend="pce")
 
 
-def test_near_duplicated_input_is_flagged_in_both_dtypes():
-    # Copies b up to 1e-3 noise. float32: the Cholesky factor is NaN, so the
-    # fit raises and names float32 rounding. float64: the share is about
-    # 3e-10, which proves nothing, so the fit warns.
+def test_near_duplicated_input_warns_in_both_dtypes():
+    # Copies b up to 1e-3 noise. The share is about 3e-10 in both dtypes, and
+    # the QR factor resolves it in float32 too, so both dtypes warn.
     problem, X, rng = _three_inputs()
     X[:, 2] = np.clip(X[:, 1] + 1e-3 * rng.standard_normal(2000), 0, 1).astype(np.float32)
     Y = 2 * X[:, 0] + X[:, 1] ** 2
-    if jax.config.jax_enable_x64:
-        with pytest.warns(JaxgsaWarning, match="near singular"):
-            pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
-    else:
-        with pytest.raises(ValueError, match="float32 rounding may be the cause"):
-            pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
+    with pytest.warns(JaxgsaWarning, match="near singular"):
+        pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
 
 
 def test_three_level_input_is_never_silent():
     # Exactly singular at order 3: the cubic in a three-level input lies in
-    # the span of the lower terms. Its float32 share sits near the 1e-5
-    # limit and moves with the jax version, so float32 may raise or warn.
-    # float64 warns.
+    # the span of the lower terms. The ridge floors the share near 2e-10, and
+    # both dtypes warn.
     problem, X, rng = _three_inputs()
     X[:, 2] = rng.choice(np.array([0.1, 0.5, 0.9], np.float32), 2000)
     Y = 2 * X[:, 0] + X[:, 1] ** 2
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        try:
-            pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
-        except ValueError as error:
-            assert not jax.config.jax_enable_x64
-            assert "numerically singular" in str(error)
-            return
-    assert [w for w in caught if "singular" in str(w.message)]
+    with pytest.warns(JaxgsaWarning, match="near singular"):
+        pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=3, verbose=False)
 
 
 @pytest.mark.parametrize(("order", "n", "seed"), [(20, 1000, 0), (20, 1000, 1), (40, 2000, 1)])
@@ -417,3 +404,82 @@ def test_independent_input_with_large_offset_is_not_called_dependent():
         warnings.simplefilter("ignore")
         result = pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=1, verbose=False)
     assert isinstance(result, pce.PCEResult)
+
+
+def _gaussian_three(n: int = 6000):
+    gauss = GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0)
+    problem = jaxgsa.Problem.from_dict({"a": gauss, "b": gauss, "c": gauss})
+    rng = np.random.default_rng(1)
+    X = rng.standard_normal((n, 3)).astype(np.float32)
+    Y = X[:, 0] + 0.5 * X[:, 1] + 0.2 * X[:, 0] * X[:, 2]
+    return problem, X, Y
+
+
+@pytest.mark.parametrize("order", [12, 14])
+def test_float32_high_order_hermite_fit_is_exact(order):
+    # 1.1.2 solved the normal equations. Float32 lost every digit of the
+    # Gram matrix at order 12: the factorisation failed and the fit raised.
+    # QR keeps the digits, so the indices are exact to float32 precision.
+    problem, X, Y = _gaussian_three()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = pce.analyze(
+            problem, jnp.asarray(X), jnp.asarray(Y), order=order, fit_ratio=1.0, verbose=False
+        )
+    assert isinstance(result, pce.PCEResult)
+    np.testing.assert_allclose(np.asarray(result.ST), [0.8062, 0.1938, 0.0310], atol=2e-4)
+
+
+def test_float32_ill_conditioned_fit_warns_about_precision():
+    # Order 16 has a share near 1e-8: the indices are only good to about 3e-3
+    # in float32, and the fit says so.
+    if jax.config.jax_enable_x64:
+        pytest.skip("float32 only")
+    problem, X, Y = _gaussian_three()
+    with pytest.warns(JaxgsaWarning, match="float32 carries about 7 digits"):
+        pce.analyze(
+            problem, jnp.asarray(X), jnp.asarray(Y), order=16, fit_ratio=1.0, verbose=False
+        )
+
+
+def test_ridge_qr_solves_the_normal_equations():
+    from jaxgsa._core.fit_quality import min_pivot_share
+    from jaxgsa.pce._engine import hat_diagonal, r_pivot_share, ridge_qr
+
+    rng = np.random.default_rng(0)
+    dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+    Phi = jnp.asarray(rng.standard_normal((200, 8)).astype(dtype))
+    Y = jnp.asarray(rng.standard_normal((200, 3)).astype(dtype))
+    ridge = 0.05
+    coefficients, R = ridge_qr(Phi, Y, ridge)
+    gram = Phi.T @ Phi + ridge * jnp.eye(8, dtype=Phi.dtype)
+    tol = 1e-10 if jax.config.jax_enable_x64 else 5e-4
+    np.testing.assert_allclose(
+        np.asarray(coefficients), np.asarray(jnp.linalg.solve(gram, Phi.T @ Y)), atol=tol
+    )
+    np.testing.assert_allclose(np.asarray(R.T @ R), np.asarray(gram), atol=tol * 100)
+    np.testing.assert_allclose(
+        float(r_pivot_share(R)), float(min_pivot_share(gram)), rtol=1e-3 if tol < 1e-3 else 5e-2
+    )
+    chol = jnp.linalg.cholesky(gram)
+    np.testing.assert_allclose(
+        np.asarray(hat_diagonal(Phi, R.T)), np.asarray(hat_diagonal(Phi, chol)), atol=tol
+    )
+
+
+def test_bootstrap_counts_replicates_with_a_near_singular_design():
+    # A two-level input makes every fit near singular, so every replicate is
+    # counted, and the count is in the warning.
+    problem, X, rng = _three_inputs()
+    X[:, 2] = rng.choice(np.array([0.2, 0.8], np.float32), 2000)
+    Y = 2 * X[:, 0] + X[:, 1] ** 2
+    with pytest.warns(JaxgsaWarning, match=r"3 of 3 bootstrap replicates"):
+        pce.analyze(
+            problem,
+            jnp.asarray(X),
+            jnp.asarray(Y),
+            order=3,
+            n_bootstrap=3,
+            key=jax.random.key(0),
+            verbose=False,
+        )

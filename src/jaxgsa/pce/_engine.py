@@ -12,6 +12,7 @@ from functools import lru_cache
 from itertools import combinations
 from math import comb, factorial
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
@@ -414,6 +415,60 @@ def gram_cholesky(Phi: Array, ridge: float = 0.0) -> Array:
     if ridge > 0:
         gram = gram + ridge * jnp.eye(gram.shape[0], dtype=gram.dtype)
     return jnp.linalg.cholesky(gram)
+
+
+def ridge_qr(Phi: Array, Y: Array, ridge: float | Array) -> tuple[Array, Array]:
+    """Solve the ridge least-squares problem by QR of the augmented design.
+
+    The coefficients minimise ``|Phi c - Y|^2 + ridge * |c|^2``, the same
+    Tikhonov problem as the normal equations ``(Phi^T Phi + ridge*I) c =
+    Phi^T Y``. They come from the QR factorisation of ``[Phi; sqrt(ridge)*I]``
+    instead. The normal equations square the condition number of ``Phi``.
+    Float32 loses every digit of an order-12 fit that way, and QR keeps them.
+    One factorisation serves every column of ``Y``.
+
+    ``R`` satisfies ``R^T R = Phi^T Phi + ridge*I``, so ``R.T`` is a valid
+    Cholesky factor for :func:`hat_diagonal`, and :func:`r_pivot_share`
+    reads the rank diagnostic off it.
+
+    Args:
+        Phi: Design matrix, shape ``(N, n_terms)``.
+        Y: Outputs, shape ``(N, M)``, one column per output slice.
+        ridge: Tikhonov parameter, at least 0.
+
+    Returns:
+        ``(coefficients, R)``: coefficients of shape ``(n_terms, M)`` and the
+        upper-triangular factor ``R`` of shape ``(n_terms, n_terms)``.
+    """
+    n_terms = Phi.shape[1]
+    root = jnp.sqrt(jnp.asarray(ridge, dtype=Phi.dtype))
+    augmented = jnp.concatenate([Phi, root * jnp.eye(n_terms, dtype=Phi.dtype)], axis=0)
+    Q, R = jnp.linalg.qr(augmented, mode="reduced")
+    # The lower rows of the augmented right-hand side are zero, so only the
+    # first N rows of Q meet Y.
+    coefficients = solve_triangular(R, Q[: Phi.shape[0]].T @ Y, lower=False)
+    return coefficients, R
+
+
+@jax.jit
+def r_pivot_share(R: Array) -> Array:
+    """The smallest unexplained share of any column, read off a QR factor.
+
+    For column ``j`` of the augmented design ``A``, ``R[j, j]**2`` is the part
+    of ``|A_j|**2`` that the columns before it do not explain, and
+    ``|A_j|**2`` is the squared norm of column ``j`` of ``R``. The ratio is
+    the same quantity as :func:`jaxgsa._core.fit_quality.min_pivot_share`
+    reads off the Gram matrix, but it never goes through a Cholesky
+    factorisation, so it stays finite in float32.
+
+    Args:
+        R: Upper-triangular factor, shape ``(n_terms, n_terms)``.
+
+    Returns:
+        ``min_j R[j, j]**2 / sum_i R[i, j]**2``, a scalar in ``[0, 1]``. NaN
+        when a column of ``R`` is all zeros.
+    """
+    return jnp.min(jnp.diagonal(R) ** 2 / jnp.sum(R**2, axis=0))
 
 
 def hat_diagonal(Phi: Array, gram_chol: Array) -> Array:
