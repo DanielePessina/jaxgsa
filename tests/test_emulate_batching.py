@@ -102,9 +102,9 @@ def test_hdmr_batched_matches_single_shot(shape):
     np.testing.assert_allclose(np.asarray(batched), np.asarray(single), rtol=1e-5, atol=1e-6)
 
 
-def test_hdmr_third_order_batched_matches_single_shot(problem):
+def test_hdmr_pairs_batched_matches_single_shot(problem):
     X, Y = _make_xy("scalar")
-    result = hdmr.analyze(problem, X, Y, order=3, n_intervals=2)
+    result = hdmr.analyze(problem, X, Y, order=2, n_intervals=2)
     X_new = _x_new()
 
     single = result.predict(X_new, batch_size=N_NEW)

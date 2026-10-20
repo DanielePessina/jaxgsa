@@ -188,7 +188,7 @@ Those residuals run around 0.25 against a `std(Y)` of 3.777, consistent with
 the fitted `rmse` of 0.499. The emulator is on the same scale as the `Y` you
 supplied, so a residual you can read against the output range is the whole
 check. A gap that stays stubborn as you raise `n_intervals` is a structural miss instead,
-and the fix is `order=3`.
+and the fix is a different model or more rows. Order 3 is not available.
 
 ## When RS-HDMR beats plain Sobol
 

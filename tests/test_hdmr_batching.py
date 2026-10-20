@@ -164,24 +164,6 @@ class TestRowBatching:
         batched = analyze_hdmr(PROBLEM, X, Y, order=1, n_intervals=2, batch_size=250)
         _assert_results_match(batched, hdmr_by_order[1])
 
-    def test_order3_matches(self, hdmr_ishigami_xy, hdmr_by_order):
-        X, Y = hdmr_ishigami_xy
-        full = hdmr_by_order[3]
-        batched = analyze_hdmr(PROBLEM, X, Y, order=3, n_intervals=2, batch_size=333)
-        _assert_results_match(batched, full)
-        # Raw C3 is not comparable element-wise: with a 125-wide tensor-product
-        # basis per triple, the per-term Gram is nearly singular, so f32 noise
-        # moves coefficients along near-null directions without changing the
-        # fitted component functions. Compare the order-3 fit functionally.
-        assert full._fit is not None and batched._fit is not None
-        assert full._fit["C3"] is not None and batched._fit["C3"] is not None
-        np.testing.assert_allclose(
-            np.asarray(batched.predict(X[:200])),
-            np.asarray(full.predict(X[:200])),
-            rtol=1e-3,
-            atol=PREDICT_ATOL,
-        )
-
     def test_ntk_output_matches(self, ishigami_data_ntk, full_ntk):
         X, Y_tk = ishigami_data_ntk
         batched = analyze_hdmr(PROBLEM, X, Y_tk, order=2, n_intervals=2, batch_size=111)

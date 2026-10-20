@@ -81,6 +81,23 @@ _IRREGULAR_KWARGS = (
 _RELIABLE_ROWS = 300
 
 
+def _order_message(order: int) -> str:
+    """Build the error text for an unsupported expansion order.
+
+    Args:
+        order: The requested order.
+
+    Returns:
+        A short message. ``order=3`` gets its own explanation.
+    """
+    if order == 3:
+        return (
+            "order=3 is not supported because the third-order terms are fitted "
+            "one at a time and double-count variance. Use order 1 or 2."
+        )
+    return f"order must be 1 or 2, got {order}"
+
+
 def _min_rows(D: int, order: int, n_intervals: int) -> int:
     """Fewest rows the B-spline fit can be computed on.
 
@@ -470,17 +487,14 @@ def analyze(
         X=X,
         on_invalid=on_invalid,
         checks=(
-            require(
-                order in (1, 2, 3),
-                f"order must be 1, 2, or 3, got {order}",
-            ),
+            require(order in (1, 2), _order_message(order)),
             *_fit_scalar_checks(max_iter, n_intervals, ridge),
             *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
             positive_int("slice_chunk_size", slice_chunk_size),
             positive_int("batch_size", batch_size),
         ),
         # An invalid order is refused by the checks above; do not size its floor.
-        min_kept=_min_rows(problem.n_params, order, n_intervals) if order in (1, 2, 3) else 0,
+        min_kept=_min_rows(problem.n_params, order, n_intervals) if order in (1, 2) else 0,
     )
     assert ctx.X is not None
     X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
@@ -660,14 +674,14 @@ def _hdmr_core(
 
     Raises:
         ValueError: If ``N`` is below the fit's floor (see :func:`_min_rows`),
-            ``order`` is not 1/2/3, ``max_iter``
+            ``order`` is not 1 or 2 (``order=3`` is refused: see above), ``max_iter``
             or ``n_intervals`` is below 1, ``ridge`` is negative, or a chunk size is
             below 1. All are decided on Python scalars. See
             :func:`_fit_scalar_checks` for why those bounds.
     """
     N, D = X.shape
-    if order not in (1, 2, 3):
-        raise ValueError(f"jaxgsa.hdmr: order must be 1, 2, or 3, got {order}")
+    if order not in (1, 2):
+        raise ValueError(f"jaxgsa.hdmr: {_order_message(order)}")
     check_scalars(
         _fit_scalar_checks(max_iter, n_intervals, ridge), method="jaxgsa.hdmr._hdmr_core"
     )
@@ -842,7 +856,7 @@ def indices(
 
     Raises:
         ValueError: If ``N`` is below the fit's floor (see :func:`_min_rows`),
-            ``order`` is not 1/2/3, ``max_iter``
+            ``order`` is not 1 or 2 (``order=3`` is refused: see above), ``max_iter``
             or ``n_intervals`` is below 1, ``ridge`` is negative, a chunk size is
             below 1, or ``problem`` has a categorical parameter, whose step
             CDF has no unit-interval image.
@@ -989,11 +1003,11 @@ def _analyze_hdmr_core(
             array is read as ``(N, K)`` unless ``problem.output_names`` has
             exactly one entry. In that case the columns are T timepoints of
             that single output.
-        order: Maximum HDMR expansion order (1, 2, or 3), which is the
+        order: Maximum HDMR expansion order (1 or 2), which is the
             largest interaction size modelled. Order 2 (default) captures
-            pairwise interactions. Order 3 adds triples, but the term count
-            and the fit cost grow combinatorially. Clamped to D (with a
-            warning) when D < order.
+            pairwise interactions. Order 3 is refused: its triples were
+            fitted one at a time and double-counted variance. Clamped to D
+            (with a warning) when D < order.
         max_iter: Maximum backfitting iterations for the first-order terms.
             The default rarely needs raising, because iteration stops early
             once the coefficients stop changing.
@@ -1066,7 +1080,7 @@ def _analyze_hdmr_core(
 
     Raises:
         ValueError: If ``N`` is below the fit's floor (see :func:`_min_rows`),
-            ``order`` is not 1/2/3, an explicit
+            ``order`` is not 1 or 2 (``order=3`` is refused: see above), an explicit
             ``slice_chunk_size < 1`` or ``batch_size < 1`` is passed, or
             ``problem`` has categorical parameters. The B-spline component
             functions need an orderable axis, which an unordered level code

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0 (unreleased)
+
+### Changed
+
+- `hdmr.analyze` now raises `ValueError` for `order=3`. Third-order terms were fitted one at a time and counted the same leftover variance more than once, so the indices summed above 1. Use `order=1` or `order=2`. `hdmr.indices` raises too.
+
 ## 1.2.0b2 (2026-10-20, pre-release)
 
 Pre-release for testing. 1.2.0b1 was tagged on GitHub but never published to PyPI: its release check failed on the HSIC overflow fixed below. This release contains everything in 1.2.0b1 plus the changes in this section.

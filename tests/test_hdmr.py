@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxgsa import JaxgsaWarning
+from jaxgsa import JaxgsaWarning, hdmr
 from jaxgsa.benchmarks.ishigami import (
     ANALYTICAL_S1,
     ANALYTICAL_ST,
@@ -181,9 +181,9 @@ def test_backfitting_stop_rule_full_scale_and_m_grid():
 
 
 def test_order_selects_the_term_count(hdmr_by_order):
-    """For D=3 the term count is 3, 6 and 7 at order 1, 2 and 3."""
+    """For D=3 the term count is 3 and 6 at order 1 and 2."""
     assert PROBLEM.n_params == 3
-    for order, n_terms in ((1, 3), (2, 6), (3, 7)):
+    for order, n_terms in ((1, 3), (2, 6)):
         result = hdmr_by_order[order]
         assert result.Sa.shape == (n_terms,)
         assert len(result.terms) == n_terms
@@ -383,26 +383,14 @@ def test_s2_s3_all_nan_when_order_1(hdmr_by_order):
     assert bool(jnp.all(jnp.isnan(result.S3)))
 
 
-def test_s3_property_order_3(hdmr_by_order):
-    """S3 is a symmetric (D, D, D) tensor matching the triple's Sa entry."""
-    names = PROBLEM.names
-    D = PROBLEM.n_params
-    result = hdmr_by_order[3]
-    S3 = np.array(result.S3)
-    Sa = np.array(result.Sa)
-    assert S3.shape == (D, D, D)
-
-    # Cells with any repeated axis have no term and stay NaN.
-    for i in range(D):
-        for j in range(D):
-            assert np.isnan(S3[i, i, j])
-            assert np.isnan(S3[i, j, i])
-            assert np.isnan(S3[j, i, i])
-
-    # The single D=3 triple (x1/x2/x3) is populated symmetrically.
-    k = _term_index(result, "/".join(names))
-    for perm in ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)):
-        assert S3[perm] == Sa[k]
+def test_order_3_is_refused():
+    """Order 3 double-counts variance, so it raises with a pointer to order 1 or 2."""
+    X = monte_carlo(PROBLEM, 400, seed=0)
+    Y = np.asarray(X).sum(axis=1)
+    with pytest.raises(ValueError, match="order=3 is not supported.*double-count.*order 1 or 2"):
+        analyze_hdmr(PROBLEM, X, Y, order=3, verbose=False)
+    with pytest.raises(ValueError, match="order=3 is not supported"):
+        hdmr.indices(PROBLEM, X, jnp.asarray(Y), order=3)
 
 
 # ---------------------------------------------------------------------------
@@ -696,7 +684,7 @@ def test_drop_below_floor_refuses_in_the_policy_words():
 def test_invalid_order_is_refused_before_the_row_floor_with_drop():
     X = monte_carlo(PROBLEM, 64, seed=0)
     Y = np.asarray(X).sum(axis=1)
-    with pytest.raises(ValueError, match="order must be 1, 2, or 3"):
+    with pytest.raises(ValueError, match="order must be 1 or 2"):
         analyze_hdmr(PROBLEM, X, Y, order=5, on_invalid="drop")
 
 

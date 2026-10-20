@@ -101,13 +101,13 @@ def test_row_count_message_names_x(problem: Problem) -> None:
 
 
 def test_hdmr_order_is_clamped_to_d() -> None:
-    p = Problem.from_dict({"a": (0.0, 1.0), "b": (0.0, 1.0)})
+    p = Problem.from_dict({"a": (0.0, 1.0)})
     X = jaxgsa.sampling.monte_carlo(p, 500, seed=0)
-    Y = jnp.asarray(X[:, 0] + X[:, 0] * X[:, 1])
-    res = jaxgsa.hdmr.analyze(p, X, Y, order=3, verbose=False)
-    assert res.order == 2
-    assert "order=2" in repr(res)
-    assert res.to_dataset().attrs["order"] == 2
+    Y = jnp.asarray(X[:, 0] + X[:, 0] ** 2)
+    res = jaxgsa.hdmr.analyze(p, X, Y, order=2, verbose=False)
+    assert res.order == 1
+    assert "order=1" in repr(res)
+    assert res.to_dataset().attrs["order"] == 1
 
 
 def test_kucherenko_shapley_has_no_surrogate_fields() -> None:

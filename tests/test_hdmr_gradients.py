@@ -106,18 +106,18 @@ def test_indices_matches_analyze_for_a_time_series(case):
 def test_indices_clamps_order_without_warning():
     """Tier T4: the core takes the clamp silently; ``analyze`` warns about it."""
     rng = np.random.default_rng(3)
-    problem = Problem.from_dict({"a": (0.0, 1.0), "b": (0.0, 1.0)})
-    X = jnp.asarray(rng.uniform(0.0, 1.0, size=(N_ROWS, 2)))
-    Y = X[:, 0] + X[:, 1] ** 2
+    problem = Problem.from_dict({"a": (0.0, 1.0)})
+    X = jnp.asarray(rng.uniform(0.0, 1.0, size=(N_ROWS, 1)))
+    Y = X[:, 0] + X[:, 0] ** 2
 
     import warnings
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        _, _, _, ST = hdmr.indices(problem, X, Y, order=3, max_iter=50)
+        _, _, _, ST = hdmr.indices(problem, X, Y, order=2, max_iter=50)
 
     with pytest.warns(Warning, match="order clamped"):
-        result = hdmr.analyze(problem, X, Y, order=3, max_iter=50)
+        result = hdmr.analyze(problem, X, Y, order=2, max_iter=50)
     np.testing.assert_array_equal(np.asarray(ST), np.asarray(result.ST))
 
 

@@ -99,12 +99,12 @@ silent run.
 
 | Argument | Default | What it changes |
 | --- | --- | --- |
-| `order` | `2` | Largest interaction size modelled, 1, 2 or 3. Order 2 captures pairwise interactions. Order 3 adds triples, and both the term count and the fit cost grow combinatorially. Clamped to `D` with a warning when `D < order`. |
+| `order` | `2` | Largest interaction size modelled, 1 or 2. Order 2 captures pairwise interactions. `order=3` raises `ValueError`: third-order terms were fitted one at a time and double-counted variance. Clamped to `D` with a warning when `D < order`. |
 | `max_iter` | `100` | Backfitting iterations for the first-order terms. It rarely needs raising, because iteration stops early once the coefficients stop moving. |
 | `n_intervals` | `2` | B-spline intervals per dimension, giving a basis of size `n_intervals + 3`. A larger value resolves sharper features in the component functions. It also multiplies the coefficient count, since a per-term basis grows as `(n_intervals+3)^order`, and it needs more samples to avoid overfitting. |
 | `ridge` | `0.01` | Tikhonov regularization strength. Raise it for noisy `Y` or small `N`, which smooths and stabilises the components. Lower it when genuine sharp features are being flattened. |
 | `slice_chunk_size` | `None` | Maximum `(T, K)` output slices fitted per vmap. It bounds the per-slice statistics transient, about `batch_size * slice_chunk_size * n_terms`. `None` derives it from the memory budget. |
-| `batch_size` | `None` | Rows per batch during the fit. It bounds the B-spline basis tensors, roughly `batch_size * (n_intervals+3)^2 * n2` floats at order 2 and `batch_size * (n_intervals+3)^3 * n3` at order 3, where `n2` and `n3` count parameter pairs and triples. `None` derives it from the memory budget, which resolves to a single batch whenever the whole fit fits. |
+| `batch_size` | `None` | Rows per batch during the fit. It bounds the B-spline basis tensors, roughly `batch_size * (n_intervals+3)^2 * n2` floats at order 2, where `n2` counts parameter pairs. `None` derives it from the memory budget, which resolves to a single batch whenever the whole fit fits. |
 | `n_bootstrap` | `0` | Row resamples on `Sa`, `Sb`, `S` and `ST`. See below. |
 | `key` | `None` | A `jax.random` key for the resampling. Required when `n_bootstrap > 0`. |
 | `on_invalid` | `"raise"` | Policy for non-finite rows. One row is one unit, so `"drop"` removes the `(X, Y)` pair and fits on the rest. |
@@ -208,7 +208,7 @@ this.
 ## What it refuses
 
 `ValueError` when `X` or `Y` violates the shape contract, when `N` is below the
-computable floor above, when `order` is not 1, 2 or 3, when an explicit `slice_chunk_size < 1` or
+computable floor above, when `order` is not 1 or 2 (`order=3` is refused), when an explicit `slice_chunk_size < 1` or
 `batch_size < 1` is passed, when `on_invalid` is unknown or refuses the sample,
 when `n_bootstrap > 0` without a `key`, and when the problem has any categorical
 parameter. The B-spline component functions need an orderable axis, which an
