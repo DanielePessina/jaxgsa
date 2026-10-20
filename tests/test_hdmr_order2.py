@@ -174,3 +174,68 @@ def _fit_quiet(problem, X, Y, batch_size, slice_chunk_size) -> HDMRResult:
             batch_size=batch_size,
             slice_chunk_size=slice_chunk_size,
         )
+
+
+def _two_solvers(monkeypatch, problem, X, Y, **kwargs) -> dict[str, np.ndarray]:
+    from jaxgsa.hdmr import _fit
+
+    S = {}
+    for kind in ("dense", "dual"):
+        monkeypatch.setattr(_fit, "_pair_solver", lambda *_, k=kind: k)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            S[kind] = np.asarray(_fit_order2(problem, X, Y, **kwargs).S, dtype=float)
+    return S
+
+
+def _fit_order2(problem, X, Y, **kwargs) -> HDMRResult:
+    return _fit(problem, X, Y, order=2, **kwargs)
+
+
+def _small_case(D: int, N: int = 457, spread: float | None = None):
+    rng = np.random.default_rng(1)
+    X = rng.random((N, D))
+    if spread is not None:
+        X[:, -1] = 0.5 + spread * rng.random(N)
+    Y = np.stack(
+        [np.sin(2 * np.pi * X[:, 0]) + 2 * X[:, 0] * X[:, 1] + k * X[:, 1] for k in range(3)],
+        axis=1,
+    )
+    return Problem(names=[f"x{i}" for i in range(D)], bounds=[(0.0, 1.0)] * D), X, Y
+
+
+def test_dual_pair_solve_handles_tile_padding_ridge_zero_and_one_pair(x64, monkeypatch):
+    """Several kernel tiles with a ragged last one, no ridge, and D = 2."""
+    from jaxgsa import config
+
+    problem, X, Y = _small_case(4)
+    old = config.get_memory_budget(unit="b")
+    config.set_memory_budget(0.25)  # MiB: forces kernel tiles of a few rows
+    try:
+        S = _two_solvers(monkeypatch, problem, X, Y, n_intervals=6)
+    finally:
+        config.set_memory_budget(old, unit="b")
+    np.testing.assert_allclose(S["dual"], S["dense"], rtol=1e-7, atol=1e-9)
+
+    S = _two_solvers(monkeypatch, problem, X, Y, n_intervals=6, ridge=0.0)
+    np.testing.assert_allclose(S["dual"], S["dense"], rtol=1e-6, atol=1e-8)
+
+    problem, X, Y = _small_case(2, N=200)
+    S = _two_solvers(monkeypatch, problem, X, Y, n_intervals=9)
+    np.testing.assert_allclose(S["dual"], S["dense"], rtol=1e-7, atol=1e-9)
+
+
+def test_dual_pair_solve_survives_a_near_constant_input(x64):
+    """An input with spread 1e-5 used to turn every lane's indices NaN."""
+    problem, X, Y = _small_case(4, spread=1e-5)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        S = np.asarray(_fit_order2(problem, X, Y, n_intervals=6).S, dtype=float)
+    assert np.all(np.isfinite(S))
+    np.testing.assert_allclose(S.sum(axis=-1), 1.0, atol=0.15)
+
+
+def test_float32_never_takes_a_direct_pair_solve():
+    from jaxgsa.hdmr import _fit
+
+    assert _fit._pair_solver(500, 4, 10, 1000, 4) == "cg"

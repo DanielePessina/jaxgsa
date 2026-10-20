@@ -661,7 +661,8 @@ def _pair_solver(N: int, L: int, n2: int, m2: int, itemsize: int) -> str:
     K = n2 * m2
     budget = get_memory_budget()
     dense_ok = 3 * K * K * itemsize <= budget
-    dual_ok = (2 * N * N + 2 * N * L) * itemsize <= budget
+    # 10 % margin for the tile work and the tile padding.
+    dual_ok = 1.1 * (2 * N * N + 2 * N * L) * itemsize <= budget
     if dual_ok and (N < K or not dense_ok):
         return "dual"
     return "dense" if dense_ok else "cg"
@@ -830,9 +831,17 @@ def _dual_pair_solve(
     U = B1.reshape(N, -1) @ (V * jnp.where(keep, 1.0 / jnp.sqrt(jnp.where(keep, w, 1.0)), 0.0))
 
     lam = ridge * jnp.mean(jnp.diagonal(BtB, axis1=-2, axis2=-1), axis=-1)  # (n2,)
-    inv_lam = jnp.zeros((n1, n1), dtype=B1.dtype).at[c2_idx[:, 0], c2_idx[:, 1]].set(1.0 / lam)
+    # A pair whose projected Gram is near zero (an input with almost no
+    # spread) holds nothing beyond the first order. Its 1 / lam would be huge,
+    # and the round-off it leaves after the projection makes the kernel
+    # indefinite, so the Cholesky factor of every lane turns NaN. Drop it.
+    live = lam > jnp.sqrt(jnp.finfo(lam.dtype).eps) * jnp.max(lam)
+    inv = jnp.where(live, 1.0 / jnp.where(live, lam, 1.0), 0.0)
+    inv_lam = jnp.zeros((n1, n1), dtype=B1.dtype).at[c2_idx[:, 0], c2_idx[:, 1]].set(inv)
     itemsize = jnp.dtype(B1.dtype).itemsize
-    t = max(1, min(N, get_memory_budget() // (8 * n1 * N * itemsize)))
+    # Even tiles, so the padded kernel stays close to N x N.
+    n_tiles = -(-N // max(1, min(N, get_memory_budget() // (8 * n1 * N * itemsize))))
+    t = -(-N // n_tiles)
     a = pad_rows(_dual_pair_weights(B1, inv_lam, U, Y_res, t), X_p.shape[0] - N)
 
     build2 = _get_build_bases(n_intervals, True, False)
@@ -840,7 +849,7 @@ def _dual_pair_solve(
     for lo, hi in rows:
         B2_b = build2(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)[1]
         acc = _acc_pair_dual(B2_b, a[lo:hi], acc)
-    C2 = acc / lam[None, :, None]
+    C2 = acc * inv[None, :, None]
     return C2.reshape(n_chunks, cs, n2, m2).transpose(0, 1, 3, 2)
 
 
