@@ -1250,8 +1250,9 @@ def analyze(
             Cost: the time is spent in Sinkhorn iterations. One solve
             costs about 1 to 3 ns times ``N * P`` per iteration, where
             ``P`` is the size of one conditioning class (about
-            ``N / n_classes``, or the level count for a categorical
-            input). The figure was measured on an Apple M1 Pro. One
+            ``N / n_classes``, or, for a categorical input, the sample
+            count of the largest level, about ``N`` times its
+            probability). The figure was measured on an Apple M1 Pro. One
             analysis runs about ``R * D * M`` solves: ``R`` replicates,
             ``D`` parameters and ``M`` classes per parameter, plus the
             synthetic parameters when ``dummy=True``. A default solve
