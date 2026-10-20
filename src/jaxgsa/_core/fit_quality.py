@@ -86,14 +86,16 @@ CV_RATIO_THRESHOLD = math.sqrt(1.0 - POORFIT_THRESHOLD)
 # copy then gets a total index of 0.08 instead of 0.
 ILL_CONDITIONED_PIVOT_THRESHOLD = 1e-9
 
-# float32 needs a higher line for a warning. A QR solve carries a relative
-# error of about ``eps``, and a pivot share ``s`` amplifies it by
-# ``1 / sqrt(s)``. The warning fires when ``eps / sqrt(s)`` passes 1e-4, which is
-# a share of 1.4e-6 in float32. Measured on two Gaussian inputs: order 14 has
-# share 1.4e-7 and its indices are exact to 1e-5 in float32; the order 16 and
-# order 20 fits (1.5e-8, 1.7e-9) are off by 3e-3 and 1e-2. float64 never
-# reaches the line before it reaches the one above.
-PRECISION_PIVOT_THRESHOLD_F32 = 1.4e-6
+# float32 needs a higher line for a warning. The leave-one-out error divides
+# a residual by ``1 - h``, where ``h`` is the leverage of the row. A design
+# with a small pivot share gives rows with ``h`` near 1, so ``1 - h`` is
+# mostly rounding noise in float32. Measured on Gaussian inputs, N=6000, the
+# float32 ``cv_rmse`` against float64: share 3.3e-3 agrees to 1%, share 7.7e-4
+# is off by 3%, share 9.8e-5 is off by a factor 45 (0.23 against 0.005), and
+# share 1.6e-6 by a factor 2000. The indices stay exact far longer (to 1e-5 at
+# a share of 1.4e-7), so the warning is about ``cv_rmse`` first. It fires
+# below 1e-3. float64 never reaches the line before it reaches the one above.
+PRECISION_PIVOT_THRESHOLD_F32 = 1e-3
 
 # Limit on the residual of an input that is a linear combination of others.
 #
@@ -420,7 +422,7 @@ def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> N
     singular too. It is refused in the same way when the combination holds
     to within the rounding error of the data's dtype (see
     :data:`LINEAR_DEPENDENCE_FACTOR`). A copy with more noise than that is
-    left to the pivot share, which warns in float64 and refuses in float32.
+    left to the pivot share, which only warns, in both dtypes.
 
     Args:
         namespace: The public function the message speaks for.
@@ -522,8 +524,9 @@ def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
         warnings.warn(
             f"{namespace}: one basis column has only {share:.1e} of its variance "
             "left after the earlier columns explain it. float32 carries about 7 "
-            "digits, and this conditioning costs it several of them, so the "
-            "indices may be off in the third digit or worse. Enable jax x64 "
+            "digits, and this conditioning costs it several of them. The "
+            "leave-one-out error cv_rmse can be wrong by a large factor, and "
+            "the indices may be off in the third digit or worse. Enable jax x64 "
             f"(jax.config.update('jax_enable_x64', True)) to fit in float64. {advice}",
             skip_file_prefixes=(PACKAGE_DIR,),
             category=JaxgsaWarning,

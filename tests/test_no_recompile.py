@@ -27,6 +27,11 @@ from jaxgsa.benchmarks import ishigami
 _COMPILES: list[str] = []
 
 
+def _cache_size(program: Any) -> int:
+    """Number of compiled variants a jitted program holds."""
+    return int(program._cache_size())
+
+
 def _count(event: str, duration_secs: float, **_: Any) -> None:
     if event == "/jax/core/compile/backend_compile_duration":
         _COMPILES.append(event)
@@ -137,9 +142,9 @@ def test_pce_row_counts_in_one_bucket_share_one_compiled_fit() -> None:
         jax.block_until_ready(
             jax.tree.leaves(jaxgsa.pce.analyze(PROBLEM, X, Y, order=3, verbose=False))
         )
-        sizes.append([program._cache_size() for program in programs])
+        sizes.append([_cache_size(program) for program in programs])
     assert sizes[1] == sizes[0] == sizes[2]
     # And a row count in the next bucket compiles each program once more.
     X = jnp.asarray(sampling.monte_carlo(PROBLEM, 600, seed=0))
     jaxgsa.pce.analyze(PROBLEM, X, ishigami.evaluate(X), order=3, verbose=False)
-    assert [program._cache_size() for program in programs] == [size + 1 for size in sizes[0]]
+    assert [_cache_size(program) for program in programs] == [size + 1 for size in sizes[0]]

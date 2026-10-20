@@ -240,7 +240,7 @@ def test_ridge_regularized_high_order_fit_is_not_refused_in_float32():
 
 def test_high_order_hermite_fit_is_not_refused_in_float64():
     # A well-posed order-10 fit has pivot shares near 2e-6. float64 fits it
-    # accurately and must not refuse it. float32 cannot fit it at all.
+    # accurately and must not refuse it. float32 fits it too, with a warning.
     if not jax.config.jax_enable_x64:
         pytest.skip("float64 only")
     rng = np.random.default_rng(0)
@@ -288,6 +288,7 @@ def test_high_order_wide_truncation_is_exact_and_silent():
                 problem, jnp.asarray(X), jnp.asarray(Y), order=order, verbose=False
             )
         assert isinstance(result, pce.PCEResult)
+        assert result.cv_rmse is not None
         assert float(result.S1[0]) == pytest.approx(2 / 2.75, abs=5e-3)
         assert float(result.cv_rmse) < 1e-3
 
@@ -523,6 +524,7 @@ def _truncnorm_response(low, high, order, *, n=4000, power=3):
         warnings.simplefilter("error")
         result = pce.analyze(problem, jnp.asarray(X), jnp.asarray(Y), order=order, verbose=False)
     assert isinstance(result, pce.PCEResult)
+    assert result.cv_rmse is not None
     return float(result.S1[0]), truth, float(result.cv_rmse)
 
 
@@ -681,6 +683,9 @@ def test_padded_fit_matches_an_unpadded_reference(n, batch_size):
     s1 = np.array([c2[o].sum() for o in only]) / c2.sum()
 
     tol = 5e-4
+    assert result.cv_rmse is not None
+    assert result.rmse is not None
+    assert result.explained_variance is not None
     np.testing.assert_allclose(np.asarray(result.coefficients)[0], coef, atol=tol)
     assert float(result.cv_rmse[0]) == pytest.approx(loo, rel=2e-3)
     assert float(result.rmse[0]) == pytest.approx(rmse, rel=2e-3)
@@ -701,3 +706,21 @@ def test_indices_equals_analyze_bitwise_for_a_padded_row_count():
     assert np.array_equal(np.asarray(S1), np.asarray(result.S1))
     assert np.array_equal(np.asarray(ST), np.asarray(result.ST))
     assert np.array_equal(np.asarray(S2), np.asarray(result.S2), equal_nan=True)
+
+
+def test_float32_warns_when_high_order_leave_one_out_is_unreliable():
+    # Three Gaussian inputs at order 12 give a pivot share near 1e-4. The
+    # indices are exact in float32, but 1 - h cancels in the leave-one-out
+    # error, which comes out 100 times too large (0.59 against 6e-7 in float64)
+    # and sits below the overfit threshold. The fit must warn, not stay silent.
+    if jax.config.jax_enable_x64:
+        pytest.skip("float32 only")
+    rng = np.random.default_rng(1)
+    gauss = GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0)
+    problem = jaxgsa.Problem.from_dict({"a": gauss, "b": gauss, "c": gauss})
+    X = rng.standard_normal((6000, 3)).astype(np.float32)
+    Y = X[:, 0] + 0.5 * X[:, 1] + 0.2 * X[:, 0] * X[:, 2]
+    with pytest.warns(JaxgsaWarning, match="cv_rmse can be wrong"):
+        pce.analyze(
+            problem, jnp.asarray(X), jnp.asarray(Y), order=12, fit_ratio=1.0, verbose=False
+        )

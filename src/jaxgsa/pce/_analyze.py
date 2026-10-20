@@ -630,7 +630,7 @@ def _single_pass_coefficients(
     the same expansion. The diagnostics run in :func:`_single_pass_loo`.
 
     ``X`` and ``Y_3d`` may carry extra rows after the first ``n_rows`` (see
-    :func:`_pad_to_bucket`). The design rows of those are zeroed, so a zero
+    :func:`_pad_x` and :func:`_pad_y`). The design rows of those are zeroed, so a zero
     row adds nothing to the QR factor or to ``Q^T Y``. ``n_rows`` is traced,
     so every row count in a bucket shares one compiled program.
 
@@ -1155,6 +1155,11 @@ def analyze(
         ridge: Tikhonov regularization for the least-squares fit. The tiny
             default only guards against a singular design. Increase
             it if coefficients look unstable (noisy Y, near-duplicate rows).
+            A large ridge (about 1e-3 or more) also hides a singular design
+            from the rank check, because it keeps the pivot share up. The
+            indices of such a design can be wrong with no warning, apart from
+            the constant, duplicated and linearly dependent inputs, which
+            raise whatever the ridge.
         fit_ratio: Maximum ratio of terms to samples before ``order`` is
             reduced. Lower values demand more samples per term (a more
             conservative, less overfit-prone fit). Must be at most 1, and

@@ -346,6 +346,7 @@ class TestTruncatedGaussianBasis:
             for order in (3, 10):
                 _, input_types = _map_to_reference(X, problem, order)
                 assert all(isinstance(kind, TruncatedFamily) for kind in input_types)
+                assert isinstance(input_types[0], TruncatedFamily)
                 assert len(input_types[0].alpha) == order
         # An untruncated Gaussian keeps Hermite.
         _, input_types = _map_to_reference(X, self._problem(2), 10)

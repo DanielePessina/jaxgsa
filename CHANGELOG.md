@@ -29,8 +29,12 @@
 - The rank check reads the pivot share from the QR factor. It is finite in
   float32, so float32 no longer refuses a fit because a Cholesky factor
   failed. Both dtypes now warn when the share is below 1e-9 (the design is
-  near singular), and float32 also warns below 1.4e-6, where it keeps fewer
-  than about 4 digits. A non-finite share still raises. Constant, duplicated
+  near singular), and float32 also warns below 1e-3. There the leave-one-out
+  error `cv_rmse` can be wrong by a large factor, because `1 - h` (h is the
+  leverage of a row) is mostly rounding noise, while the indices stay exact
+  much longer. Measured on three Gaussian inputs, N = 6000: at share 9.8e-5
+  float32 gives `cv_rmse` 0.23 against 0.005 in float64, and the warning now
+  fires there. A non-finite share still raises. Constant, duplicated
   and linearly dependent inputs still raise, because they are read off the
   inputs. A design that is singular for another reason, such as a three-level
   input at order 3, now warns in float32, where 1.1.2 could raise.
@@ -62,9 +66,9 @@
 ### Changed values
 
 - PCE values change by float rounding in every fit, and so do Shapley values
-  from the PCE backend. Ishigami, N = 1000, orders 3, 5 and 7: at most 4.2e-7
-  in float32 and 6.7e-16 in float64, for S1, ST, S2, `cv_rmse` and the
-  bootstrap intervals. Fits that 1.1.2 refused in float32 now succeed. Row
+  from the PCE backend. Ishigami, N = 1000, orders 3, 5 and 7: at most 7e-7
+  in float32 and 1.4e-15 in float64, for S1, ST, S2, `cv_rmse` and the
+  bootstrap intervals (the Shapley PCE backend reaches 6.9e-7 in float32). Fits that 1.1.2 refused in float32 now succeed. Row
   padding changes the order of the sums, which adds float rounding of the same
   size and no more.
 - PCE values change for every truncated Gaussian input, and so do Shapley
@@ -78,12 +82,14 @@
 
 - The PCE fit is slower, because QR does more work than the normal
   equations. Steady-state `analyze` takes 2 to 3 times longer at large sizes:
-  222 ms to 655 ms for D = 6, order 6, N = 20000 (924 terms), and 152 ms to
-  312 ms for D = 10, order 3, N = 50000. Small fits (D = 3, order 5, N = 1000)
-  take about 2 ms in both. The estimate of fit memory, which decides when the
+  about 270 ms to 800 ms for D = 6, order 6, N = 20000 (924 terms; 3 to 3.5
+  times), and 152 ms to 312 ms for D = 10, order 3, N = 50000. Small fits
+  (D = 3, order 5, N = 1000) go from about 1.9 ms to about 3 ms. The estimate of fit memory, which decides when the
   fit streams, grows from 2 to 4 arrays of the design size. Row padding adds
   up to 12.5% more work for a row count just above a bucket edge, for example
   N = 513 runs as 576 rows.
+- The new check for linearly dependent inputs runs on the host and costs
+  0.73 s at N = 100000, D = 200. It runs once per `analyze` call.
 
 ## 1.1.2
 
