@@ -15,16 +15,18 @@ Some fixes change index values where the old values were wrong. See Fixed.
   projected off the first-order space and all pairs are solved together. At the
   default ridge, sum of `S` is 1.000 and test NRMSE is 0.009 to 0.15 at D = 5
   to 23 (0.01 at D = 5, 0.15 at D = 23, N = 1024; 0.025 at D = 23, N = 4096).
-  The joint solve gets 10 x `max_iter` CG steps. It warns when it still does
-  not converge (D = 15 at N = 1024, D = 23). It also warns when there are more
-  pair coefficients than samples (D = 23 at N = 1024): the pairs then fit the
-  data too closely and the true pair `S2` reads too small (0.005 against 0.034). Every `order >= 2` fit changes: pair and total-order
-  indices move (Ishigami at 1000 rows: `ST` of `x3` 0.287 to 0.221, analytic
-  0.244; `ST` of `x2` 0.339 to 0.325; `S1` does not move). In-sample error above test error was the same overshoot, and
-  is gone. `result.C1` now holds the first-order coefficients plus the
-  projection shift, so that `predict` is the sum of the terms. `predict` uses
-  every term and ignores the F-test `select`. A third-order term is still not
-  projected off the pairs.
+  The joint solve gets 10 x `max_iter` CG steps. It stops early when the
+  residual stops improving, which float32 needs. It warns when the residual
+  stays above 1e-2. It also warns when there are more pair coefficients than
+  samples (D = 23 at N = 1024): the pairs then fit the data too closely and the
+  true pair `S2` reads too small (0.005 against 0.034). Every `order >= 2` fit
+  changes: pair and total-order indices move (Ishigami at 1000 rows: `ST` of
+  `x3` 0.287 to 0.221, analytic 0.244; `ST` of `x2` 0.339 to 0.325; `S1` does
+  not move). In-sample error above test error was the same overshoot, and is
+  gone. `result.C1` now holds the first-order coefficients plus the projection
+  shift, so that `predict` is the sum of the terms. `predict` uses every term
+  and ignores the F-test `select`. A third-order term is still not projected
+  off the pairs, so order 3 can still overshoot (follow-up).
 - `hdmr` `ridge` now has an effect. The basis is scaled by `m^3` and the Gram
   matrix was not divided by `N`, so `ridge=1.0` and `ridge=0.01` gave the same
   NRMSE to three digits. Now `ridge` is relative to the mean diagonal of each

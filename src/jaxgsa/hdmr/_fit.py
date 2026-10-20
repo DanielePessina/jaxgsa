@@ -50,6 +50,7 @@ import jax.numpy as jnp
 from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget, pad_rows, resolve_batch_size
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.hdmr._engine import _build_B1, _build_B2, _build_B3, term_order_map
 
 # ---------------------------------------------------------------------------
@@ -70,7 +71,8 @@ def _basis_bytes_per_row(
 
     This part is shared by every output slice: each batch materializes ``B1``
     (m1 * D per row), ``B2`` with its two gather temporaries (3 * m2 * n2),
-    and ``B3`` with its three gather temporaries (4 * m3 * n3).
+    and ``B3`` with its three gather temporaries (4 * m3 * n3), plus the
+    projected pair basis and its temporary (2 * m2 * n2).
 
     Args:
         D: Number of input parameters.
@@ -84,7 +86,8 @@ def _basis_bytes_per_row(
     Returns:
         Estimated basis-build bytes per streamed row.
     """
-    return itemsize * (m1 * D + 3 * m2 * n2 + 4 * m3 * n3)
+    # The extra 2 * m2 * n2 is the projected pair basis of the stats pass.
+    return itemsize * (m1 * D + 5 * m2 * n2 + 4 * m3 * n3)
 
 
 def _slice_bytes_per_row(n: int, itemsize: int) -> int:
@@ -145,6 +148,7 @@ def _resolve_slice_chunk_size(
     L: int,
     b: int,
     slice_bytes: int,
+    lane_fixed_bytes: int = 0,
 ) -> int:
     """Resolve how many output slices one vmap handles, against the budget.
 
@@ -154,6 +158,8 @@ def _resolve_slice_chunk_size(
         b: Resolved rows per batch.
         slice_bytes: Bytes per (row, slice) pair, from
             :func:`_slice_bytes_per_row`.
+        lane_fixed_bytes: Bytes one lane holds regardless of the row count,
+            such as the pair solver state.
 
     Returns:
         A chunk width in ``[1, L]``. With an automatic ``b`` this is ``L``,
@@ -168,7 +174,10 @@ def _resolve_slice_chunk_size(
         if slice_chunk_size < 1:
             raise ValueError(f"jaxgsa.hdmr: slice_chunk_size must be >= 1, got {slice_chunk_size}")
         return min(slice_chunk_size, L)
-    auto = get_memory_budget() // max(b * slice_bytes, 1)
+    budget = get_memory_budget()
+    auto = budget // max(b * slice_bytes, 1)
+    if lane_fixed_bytes > 0:
+        auto = min(auto, budget // lane_fixed_bytes)
     return max(1, min(L, auto))
 
 
@@ -348,15 +357,19 @@ def _pair_normal_pass(
 
 
 _PAIR_ITER_FACTOR = 10
+_PAIR_STALL = 25
+_PAIR_WARN_REL = 1e-2
 
 
 def _pair_tol(eps: float) -> float:
     """Return the relative residual the joint pair CG is held to.
 
     A looser value (1e-4) was measured to stop early: at D = 15, N = 1024 the
-    test NRMSE was 0.14 against 0.05 at 1e-7.
+    test NRMSE was 0.14 against 0.05 at 1e-7. In float32 CG cannot reach
+    ``10 eps`` (1.2e-6) and runs to the step cap, so the floor there is
+    ``100 eps`` (1.2e-5).
     """
-    return max(1e-7, 10 * eps)
+    return max(1e-7, 100 * eps) if eps > 1e-10 else 1e-7
 
 
 def _joint_pair_solve(
@@ -413,6 +426,8 @@ def _joint_pair_solve(
     bnorm = [safe(jnp.sqrt(d)) for d in dot(rhs, rhs)]
     eps = float(jnp.finfo(bnorm[0].dtype).eps)
     tol = _pair_tol(eps)
+    # Only float32 stalls; in float64 a slow stretch is followed by progress.
+    stall = _PAIR_STALL if eps > 1e-10 else max_iter + 1
 
     def rel_res(r: list[Array]) -> Array:
         return jnp.max(
@@ -420,11 +435,13 @@ def _joint_pair_solve(
         )
 
     def cond(state: tuple) -> Array:
-        _, r, _, _, k = state
-        return (rel_res(r) >= tol) & (k < max_iter)
+        _, r, _, _, k, _, k_best = state
+        # Stop at the tolerance, at the step cap, or when the residual has not
+        # improved for _PAIR_STALL steps (float32 stalls above the tolerance).
+        return (rel_res(r) >= tol) & (k < max_iter) & (k - k_best < stall)
 
     def body(state: tuple) -> tuple:
-        x, r, p, rz, k = state
+        x, r, p, rz, k, best, k_best = state
         Mp = sweep(p)
         Ap = [m + lam_diag[None] * pp for m, pp in zip(Mp, p, strict=True)]
         pAp = dot(p, Ap)
@@ -440,9 +457,20 @@ def _joint_pair_solve(
             jnp.where(on, n / safe(o), 0.0) for on, n, o in zip(active, rz_new, rz, strict=True)
         ]
         p = [zz + be[:, None, None] * pp for zz, be, pp in zip(z, beta, p, strict=True)]
-        return x, r, p, rz_new, k + 1
+        rel_new = rel_res(r)
+        improved = rel_new < 0.99 * best
+        return (
+            x,
+            r,
+            p,
+            rz_new,
+            k + 1,
+            jnp.where(improved, rel_new, best),
+            jnp.where(improved, k + 1, k_best),
+        )
 
-    x, r, _, _, _ = jax.lax.while_loop(cond, body, (x, r, z, dot(r, z), jnp.array(0)))
+    init = (x, r, z, dot(r, z), jnp.array(0), rel_res(r), jnp.array(0))
+    x, r, *_ = jax.lax.while_loop(cond, body, init)
     return [xx.transpose(0, 2, 1) for xx in x], rel_res(r), tol
 
 
@@ -616,6 +644,24 @@ def _acc_pair_normal(
 
 
 @jax.jit
+def _project_pair_basis(B_all: list[Array], A: Array) -> list[Array]:
+    """Replace ``B2`` by ``B2 - B1 A``, which holds no first-order function.
+
+    It is lane-independent, so it is built once per row batch.
+
+    Args:
+        B_all: Bases ``[B1, B2, ...]`` for one row batch.
+        A: Projection of ``B2`` onto the first-order space, ``(P, m2, n2)``.
+
+    Returns:
+        The same list with ``B2`` projected.
+    """
+    B1f = B_all[0].reshape(B_all[0].shape[0], -1)
+    Bt = B_all[1] - jnp.einsum("rp,pmj->rmj", B1f, A)
+    return [B_all[0], Bt, *B_all[2:]]
+
+
+@jax.jit
 def _acc_moments1(
     B1_b: Array,
     Y_bc: Array,
@@ -707,7 +753,6 @@ def _get_stats_step(n1: int, n2: int):
         mean_f_c: Array,
         mean_y0m_c: Array,
         acc: tuple[Array, Array, Array, Array, Array, Array, Array],
-        corr: Array | None,
     ) -> tuple[Array, Array, Array, Array, Array, Array, Array]:
         acc_var_f, acc_cov_fy, acc_cov_fy0m, acc_ssr, acc_cross, acc_fsq, acc_res2 = acc
         # Per-term contributions f_j = B_j C_j, all orders side by side.
@@ -715,11 +760,6 @@ def _get_stats_step(n1: int, n2: int):
             [jnp.einsum("rmj,lmj->rlj", B, C) for B, C in zip(B_list, C_list, strict=True)],
             axis=2,
         )  # (b, cs, n)
-        if corr is not None:
-            # Pair terms are B2 C minus their projection onto the first-order
-            # space, so a pair term holds no 1-D function (see _project_pairs).
-            B1f = B_list[0].reshape(B_list[0].shape[0], -1)
-            F = F.at[:, :, n1 : n1 + n2].add(-jnp.einsum("rp,lpj->rlj", B1f, corr))
 
         # ANCOVA (Li et al., 2010). Sa = Var(f_j)/Var(Y) is the structural
         # share, Sb = Cov(f_j, sum_{k != j} f_k)/Var(Y) the correlative
@@ -957,10 +997,21 @@ def _fit_hdmr(
     b = resolve_batch_size(
         _fit_bytes_per_row(D, m1, m2, m3, n2, n3, n, L, itemsize), N, batch_size
     )
-    cs = _resolve_slice_chunk_size(slice_chunk_size, L, b, slice_bytes)
-
     order2 = order >= 2 and n2 > 0
     order3 = order >= 3 and n3 > 0
+    # Pair solver state per lane: rhs, x, r, z, p and the matrix-vector product.
+    lane_fixed = 6 * n2 * m2 * itemsize if order2 else 0
+    cs = _resolve_slice_chunk_size(slice_chunk_size, L, b, slice_bytes, lane_fixed)
+    if order2:
+        fixed = 2 * m1 * D * m2 * n2 * itemsize  # the projection A and the cross Gram
+        if fixed > get_memory_budget():
+            warnings.warn(
+                f"jaxgsa.hdmr: the order-2 projection needs about {fixed / 2**20:.0f} MiB, "
+                f"above the {get_memory_budget() / 2**20:.0f} MiB memory budget. "
+                "Use fewer inputs or a smaller n_intervals.",
+                category=JaxgsaWarning,
+                stacklevel=3,
+            )
 
     # Pad both axes so each jitted step compiles once. A padded row is masked
     # to zero in every accumulator; a padded lane is an independent constant
@@ -1018,7 +1069,7 @@ def _fit_hdmr(
     colsums = [colsum1]
     coef_chunks = [C1_chunks]  # what the residuals and predict() use
     stat_chunks = [C1_chunks]  # what the per-term statistics use
-    corr_chunks: list[Array] | None = None
+    proj_A: Array | None = None
     for term_order, (n_terms, m_basis) in enumerate(((n2, m2), (n3, m3)), start=2):
         if not (order2 if term_order == 2 else order3):
             break
@@ -1052,7 +1103,6 @@ def _fit_hdmr(
             max(ridge, math.sqrt(float(jnp.finfo(dtype).eps))) if term_order == 2 else ridge
         )
         solver = _get_gram_higher_solver(m_basis, term_ridge)
-        colsums.append(colsum)
         if term_order == 2:
             # Project the pair basis off the first-order space, so a pair term
             # holds only what no sum of 1-D functions can explain.
@@ -1078,29 +1128,33 @@ def _fit_hdmr(
                     f"{N} samples. The pair fit can interpolate the data, so pair "
                     "indices may be too small or too large. Use more samples, "
                     "fewer inputs or a smaller n_intervals.",
-                    stacklevel=2,
+                    category=JaxgsaWarning,
+                    stacklevel=3,
                 )
             tol = _pair_tol(float(jnp.finfo(dtype).eps))
             # The check needs a concrete value; under jit or vmap there is none.
-            if not isinstance(rel, jax.core.Tracer) and float(rel) >= tol:
+            if not isinstance(rel, jax.core.Tracer) and float(rel) >= max(tol, _PAIR_WARN_REL):
                 warnings.warn(
                     f"jaxgsa.hdmr: the joint second-order solve did not converge in "
                     f"{_PAIR_ITER_FACTOR * max_iter} steps (10 x max_iter), relative "
                     f"residual {float(rel):.1e}. "
                     "Raise max_iter or ridge.",
-                    stacklevel=2,
+                    category=JaxgsaWarning,
+                    stacklevel=3,
                 )
-            corr_chunks, C1_fold = [], []
+            C1_fold = []
             for j in range(n_chunks):
-                C2_j = C2_chunks[j]
-                corr_j = jnp.einsum("pmj,lmj->lpj", A, C2_j)  # (cs, P, n2)
-                corr_chunks.append(corr_j)
-                C1_fold.append(
-                    (C1_chunks[j].reshape(cs, P) - jnp.sum(corr_j, axis=2)).reshape(cs, m1, n1)
-                )
+                shift_p = jnp.einsum("pmj,lmj->lp", A, C2_chunks[j])  # (cs, P)
+                C1_fold.append((C1_chunks[j].reshape(cs, P) - shift_p).reshape(cs, m1, n1))
+            # The pair terms are B2 C2 minus their projection: use the
+            # projected basis for the means and the stats pass.
+            colsum = colsum - jnp.einsum("p,pmj->mj", colsum1.reshape(P), A)
+            proj_A = A
             coef_chunks = [C1_fold, C2_chunks]
             stat_chunks = [C1_chunks, C2_chunks]
+            colsums.append(colsum)
         else:
+            colsums.append(colsum)
             C3_chunks = [solver(BtB, BtY[j]) for j in range(n_chunks)]
             coef_chunks.append(C3_chunks)
             stat_chunks.append(C3_chunks)
@@ -1117,11 +1171,6 @@ def _fit_hdmr(
         )
         for j in range(n_chunks)
     ]  # each (cs, n)
-    if corr_chunks is not None:
-        colsum1_flat = colsum1.reshape(P)
-        for j in range(n_chunks):
-            shift_mean = jnp.einsum("p,lpj->lj", colsum1_flat, corr_chunks[j]) / N
-            mean_f[j] = mean_f[j].at[:, n1 : n1 + n2].add(-shift_mean)
     # mean of the leave-one-out sums Y0_minus_j = Y0 - f_j.
     mean_y0m = [jnp.sum(mf, axis=1, keepdims=True) - mf for mf in mean_f]
 
@@ -1142,6 +1191,8 @@ def _fit_hdmr(
     ]
     for lo, hi in rows:
         B_all = build_bases_final(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)
+        if proj_A is not None:
+            B_all = _project_pair_basis(B_all, proj_A)
         for j, (s, e) in enumerate(lanes):
             accs[j] = stats_step(
                 B_all,
@@ -1153,7 +1204,6 @@ def _fit_hdmr(
                 mean_f[j],
                 mean_y0m[j],
                 accs[j],
-                None if corr_chunks is None else corr_chunks[j],
             )
 
     acc = tuple(jnp.concatenate([a[k] for a in accs]) for k in range(7))
