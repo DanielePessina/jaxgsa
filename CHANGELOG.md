@@ -8,11 +8,11 @@
 
 ### Changed values
 
-- OT with categorical inputs, `mode="univariate"`, float64 only: `ot` changes by about 1e-11 to 1e-10 absolute (below 1e-9 relative), `diffusive` by up to a few 1e-9 relative, and the `ot` confidence interval endpoints by about 1e-10 absolute. The old values carried float32 rounding. Float32 runs and continuous inputs are bitwise unchanged.
+- OT with categorical inputs, `mode="univariate"`, float64 only: `ot` changes by up to 2.4e-11 absolute (4e-10 relative) and `diffusive` by up to 4e-9 relative. The old values carried float32 rounding. Float32 runs and continuous inputs are bitwise unchanged.
 
 ### Docs
 
-- OT: the `tol` docs now give the cost of a trajectory solve. The time is in Sinkhorn iterations, not the loop over outputs. The float64 default `tol=1e-9` is about twice as slow as `1e-5`, and it stays the default.
+- OT: the `tol` docs now give the cost of a trajectory solve. The time is in Sinkhorn iterations, not the loop over outputs. The float64 default `tol=1e-9` is several times slower than `1e-5`, and it stays the default.
 
 ## 1.1.2
 
