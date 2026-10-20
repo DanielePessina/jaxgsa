@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.0 (unreleased)
+
+### Fixed
+
+- OT: with float64 on, the overlap weights of categorical inputs in `mode="univariate"` were rounded to float32. They now use the working dtype.
+
+### Changed values
+
+- OT with categorical inputs, `mode="univariate"`, float64 only: `ot` changes by up to 2.4e-11 absolute (4e-10 relative) and `diffusive` by up to 4e-9 relative. The old values carried float32 rounding. Float32 runs and continuous inputs are bitwise unchanged.
+
+### Docs
+
+- OT: the `tol` docs now give the cost of a trajectory solve. The time is in Sinkhorn iterations, not the loop over outputs. The float64 default `tol=1e-9` is several times slower than `1e-5`, and it stays the default.
+
 ## 1.1.2
 
 This release fixes bugs and makes several methods faster. Correct index

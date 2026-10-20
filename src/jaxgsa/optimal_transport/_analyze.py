@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import functools
 import warnings
-from typing import Literal, NamedTuple, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -174,7 +174,7 @@ def _aggregate_normalized(per_class: Array, weights: Array, V: Array) -> Array:
     return jnp.where(jnp.isnan(V), jnp.nan, normalized)
 
 
-def _quantile_rank_split(counts: Array, N: int) -> tuple[Array, Array, Array]:
+def _quantile_rank_split(counts: Array, N: int, dtype: Any = None) -> tuple[Array, Array, Array]:
     """Exact conditional-quantile coupling for every full-sample mass point.
 
     Both empirical quantile functions are piecewise constant: the
@@ -191,6 +191,16 @@ def _quantile_rank_split(counts: Array, N: int) -> tuple[Array, Array, Array]:
     approximation, in particular when ``c`` does not divide ``N``, unlike
     the single nearest-rank lookup this replaced (which is exact only when
     it does).
+
+    Args:
+        counts: Integer class sizes, shape ``(..., M)``.
+        N: Full sample size.
+        dtype: Float dtype of ``frac_left``. Defaults to the promotion of
+            ``counts.dtype`` with float32, which is float32 even for int64
+            counts. Pass the kernel's working dtype to keep float64 under x64.
+
+    Returns:
+        ``(j_left, j_right, frac_left)``, each of shape ``(..., M, N)``.
 
     The function runs on device, per replicate, from the class counts. A
     precomputed ``(R, Dc, M, N)`` lookup table would be gigabytes for one
@@ -246,7 +256,8 @@ def _quantile_rank_split(counts: Array, N: int) -> tuple[Array, Array, Array]:
     j_left = jnp.minimum(q, jnp.maximum(c - 1, 0)).astype(jnp.int32)
     j_right = jnp.minimum(q + 1, jnp.maximum(c - 1, 0)).astype(jnp.int32)
     width_left = jnp.minimum(N - r, c)  # in units of 1/(N * c), 0 for an empty class
-    float_dtype = jnp.result_type(counts.dtype, jnp.float32)
+    # Without a dtype, int64 counts would promote to float32 under x64.
+    float_dtype = dtype if dtype is not None else jnp.result_type(counts.dtype, jnp.float32)
     frac_left = width_left.astype(float_dtype) / jnp.maximum(c, 1).astype(float_dtype)
     return j_left, j_right, frac_left
 
@@ -527,7 +538,7 @@ def _ot_1d_kernel(
         for cls_r, counts_g, j_shared in zip(cls_parts, counts_list, shared_j):
             counts_r = counts_g[i]  # (G, M) int
             mask_r = _mask_from_counts(counts_r, cls_r.shape[-1])
-            j_r = _quantile_rank_split(counts_r, N) if j_shared is None else j_shared
+            j_r = _quantile_rank_split(counts_r, N, dtype) if j_shared is None else j_shared
             layouts.append((cls_r, mask_r, counts_r.astype(dtype), j_r))
         out = jax.vmap(lambda t: _col_stats(t[0], t[1], t[2], r, layouts))(
             (Y_cols.T, Y_sorted.T, pos2rank.T)
@@ -1213,6 +1224,17 @@ def analyze(
             rounded terms. The cost itself is converged there, so raising
             ``max_iter`` does not clear the warning. Raise ``tol`` or
             enable float64 if you need it silent.
+
+            Cost: the time is spent in Sinkhorn iterations. One solve
+            costs about 80 ns times ``N * P`` per iteration, and a default
+            solve needs a few hundred iterations in float32 and up to
+            about 1000 in float64. ``"trajectory"`` mode runs one cloud
+            per output, so its cost is ``K`` times the cost of one cloud.
+            The loop over ``K`` adds no overhead, and a ``vmap`` over it
+            is slower. The float64 default ``1e-9`` is several times
+            slower than ``1e-5``, which gives the same indices to about
+            five decimals in the cases we measured. Pass ``tol=1e-5``
+            for a faster float64 run.
         dummy: Also push one synthetic parameter through the identical
             pipeline per parameter and report the result as ``ot_dummy``.
             Every synthetic parameter is independent of the output by
