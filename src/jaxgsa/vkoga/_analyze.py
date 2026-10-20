@@ -36,7 +36,7 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import apply_batched, resolve_batch_size
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.dependence import Draws, draws_for
-from jaxgsa._core.entry import at_least, bootstrap_checks, prepare, require
+from jaxgsa._core.entry import _user_stacklevel, at_least, bootstrap_checks, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -391,6 +391,8 @@ def analyze(
         param_names=problem.names,
     )
 
+    _warn_nonfinite_coefficients(state.coefficients, stacklevel=_user_stacklevel())
+
     def _shape_index(flat: np.ndarray) -> Array:
         """Reshape an ``(..., S, D)`` index block to the output contract."""
         arr = jnp.asarray(flat.reshape(*flat.shape[:-2], n_time, n_out, D))
@@ -418,6 +420,7 @@ def analyze(
             key=key,
             n_bootstrap=n_bootstrap,
             batch_size=batch_size,
+            stacklevel=_user_stacklevel(),
         )
         # _shape_index already squeezes to the caller's own rank; interval()
         # reads a shape only to broadcast [lower, upper], so it works the
@@ -588,6 +591,7 @@ def _bootstrap_replicates(
     key: Array,
     n_bootstrap: int,
     batch_size: int | None,
+    stacklevel: int = 2,
 ) -> dict[str, np.ndarray]:
     """Refit the surrogate on resampled training rows, once per replicate.
 
@@ -620,6 +624,8 @@ def _bootstrap_replicates(
         key: PRNG key the per-replicate streams are folded out of.
         n_bootstrap: Number of replicates.
         batch_size: Sample rows per device call, or ``None`` for the budget.
+        stacklevel: ``stacklevel`` for the non-finite replicate warning, from
+            :func:`jaxgsa._core.entry._user_stacklevel`.
 
     Returns:
         Mapping from index name to an ``(n_bootstrap, S, D)`` array.
@@ -648,7 +654,43 @@ def _bootstrap_replicates(
             )
         for name in _INTERVAL_FIELDS:
             draws[name].append(np.asarray(getattr(indices, name)))
-    return {name: np.stack(values) for name, values in draws.items()}
+    stacked = {name: np.stack(values) for name, values in draws.items()}
+    n_bad = int(
+        np.sum(
+            ~np.all(
+                [np.isfinite(v).all(axis=tuple(range(1, v.ndim))) for v in stacked.values()],
+                axis=0,
+            )
+        )
+    )
+    if n_bad:
+        warnings.warn(
+            f"{n_bad} of {n_bootstrap} bootstrap replicates have non-finite "
+            "indices (a singular kernel fit). The intervals "
+            "skip them. Try float64 or a larger ridge.",
+            category=JaxgsaWarning,
+            stacklevel=stacklevel,
+        )
+    return stacked
+
+
+def _warn_nonfinite_coefficients(coefficients: Array, *, stacklevel: int) -> None:
+    """Warn when the fitted surrogate has NaN or infinite coefficients.
+
+    Args:
+        coefficients: The fitted expansion coefficients.
+        stacklevel: ``stacklevel`` for the warning, from
+            :func:`jaxgsa._core.entry._user_stacklevel`.
+    """
+    if not np.isfinite(np.asarray(coefficients)).all():
+        warnings.warn(
+            "The VKOGA surrogate has non-finite coefficients, so the indices "
+            "are NaN. The kernel system is numerically singular. Try a "
+            "smaller gamma, a larger ridge, or float64 "
+            "(jax.config.update('jax_enable_x64', True)).",
+            category=JaxgsaWarning,
+            stacklevel=stacklevel,
+        )
 
 
 def _seed_from_key(key: Array) -> int:

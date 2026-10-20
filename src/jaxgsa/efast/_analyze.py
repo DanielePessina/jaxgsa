@@ -37,7 +37,7 @@ from jax import Array
 
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
-from jaxgsa._core.entry import at_least, check_scalars, prepare, require
+from jaxgsa._core.entry import check_scalars, positive_int, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -326,7 +326,7 @@ def indices(
     rank_ok = Y_arr.ndim in (1, 2, 3)
     check_scalars(
         (
-            at_least("slice_chunk_size", slice_chunk_size, 1),
+            positive_int("slice_chunk_size", slice_chunk_size),
             require(rank_ok, f"Y must have 1, 2 or 3 dimensions, got {Y_arr.ndim}"),
             require(
                 not rank_ok or Y_arr.shape[0] == samples.n_runs,
@@ -450,7 +450,7 @@ def analyze(
         Y_arr,
         on_invalid=on_invalid,
         checks=(
-            at_least("slice_chunk_size", slice_chunk_size, 1),
+            positive_int("slice_chunk_size", slice_chunk_size),
             require(
                 rows_match,
                 _row_count_message(Y_arr.shape[0] if Y_arr.ndim else 0, N, D, samples.n_runs),
@@ -482,7 +482,10 @@ def analyze(
     # parameter has no effect, giving V=0 on that curve alone and a silent
     # NaN index.
     per_curve_var = jnp.var(Y_reshaped, axis=1)  # (D, T, K)
-    n_zero_curves = int(jnp.sum(per_curve_var == 0))
+    # A slice that is constant on every curve is a constant output. prepare()
+    # already warned about it, so only the partly-flat slices are counted here.
+    curve_zero = per_curve_var == 0
+    n_zero_curves = int(jnp.sum(curve_zero & ~jnp.all(curve_zero, axis=0, keepdims=True)))
     if n_zero_curves > 0:
         warnings.warn(
             f"jaxgsa.efast: {n_zero_curves} search-curve/output slice(s) have zero "

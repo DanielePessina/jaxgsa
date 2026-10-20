@@ -1,5 +1,181 @@
 # Changelog
 
+## 1.1.2
+
+This release fixes bugs and makes several methods faster. Correct index
+values do not change, with these exceptions:
+
+- DGSM values for a truncated Gaussian input change where they were wrong,
+  that is where a declared bound lies far outside the mass, or where the
+  interval is narrower than 0.1 standard deviations (1.1.1 could return a
+  negative variance there). Intervals from 0.05 to 0.1 standard deviations
+  wide were right in 1.1.1, and their values move in the last digits (1e-12
+  to 2e-9 relative). Other truncated Gaussian inputs do not change.
+- DGSM bootstrap intervals (`*_conf`) can differ in the last bits for every
+  input, because the resampled variance is now computed on shifted outputs.
+  In float32 with a large output offset they move more, by a size that grows
+  with `offset**2 / Var(Y)`: about 2e-4 relative at an offset of 50 when the
+  output standard deviation is 3.3.
+- When the problem has 17 or more inputs, PCE values change slightly, and so
+  do Shapley values from the PCE backend: by up to about 1e-5 relative in
+  float32, and about 4e-14 relative in float64. In float32, HDMR, PAWN, HSIC
+  and VKOGA values can differ in the last bit. Below 17 inputs all of them
+  are bitwise unchanged.
+- `pce`, and `shapley` with the PCE backend, now raise a `ValueError` when an
+  input is constant or two inputs are equal in every row. 1.1.1 returned
+  indices for some of these designs.
+- Two dataset attributes change: `to_dataset()` on an optimal-transport
+  result writes `ot_mode`, not `mode`, and boolean attributes such as the
+  PCE `streamed` are written as 0 or 1.
+
+`optimal_transport.analyze` and eager `optimal_transport.indices` give
+bitwise the same values as 1.1.1, in float32 and float64.
+
+### Fixed
+
+- `jax.grad` and `jax.jacrev` now work through
+  `jaxgsa.optimal_transport.indices` in the `"multivariate"` and
+  `"trajectory"` modes. Before, they raised `ValueError: Reverse-mode
+  differentiation does not work for lax.while_loop`, although the docs said
+  that reverse mode worked. The Sinkhorn solver keeps its loop, so every index
+  value is bitwise unchanged. The derivative now comes from the implicit
+  function theorem at the solver's fixed point. Forward-mode derivatives
+  therefore change slightly: they are now the derivative of the converged
+  solution, not of the iterate where the loop stopped. GMRES solves the
+  linear system of the derivative. Second derivatives match finite
+  differences to about 1e-8 for a converged solve.
+- `jaxgsa.hsic` no longer returns NaN indices for more than 46,340 samples
+  when JAX runs in single precision (`jax_enable_x64` off). The median
+  bandwidth counted sample pairs in a 32-bit signed integer, which
+  overflowed. It now counts in an unsigned 32-bit integer, which is exact up
+  to 65,535 samples. Above that, single-precision HSIC raises a `ValueError`
+  that tells you to enable x64. Double precision is unchanged.
+
+#### Gradients
+
+- `jax.grad` through `optimal_transport.indices` no longer returns NaN when
+  one output column is constant, in the multivariate and trajectory modes.
+  The same guard fixes reverse-mode gradients through the output
+  standardisation of `sobol` and `morris`. Values do not change.
+- `borgonovo.indices` no longer returns NaN gradients when a conditioning
+  class or an output column has zero variance. The gradient of a constant
+  output column is now exactly 0.
+
+#### Wrong or missing results
+
+- `vkoga` in float32 no longer returns NaN indices when the training data has
+  duplicate rows. The greedy search could pick an exact copy of a centre,
+  which made the kernel matrix singular. Bootstrap intervals, which resample
+  with replacement, were all NaN for this reason. VKOGA now skips exact
+  copies, and retries a singular solve once with a larger jitter. Results on
+  data without repeated rows do not change.
+- `dgsm` bootstrap intervals were wrong in float32 when the output had a large
+  offset. At an offset of 1e4 the interval did not contain the point
+  estimate. The resampled variance is now computed on shifted outputs.
+- `dgsm` crashed with `LinAlgError` for a truncated Gaussian input whose
+  bounds lie far from the mean, such as `GaussianSpec(mean=100, variance=1,
+  low=0)`. For a one-sided truncation in the tail it gave a Poincare constant
+  below the variance, so the upper bound was invalid. The constant and the
+  marginal variance are now computed on the support that holds the mass.
+- `dgsm` crashed with `TypeError` for a model that cannot be hashed, such as a
+  frozen dataclass or Equinox module with array fields. It now runs without
+  the kernel cache.
+- `hsic` returned a p-value of 1.0 for an output with zero variance, while R2
+  and T were NaN. The p-value is now NaN too.
+- `to_dataset().to_netcdf()` failed for PCE, HDMR and Shapley results with
+  the netCDF4 engine, and for optimal-transport results with the scipy
+  engine. Boolean attributes are now written as 0 or 1, and the
+  optimal-transport `mode` attribute is now `ot_mode`.
+
+#### Warnings and errors
+
+- `pce` now raises a `ValueError` when an input is constant, or when two
+  inputs are equal in every row. The PCE cannot estimate the indices of such
+  inputs from the sample. The message names the inputs. Only inputs that are
+  equal value for value count as duplicates: an affine copy, such as
+  `c = 1 - a`, gets the warning described below in float64. Before, float64
+  fits gave finite but wrong indices with no message: a duplicated input
+  shared the index of the true input, and a constant input got a large total
+  index.
+- `pce` now checks the Gram matrix of the design. For each basis column, it
+  finds the fraction of the column's variance that is left after the earlier
+  columns explain it. In float64 the fit warns when this fraction is below
+  1e-9: dependent or nearly duplicated inputs then make the indices
+  unreliable. A very high order on Gaussian inputs can also cause the
+  warning, and its indices can still be accurate. In float32 the fit raises
+  below 1e-5 or when the factorisation fails, and the message says that
+  float32 rounding may be the cause. Between 1e-5 and 1e-4 it warns, because
+  float32 rounding cannot tell a singular design from a well-posed one there.
+  When `jaxgsa.shapley` runs these checks, the messages name
+  `jaxgsa.shapley.analyze`.
+- `pce` now warns when the leave-one-out error is not finite on an output
+  that is not constant. Before, no warning appeared. Non-finite coefficients
+  now raise a `ValueError`, except with `on_invalid="propagate"`.
+- `pce` now warns when an order above 7 moves a wide truncated Gaussian input
+  from the Hermite to the Legendre basis. The warning names the input.
+- `hsic` now warns when more than half of the samples of an input or output
+  share one value. The median bandwidth then collapses and the kernel only
+  tests for equality. Values do not change.
+- `vkoga` now warns when the fitted coefficients or some bootstrap replicates
+  are not finite.
+- `Problem` now rejects zero parameters, a bare string as categorical
+  `labels`, duplicate or non-string `output_names`, a complex correlation
+  matrix, and an invalid `correlation_type` when no correlation is given.
+- `slice_chunk_size` and `batch_size` in `sobol`, `efast`, `hdmr` and
+  `shapley` now reject a float or a bool at once. Before, a float crashed
+  later inside the run.
+- Zero-variance warnings now point at your own line of code, also through
+  `shapley.analyze`, `dgsm.analyze` and `kucherenko.analyze`. `efast` no
+  longer warns twice for one constant slice. `kucherenko` no longer invents a
+  time label for a 2-D output.
+- In the optimal-transport joint modes, the zero-variance warning no longer
+  says that the indices will be 0 when only some slices are constant.
+- A Sinkhorn solve that ends with a NaN residual now counts as not
+  converged. The non-convergence warning also suggests a looser `tol` or x64.
+- `shapley.analyze` now names itself in its drop and propagate messages. The
+  `dgsm` key error now starts with `jaxgsa.dgsm:`.
+- The `sobol.analyze` verbose summary now shows the chunk sizes that the
+  bootstrap really used, and the true run count.
+
+### Performance
+
+- The first `hsic.analyze` call compiles much faster: at N = 1024, about 25 s
+  becomes under 1 s. Values are bitwise unchanged.
+- The PCE design matrix now builds each term from its non-zero factors when
+  the problem has 17 or more inputs. At D = 1000 the coefficient step drops
+  from 81 s to 0.5 s.
+- The input transforms of PCE, HDMR, PAWN, HSIC and VKOGA work on one
+  marginal family at a time when the problem has 17 or more inputs. At
+  D = 300 the transform drops from 19 s to 1.2 s.
+- PCE skips the second-order index step when no term has two inputs.
+- The `dgsm` bootstrap no longer slows down as the number of batches grows
+  (40 batches: 4.8 s to 0.5 s), and it holds one fewer `(n_bootstrap, N)`
+  array in memory.
+- The conditional plan of `kucherenko` and `vkoga` no longer builds an unused
+  `(D, D-1, D-1)` array. At D = 500 it uses half the memory.
+
+### Docs
+
+- The differentiation guide and the `optimal_transport.indices` docstring
+  now describe how the point-cloud modes are differentiated. They also say
+  that only `analyze` and eager `indices` are bitwise stable across releases:
+  under your own `jax.jit`, float32 values can differ in the last bits.
+- The PAWN docs now say that its row bootstrap biases intervals upward. For a
+  weak parameter the interval can lie above the point estimate.
+- The `rank` docs now say that `ci.replicates` holds the plain bootstrap
+  draws, so an interval rebuilt from them can be narrower than `S1_conf`.
+- Five examples had code that did not run: inverse Sobol bounds, non-uniform
+  inputs, save and load, DGSM, and correlated inputs. They are fixed.
+- The bootstrap helper docstrings now name the methods that really call
+  `bootstrap_draws` (pce and hdmr). pawn and shapley use their own loops.
+- The dependent-inputs skill reference and the Shapley example no longer
+  claim "two decimals" of agreement where the gap is up to 0.010 and 0.015.
+
+### Internal
+
+- The test helper for correlated Gaussian-linear indices now accepts any
+  covariance matrix, not only a correlation matrix.
+
 ## 1.1.1
 
 This release changes no API and no results. It corrects the minimum versions

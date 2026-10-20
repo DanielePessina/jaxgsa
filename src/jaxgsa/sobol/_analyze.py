@@ -35,10 +35,10 @@ from jax import Array
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints, interval
 from jaxgsa._core.entry import (
-    at_least,
     bootstrap_checks,
     check_scalars,
     one_of,
+    positive_int,
     prepare,
     require,
 )
@@ -1220,7 +1220,7 @@ def analyze(
         checks=(
             *_estimator_checks(estimator, samples.calc_second_order),
             *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
+            positive_int("slice_chunk_size", slice_chunk_size),
         ),
         n_expected=int(samples.samples.shape[0]),
         expand=samples.expand_outputs,
@@ -1304,6 +1304,7 @@ def analyze(
             D,
             samples.calc_second_order,
             Y.dtype.itemsize,
+            n_bootstrap=max(n_bootstrap, 1),
         )
         origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
         notes = [f"slice_chunk_size: {cs} ({origin})", f"estimator: {estimator}"]
@@ -1323,7 +1324,7 @@ def analyze(
         _verbose.analysis_summary(
             method="jaxgsa.sobol.analyze",
             problem=samples.problem,
-            n_runs=int(Y.shape[0]),
+            n_runs=int(samples.n_runs),
             T=T,
             K=K,
             invalid=invalid,

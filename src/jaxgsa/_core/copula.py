@@ -108,9 +108,6 @@ class _ConditionalPlan(NamedTuple):
         beta_self: ``(D, D - 1)`` regression of ``Z_i`` on ``Z_-i``, i.e.
             ``R[i, -i] R[-i, -i]^{-1}``. Used to draw ``Z_i | Z_-i``.
         std_self: ``(D,)`` conditional standard deviation of ``Z_i | Z_-i``.
-        chol_marginal: ``(D, D - 1, D - 1)`` Cholesky factor of ``R[-i, -i]``,
-            for drawing the ``Z_-i`` outer sample of the total-uncorrelated
-            index.
         chol_full: ``(D, D)`` Cholesky factor of the full correlation matrix
             ``R`` the plan was built from, for drawing the joint latent
             sample. It travels with the plan so a caller cannot pair the
@@ -126,7 +123,6 @@ class _ConditionalPlan(NamedTuple):
     chol_rest: np.ndarray
     beta_self: np.ndarray
     std_self: np.ndarray
-    chol_marginal: np.ndarray
     chol_full: np.ndarray
 
 
@@ -214,6 +210,7 @@ def canonicalize_correlation(
         ``(D, D)`` validated latent correlation matrix.
 
     Raises:
+        TypeError: If ``correlation`` is complex.
         ValueError: If ``correlation_type`` is unknown, ``correlation`` is not
             a matrix of numbers, the matrix fails validation, or the repair of
             a declared matrix is material.
@@ -223,7 +220,8 @@ def canonicalize_correlation(
             f"correlation_type must be 'latent' or 'spearman', got {correlation_type!r}"
         )
     try:
-        R = np.asarray(correlation, dtype=np.float64)
+        R_raw = np.asarray(correlation)
+        R = np.asarray(R_raw, dtype=np.float64) if not np.iscomplexobj(R_raw) else R_raw
     except (TypeError, ValueError) as exc:
         # A string is the common miss: older versions took correlation="empirical".
         raise ValueError(
@@ -232,6 +230,11 @@ def canonicalize_correlation(
             "jaxgsa.sampling.fit_correlation(problem, X_data) and attach it with "
             "problem.with_correlation(...)."
         ) from exc
+    if np.iscomplexobj(R):
+        raise TypeError(
+            "correlation must be real, got a complex matrix. Remove the "
+            "imaginary part before declaring it."
+        )
     _validate_structure(R, n_params)
     if correlation_type == "spearman":
         # The conversion is not guaranteed to preserve positive definiteness,
@@ -635,7 +638,6 @@ def build_conditional_plan(R: np.ndarray) -> _ConditionalPlan:
     chol_rest = np.empty((D, D - 1, D - 1), dtype=np.float64)
     beta_self = np.empty((D, D - 1), dtype=np.float64)
     std_self = np.empty(D, dtype=np.float64)
-    chol_marginal = np.empty((D, D - 1, D - 1), dtype=np.float64)
 
     # One plan is built per analyze/sample call, so aggregating the repair
     # diagnostics here and warning once at the end is exactly the
@@ -666,8 +668,6 @@ def build_conditional_plan(R: np.ndarray) -> _ConditionalPlan:
         min_cond_var = min(min_cond_var, raw_residual_var)
         std_self[i] = np.sqrt(max(raw_residual_var, _MIN_EIGENVALUE))
 
-        chol_marginal[i] = _safe_cholesky(R_rest, lifts)
-
     _warn_degenerate_conditionals(lifts, n_floored, min_cond_var)
 
     return _ConditionalPlan(
@@ -676,7 +676,6 @@ def build_conditional_plan(R: np.ndarray) -> _ConditionalPlan:
         chol_rest=chol_rest,
         beta_self=beta_self,
         std_self=std_self,
-        chol_marginal=chol_marginal,
         chol_full=_safe_cholesky(R),
     )
 

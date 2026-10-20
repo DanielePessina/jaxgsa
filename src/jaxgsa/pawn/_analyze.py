@@ -321,8 +321,9 @@ _CUMSUM_BLOCK = 64
 def _count_cumsum(oh: Array) -> Array:
     """Return the cumulative sum of ``oh`` along axis 0, exactly.
 
-    ``oh`` holds 0/1 flags, so every partial sum is an integer below ``2**24``
-    and float32 adds it without rounding. The result is therefore bit-for-bit
+    ``oh`` holds 0/1 flags, so every partial sum is an integer of at most
+    ``N``. That is exact in float32 only while ``N < 2**24``, which is the
+    limit of this function. The result is therefore bit-for-bit
     ``jnp.cumsum(oh, axis=0)``. It is built from a lower-triangular matmul
     inside blocks of rows plus a cumulative sum of the block totals, which
     XLA on CPU runs faster than its own reduce-window lowering of ``cumsum``.
@@ -438,8 +439,10 @@ def _bootstrap_subkeys(key: Array, n_bootstrap: int) -> Array:
     """Return the per-replicate keys of the sequential ``split`` chain.
 
     Replicate ``i`` draws its rows from the second key of the ``i``-th
-    ``jax.random.split`` applied to the running key, which is the chain
-    :func:`jaxgsa._core.bootstrap.bootstrap_draws` walks.
+    ``jax.random.split`` applied to the running key. A ``lax.scan`` builds
+    this chain. It is the same chain that
+    :func:`jaxgsa._core.bootstrap.bootstrap_draws` uses, but pawn does not
+    call that function.
 
     Args:
         key: PRNG key.
@@ -635,9 +638,12 @@ def _pawn_bootstrap(
 ) -> Array:
     """Compute PAWN indices on ``n_bootstrap`` row-resamples.
 
-    The resamples are the ones :func:`jaxgsa._core.bootstrap.bootstrap_draws`
-    would draw from ``key``. Each chunk of output columns runs all replicates
-    in one jitted call. Chunking and the memory estimate match
+    :func:`_bootstrap_subkeys` makes one key per replicate from ``key``.
+    Inside the jitted kernel, ``lax.map`` runs the replicates one after
+    another. Each replicate draws ``N`` row indices with replacement by
+    ``jax.random.choice``. The same row indices apply to every output column
+    of the chunk. Each chunk of output columns runs all replicates in one
+    jitted call. Chunking and the memory estimate match
     :func:`_pawn_core`, because a replicate has the same working set as one
     point-estimate call.
 
@@ -860,7 +866,18 @@ def analyze(
             shifts the output. ``"mean"`` weights all bins equally.
         n_bootstrap: Number of bootstrap resamples for confidence intervals.
             ``0`` disables the confidence intervals.
-        conf_level: Confidence level for the bootstrap intervals.
+        conf_level: Confidence level for the bootstrap intervals. The
+            bootstrap resamples rows with replacement. Resampling adds its
+            own noise to a KS gap that is already noisy, and the KS
+            statistic is a maximum of absolute gaps, so each replicate sits
+            above the point estimate on average. Weighted resampling with no
+            duplicated rows shows the same shift. The interval is therefore
+            biased upward and is widest
+            in relative terms for weak parameters. For a parameter with no
+            effect, the interval can lie entirely above the point estimate.
+            Read it as a rough scale of the sampling noise. Do not read it
+            as a coverage guarantee. Use a larger ``N`` or a different
+            statistic if you need to separate weak parameters from noise.
         ci_method: How the interval endpoints are formed. ``"quantile"``
             (default) reads them off the empirical bootstrap distribution.
             ``"gaussian"`` centres them on the point estimate and takes

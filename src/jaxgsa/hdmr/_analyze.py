@@ -24,6 +24,7 @@ from jaxgsa._core.entry import (
     at_least,
     bootstrap_checks,
     check_scalars,
+    positive_int,
     prepare,
     require,
 )
@@ -471,6 +472,8 @@ def analyze(
             ),
             *_fit_scalar_checks(max_iter, n_intervals, ridge),
             *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
+            positive_int("slice_chunk_size", slice_chunk_size),
+            positive_int("batch_size", batch_size),
         ),
         # An invalid order is refused by the checks above; do not size its floor.
         min_kept=_min_rows(problem.n_params, order, n_intervals) if order in (1, 2, 3) else 0,
@@ -671,10 +674,13 @@ def _hdmr_core(
     # are parameters. `analyze` warns about it; this is the traceable half,
     # and the clamped value comes back on `_HDMRCore.order`.
     order = min(order, D)
-    if slice_chunk_size is not None and slice_chunk_size < 1:
-        raise ValueError(f"jaxgsa.hdmr: slice_chunk_size must be >= 1, got {slice_chunk_size}")
-    if batch_size is not None and batch_size < 1:
-        raise ValueError(f"jaxgsa.hdmr: batch_size must be >= 1, got {batch_size}")
+    check_scalars(
+        (
+            positive_int("slice_chunk_size", slice_chunk_size),
+            positive_int("batch_size", batch_size),
+        ),
+        method="jaxgsa.hdmr._hdmr_core",
+    )
     ridge = float(ridge)
 
     # Build term metadata (cached on host; only computed once per D/order/n_intervals).

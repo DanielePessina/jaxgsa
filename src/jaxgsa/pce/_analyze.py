@@ -16,6 +16,7 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import get_memory_budget, pad_rows, resolve_batch_size
 from jaxgsa._core.bootstrap import bootstrap_draws, interval
 from jaxgsa._core.entry import (
+    _METHOD_ALIAS,
     at_least,
     bootstrap_checks,
     check_scalars,
@@ -23,7 +24,15 @@ from jaxgsa._core.entry import (
     prepare,
     require,
 )
-from jaxgsa._core.fit_quality import warn_cv_overfit, warn_variance_fit
+from jaxgsa._core.fit_quality import (
+    PACKAGE_DIR,
+    check_degenerate_inputs,
+    check_fit_finite,
+    check_gram_rank,
+    min_pivot_share,
+    warn_cv_overfit,
+    warn_variance_fit,
+)
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -36,7 +45,7 @@ from jaxgsa._core.precision import unit_clip_bounds
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa._core.surrogate import _PredictPlan
-from jaxgsa._core.transforms import _truncnorm_cdf
+from jaxgsa._core.transforms import GROUPED_MIN_D, _in_column_order, _truncnorm_cdf
 from jaxgsa._core.validation import (
     _is_constant_slice,
     _prepare_Y,
@@ -123,6 +132,37 @@ def _truncated_gaussian_is_wide(
     return bool(z) and min(z) >= _WIDE_TRUNCATION_Z
 
 
+def _order_forced_legendre(problem: Problem, order: int) -> list[str]:
+    """Name the inputs that a high order moves from Hermite to Legendre.
+
+    A wide truncated Gaussian stays on Hermite while the order is at most
+    ``_MAX_HERMITE_ORDER_UNDER_TRUNCATION``. Above that cap it goes through
+    its CDF onto Legendre, which has to approximate the steep inverse normal
+    CDF and fits worse. Only the order causes this switch, which is why it
+    deserves a warning. A narrow truncation moves to Legendre at any order
+    and is not reported.
+
+    Args:
+        problem: Problem whose ``input_specs`` decide the per-dimension map.
+        order: Effective maximum polynomial degree of the expansion.
+
+    Returns:
+        Names of the inputs that the order alone moved to Legendre.
+    """
+    if order <= _MAX_HERMITE_ORDER_UNDER_TRUNCATION:
+        return []
+    names = []
+    for name, spec in zip(problem.names, problem.input_specs, strict=True):
+        if isinstance(spec, CategoricalSpec | UniformSpec):
+            continue
+        if spec.low is None and spec.high is None:
+            continue
+        std = math.sqrt(float(spec.variance))
+        if _truncated_gaussian_is_wide(spec.low, spec.high, spec.mean, std):
+            names.append(name)
+    return names
+
+
 def _map_to_reference(X: Array, problem: Problem, order: int) -> tuple[Array, tuple[str, ...]]:
     """Map physical inputs to the orthogonal polynomial reference domain.
 
@@ -152,6 +192,25 @@ def _map_to_reference(X: Array, problem: Problem, order: int) -> tuple[Array, tu
         length-``D`` tuple of ``"uniform"`` / ``"gaussian"`` tags telling
         ``build_design_matrix`` which 1-D polynomial family each dimension
         needs.
+    """
+    if problem.n_params < GROUPED_MIN_D:
+        return _map_by_column(X, problem, order)
+    return _map_by_group(X, problem, order)
+
+
+def _map_by_column(X: Array, problem: Problem, order: int) -> tuple[Array, tuple[str, ...]]:
+    """Map physical inputs to the reference domain, one column at a time.
+
+    See :func:`_map_to_reference` for the rule and why this loop is kept for
+    small ``D``.
+
+    Args:
+        X: Inputs in physical units, shape ``(N, D)``.
+        problem: Problem whose ``input_specs`` decide the per-dimension map.
+        order: Effective maximum polynomial degree of the expansion.
+
+    Returns:
+        The reference-domain inputs and the per-dimension family tags.
     """
     D = problem.n_params
     cols = []
@@ -199,6 +258,98 @@ def _map_to_reference(X: Array, problem: Problem, order: int) -> tuple[Array, tu
             input_types.append("gaussian")
 
     return jnp.column_stack(cols), tuple(input_types)
+
+
+def _map_by_group(X: Array, problem: Problem, order: int) -> tuple[Array, tuple[str, ...]]:
+    """Map physical inputs to the reference domain, one op per map family.
+
+    Args:
+        X: Inputs in physical units, shape ``(N, D)``.
+        problem: Problem whose ``input_specs`` decide the per-dimension map.
+        order: Effective maximum polynomial degree of the expansion.
+
+    Returns:
+        The reference-domain inputs and the per-dimension family tags.
+    """
+    D = problem.n_params
+    X = jnp.asarray(X)
+    dtype = X.dtype if jnp.issubdtype(X.dtype, jnp.floating) else jnp.result_type(X.dtype, float)
+    X = X.astype(dtype)
+    hermite_safe_order = order <= _MAX_HERMITE_ORDER_UNDER_TRUNCATION
+
+    # Columns are grouped by map and each group goes through one broadcast op,
+    # so the number of eager dispatches does not grow with D. Per-column
+    # constants are computed on the host in double precision and cast to the
+    # column dtype, which is what a Python-float operand becomes inside a
+    # single-column op, so, run eagerly, the result is bit-identical to a column loop.
+    input_types: list[str] = ["gaussian"] * D
+    uniform: list[int] = []
+    standard: list[int] = []  # Hermite: (x - mean) / std
+    lower: list[int] = []  # truncated CDF -> Legendre, interval not in the upper tail
+    upper: list[int] = []  # truncated CDF -> Legendre, interval in the upper tail
+    consts: dict[int, tuple[float, ...]] = {}
+    for d in range(D):
+        spec = problem.input_specs[d]
+        if isinstance(spec, CategoricalSpec):
+            # Layered guard: pce.analyze rejects categorical problems up front.
+            raise ValueError(
+                f"Parameter {problem.names[d]!r} is categorical; no orthogonal "
+                "polynomial family exists for an unordered marginal"
+            )
+        if isinstance(spec, UniformSpec):
+            uniform.append(d)
+            input_types[d] = "uniform"
+            consts[d] = (spec.low, spec.high - spec.low)
+            continue
+
+        mean, lo, hi = spec.mean, spec.low, spec.high
+        # math, not jnp: the standard deviation is a property of the declared
+        # marginal, so it must stay a host float. Under `jit` a `jnp` call on
+        # it returns a tracer, and `float()` on a tracer raises -- which is
+        # what made the reference map untraceable for a Gaussian input.
+        std = math.sqrt(float(spec.variance))
+        truncated = lo is not None or hi is not None
+        if truncated and not (
+            hermite_safe_order and _truncated_gaussian_is_wide(lo, hi, mean, std)
+        ):
+            a = -np.inf if lo is None else (lo - mean) / std
+            b = np.inf if hi is None else (hi - mean) / std
+            (upper if a > 0.0 else lower).append(d)
+            input_types[d] = "uniform"
+            consts[d] = (mean, std, a, b)
+        else:
+            standard.append(d)
+            consts[d] = (mean, std)
+
+    def column_consts(group: list[int], n: int) -> list[Array]:
+        values = np.asarray([consts[d][:n] for d in group], dtype=np.float64)
+        return [jnp.asarray(values[:, j], dtype=dtype) for j in range(n)]
+
+    parts: list[tuple[list[int], Array]] = []
+    if uniform:
+        low, width = column_consts(uniform, 2)
+        parts.append((uniform, 2.0 * (X[:, uniform] - low) / width - 1.0))
+    if standard:
+        mean, std = column_consts(standard, 2)
+        parts.append((standard, (X[:, standard] - mean) / std))
+    for group in (lower, upper):
+        if group:
+            mean, std = column_consts(group, 2)
+            a_host = np.asarray([consts[d][2] for d in group], dtype=np.float64)
+            b_host = np.asarray([consts[d][3] for d in group], dtype=np.float64)
+            u = _truncnorm_cdf((X[:, group] - mean) / std, a_host, b_host)
+            # The clip keeps u strictly inside (0, 1), so a sample at or
+            # beyond a truncation bound stays distinguishable from the bound
+            # itself. In float32 its upper half did nothing at all --
+            # ``1 - UNIT_CLIP`` is exactly 1.0 there -- so the bound is
+            # brought inside u's own dtype instead. The lower bound stays at
+            # UNIT_CLIP, which float32 represents exactly; widening it for
+            # symmetry would discard information and move numbers for
+            # nothing. See unit_clip_bounds.
+            u = jnp.clip(u, *unit_clip_bounds(UNIT_CLIP, u.dtype))
+            parts.append((group, 2.0 * u - 1.0))
+
+    return _in_column_order(parts, D), tuple(input_types)
 
 
 def _auto_order(D: int, N: int, max_order: int, fit_ratio: float) -> int:
@@ -281,6 +432,9 @@ class _PCEFit(NamedTuple):
     loo_flat: Array | None  # (T*K,) per-slice LOO RMSE, or None (diagnostics=False)
     rmse_flat: Array | None  # (T*K,) per-slice in-sample RMSE, or None (diagnostics=False)
     streamed: bool  # True when the row-streamed fit path ran
+    # Smallest unexplained column share of the regularized Gram matrix, from
+    # jaxgsa._core.fit_quality.min_pivot_share, or None (diagnostics=False).
+    pivot_share: Array | None = None
 
 
 @lru_cache(maxsize=32)
@@ -352,7 +506,7 @@ def _fit_pce_streamed(
     ridge: float,
     batch_size: int | None,
     diagnostics: bool,
-) -> tuple[Array, Array | None, Array | None]:
+) -> tuple[Array, Array | None, Array | None, Array]:
     """Fit the PCE by streaming row batches.
 
     The normal-equation pass always runs. A second pass computes LOO and the
@@ -390,8 +544,9 @@ def _fit_pce_streamed(
 
     Returns:
         Tuple of ``coeffs_flat``, shape ``(n_terms, T*K)``, the per-slice LOO
-        RMSE, shape ``(T*K,)``, and the per-slice in-sample RMSE, same shape.
-        Both are ``None`` when diagnostics are disabled.
+        RMSE, shape ``(T*K,)``, the per-slice in-sample RMSE, same shape, and
+        the regularized Gram matrix, shape ``(n_terms, n_terms)``. The two
+        RMSEs are ``None`` when diagnostics are disabled.
     """
     N = X_ref.shape[0]
     n_terms = multi_index.shape[0]
@@ -439,7 +594,7 @@ def _fit_pce_streamed(
         loo_flat = None
         rmse_flat = None
 
-    return coeffs_flat, loo_flat, rmse_flat
+    return coeffs_flat, loo_flat, rmse_flat, gram
 
 
 def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
@@ -691,7 +846,7 @@ def _fit_pce_core(
         # Map inputs to reference domain; (N, D) is small next to (N, n_terms).
         X_ref, input_types = _map_to_reference(X, problem, effective_order)
         Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
-        coeffs_flat, loo_flat, rmse_flat = _fit_pce_streamed(
+        coeffs_flat, loo_flat, rmse_flat, gram = _fit_pce_streamed(
             X_ref, Y_flat, mi, input_types, effective_order, ridge, batch_size, diagnostics
         )
         # Terms-last layout, matching HDMR's Sa convention (slices lead).
@@ -704,6 +859,7 @@ def _fit_pce_core(
         loo_flat=loo_flat,
         rmse_flat=rmse_flat,
         streamed=streamed,
+        pivot_share=min_pivot_share(gram) if diagnostics else None,
     )
 
 
@@ -1027,7 +1183,10 @@ def analyze(
             ``fit_ratio`` is above 1, or too few rows survive
             ``on_invalid`` for even the order-1 expansion
             (``D + 1 > int(fit_ratio * N)``, which would make the fit
-            underdetermined).
+            underdetermined). Also raised when an input is constant or two
+            inputs are equal in every row, when the Gram matrix of the
+            design is numerically singular in float32, or when the fitted
+            coefficients are not finite: the indices are then undefined.
     """
     key = as_key(key, "pce")
     if _is_irregular_y(Y):
@@ -1100,6 +1259,21 @@ def analyze(
             category=JaxgsaWarning,
         )
 
+    # Messages name the public entry point the caller used: jaxgsa.shapley
+    # runs this function under its own alias.
+    namespace = _METHOD_ALIAS.get() or "jaxgsa.pce"
+    switched = _order_forced_legendre(problem, fit.order)
+    if switched:
+        warnings.warn(
+            f"{namespace}: order {fit.order} is above {_MAX_HERMITE_ORDER_UNDER_TRUNCATION}, "
+            f"so the truncated Gaussian input(s) {switched} use a Legendre basis "
+            "through the truncated CDF instead of Hermite. That basis fits a "
+            "Gaussian-shaped input less accurately and can degrade the indices. "
+            f"Use order <= {_MAX_HERMITE_ORDER_UNDER_TRUNCATION} to keep Hermite.",
+            skip_file_prefixes=(PACKAGE_DIR,),
+            category=JaxgsaWarning,
+        )
+
     # Sobol indices are extracted analytically from the coefficients
     # (Sudret 2008), batched over all slices: no extra sampling, no loops.
     # Per-slice LOO RMSE (cv_rmse) and in-sample RMSE are goodness-of-fit
@@ -1118,6 +1292,35 @@ def analyze(
         budget=get_memory_budget(),
     )  # S1/ST (T,K,D), S2 (T,K,D,D)
     loo, rmse, explained_variance, y_std = _fit_summary(fit.loo_flat, fit.rmse_flat, ctx.Y3)
+
+    # Non-finite numbers come first: the two checks below skip them, so a
+    # failed Cholesky would otherwise pass as a clean fit.
+    # Skipped when non-finite rows were let through (`on_invalid="propagate"`):
+    # NaN coefficients are then the documented outcome, already warned about,
+    # and not a sign of a singular Gram matrix.
+    if bool(jnp.all(jnp.isfinite(X)) & jnp.all(jnp.isfinite(ctx.Y3))):
+        # The rank checks come first. A singular Gram matrix turns into NaN
+        # only in float32; in float64 every number stays finite and wrong.
+        # Constant and duplicated inputs are the provable cases, so they are
+        # read off the inputs; the pivot share covers the rest.
+        check_degenerate_inputs(namespace, X, problem.names)
+        assert fit.pivot_share is not None
+        check_gram_rank(
+            namespace,
+            fit.pivot_share,
+            advice="Remove duplicated or constant inputs, lower order, or add rows.",
+        )
+        check_fit_finite(
+            namespace,
+            fit.coefficients,
+            loo,
+            rmse,
+            y_std,
+            advice=(
+                "Enable jax x64 (jax.config.update('jax_enable_x64', True)), lower "
+                "order, or remove duplicated or constant inputs."
+            ),
+        )
 
     # Both fit-quality checks run here, in the public entry point only, so
     # that `indices` stays free of host-side side effects and one analyze call

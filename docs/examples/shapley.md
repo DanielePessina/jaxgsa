@@ -297,7 +297,7 @@ row sums: [1.        1.0000001]
 explained_variance: [1.0094421 0.9541204]
 ```
 
-Row 1 is Ishigami and reproduces the scalar answer to two decimals. Row 2 is
+Row 1 is Ishigami and reproduces the scalar answer to within 0.015. Row 2 is
 the sum of squares and comes out `[0.325, 0.337, 0.338]`, within 0.01 of the
 1/3 the construction demands. The residual spread is finite-sample noise in a
 2000-row fit.

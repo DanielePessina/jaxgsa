@@ -456,11 +456,11 @@ Data variables:
     diffusive  (output, param) float32 24B 0.1086 0.05999 ... 0.03511 0.08365
     S1         (output, param) float32 24B 0.1956 0.07103 ... 0.01185 0.2821
 Attributes:
-    mode:     trajectory
+    ot_mode:  trajectory
 ```
 
-The mode is recorded in `attrs`, which is worth having when a saved dataset
-outlives the script that made it. Bootstrap bounds arrive as `*_lower` and
+The mode is recorded in `attrs` as `ot_mode`, which is worth having when a
+saved dataset outlives the script that made it. Bootstrap bounds arrive as `*_lower` and
 `*_upper`, and `ot_dummy` as its own per-parameter variable, both only when
 you asked for them.
 

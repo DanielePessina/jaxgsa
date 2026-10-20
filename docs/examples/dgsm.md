@@ -266,6 +266,8 @@ floors — and adds a second one: every upper bound here exceeds 1.
 shape, at the only place it is used:
 
 ```python
+from jaxgsa.benchmarks import ishigami, linear
+
 def ishigami_fn(x):
     """Unbatched Ishigami: (3,) -> ()."""
     A, B = 7.0, 0.1

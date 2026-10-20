@@ -183,8 +183,8 @@ result.n_centers, result.gamma, result.ridge, result.rmse   # 300, ..., 0.094
 Y_pred = result.predict(X_new, batch_size=2048)
 ```
 
-`S_TC` matches Kucherenko's `S1` and `S_TU` matches its `ST`, here to about two
-decimals against the analytic `[0.0783, 0.0783, 0.2174]`, from 2000 model runs
+`S_TC` matches Kucherenko's `S1` and `S_TU` matches its `ST`, here to about 0.01
+against the analytic `[0.0783, 0.0783, 0.2174]`, from 2000 model runs
 instead of 57,344. The difference is surrogate error, which is the price of not
 being able to run the model again.
 

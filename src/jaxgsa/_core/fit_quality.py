@@ -18,10 +18,12 @@ from __future__ import annotations
 import math
 import os
 import warnings
+from collections.abc import Sequence
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
 
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -61,6 +63,32 @@ OVERFIT_THRESHOLD = 1.3
 # order-8 fit on 2000 rows gives cv_rmse 0.076 against std(Y) 3.75, a ratio
 # of 0.020.
 CV_RATIO_THRESHOLD = math.sqrt(1.0 - POORFIT_THRESHOLD)
+
+# Limits on the pivot share of a Gram matrix, per dtype.
+#
+# The pivot share of column j is the squared Cholesky pivot ``L[j, j]**2``
+# over the diagonal ``G[j, j]`` of the ridge-regularized Gram matrix: the
+# fraction of the column's variance that is left after the columns before it
+# explain it.
+#
+# The share alone cannot prove that the indices are undefined in float64.
+# Accurate high-order Hermite fits and exactly dependent designs give shares
+# in overlapping ranges, so no fixed limit separates them. The provable cases,
+# a constant input and two identical inputs, are read off the inputs instead
+# (:func:`check_degenerate_inputs`). In float64 the share only warns, below
+# 1e-9. An input that copies another up to 1e-3 noise gives about 3e-10 on
+# 2000 rows, and its copy then gets a total index of 0.08 instead of 0.
+#
+# float32 cannot resolve the same range. Its rounding floor overlaps the
+# shares of singular designs: a three-level input on 2000 rows gives about
+# 1e-5 in float32, and the exact value moves with the jax version. Below 1e-5
+# float32 refuses the fit, and NaN (a failed factorisation) counts as below.
+# From 1e-5 to 1e-4 it warns, because the design may be singular and float32
+# cannot tell. The lowest well-posed float32 share measured is 1.5e-4 (D = 10,
+# order 4, fit_ratio = 1).
+ILL_CONDITIONED_PIVOT_THRESHOLD_F64 = 1e-9
+SINGULAR_PIVOT_THRESHOLD_F32 = 1e-5
+AMBIGUOUS_PIVOT_THRESHOLD_F32 = 1e-4
 
 
 @jax.jit
@@ -223,3 +251,247 @@ def warn_cv_overfit(
         skip_file_prefixes=(PACKAGE_DIR,),
         category=JaxgsaWarning,
     )
+
+
+@jax.jit
+def min_pivot_share(gram: Array) -> Array:
+    """The smallest unexplained share of any column of a Gram matrix.
+
+    Args:
+        gram: Symmetric Gram matrix, shape ``(n_terms, n_terms)``, with any
+            ridge already added.
+
+    Returns:
+        ``min_j L[j, j]**2 / G[j, j]``, a scalar in ``[0, 1]``. NaN when the
+        Cholesky factorisation fails or a column is all zeros.
+    """
+    chol = jnp.linalg.cholesky(gram)
+    return jnp.min(jnp.diagonal(chol) ** 2 / jnp.diagonal(gram))
+
+
+@jax.jit
+def _input_fingerprints(X: Array) -> tuple[Array, Array]:
+    """Per-column spread and a projection that identical columns share.
+
+    Args:
+        X: Inputs, shape ``(N, D)``, of any real, integer or boolean dtype.
+
+    Returns:
+        ``(spread, projection)``, each of shape ``(D,)``. ``spread`` is
+        ``max - min`` per column, in floating point. Identical columns get
+        equal projections up to the summation order. The projection is
+        floating point even for integer ``X``.
+    """
+    dtype = jnp.result_type(X.dtype, jnp.float32)
+    weights = jax.random.normal(jax.random.key(0), (X.shape[0], 1), dtype)
+    values = X.astype(dtype)
+    spread = jnp.max(values, axis=0) - jnp.min(values, axis=0)
+    return spread, jnp.sum(values * weights, axis=0)
+
+
+def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> None:
+    """Refuse constant or duplicated inputs, which a surrogate cannot separate.
+
+    A constant input carries no variance, so the sample says nothing about
+    its effect: a polynomial fit cannot estimate its index. Two identical
+    inputs cannot be told apart, so the fit can split their effect between
+    them in any proportion. Both make the Gram matrix of a polynomial basis
+    exactly singular, but the pivot shares cannot prove that in float64. This
+    check reads the inputs directly, so both dtypes refuse the same designs.
+
+    Only columns that are equal value for value count as duplicates. An
+    input that is an affine copy of another (``c = 2 * a``, ``c = 1 - a``)
+    makes the Gram matrix singular too, but passes this check. The pivot
+    share then warns in float64 and refuses in float32.
+
+    Args:
+        namespace: The public function the message speaks for.
+        X: Finite inputs, shape ``(N, D)``.
+        names: Input names, length ``D``.
+
+    Raises:
+        ValueError: If an input is constant over all rows, or two inputs are
+            equal in every row.
+    """
+    spread_dev, projection_dev = _input_fingerprints(X)
+    spread = np.asarray(spread_dev)
+    constant = [names[int(j)] for j in np.flatnonzero(spread == 0)]
+    if constant:
+        raise ValueError(
+            f"{namespace}: the input(s) {constant} have the same value in every row. "
+            "A constant input has no variance, so the PCE cannot estimate its "
+            "indices from this sample, and the Gram matrix of the design is "
+            "singular. Remove the input from the problem, or sample it over its "
+            "range."
+        )
+    projection = np.asarray(projection_dev, dtype=np.float64)
+    order = np.argsort(projection)
+    scale = np.max(np.abs(projection)) if projection.size else 0.0
+    duplicates: list[tuple[str, str]] = []
+    for a, b in zip(order[:-1], order[1:], strict=True):
+        if abs(projection[a] - projection[b]) > 1e-4 * scale:
+            continue
+        if bool(jnp.array_equal(X[:, a], X[:, b])):
+            first, second = sorted((int(a), int(b)))
+            duplicates.append((names[first], names[second]))
+    if duplicates:
+        raise ValueError(
+            f"{namespace}: the inputs {duplicates} are equal in every row. Two "
+            "identical inputs cannot be told apart, so the PCE cannot estimate "
+            "their indices, and the Gram matrix of the design is singular. Remove "
+            "one input of each pair, or sample them independently."
+        )
+
+
+def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
+    """Refuse or warn on a fit whose Gram matrix is near singular.
+
+    :func:`check_fit_finite` sees a singular Gram matrix only when it turns
+    into NaN, which happens in float32. In float64 the factorisation
+    succeeds and every number stays finite. This check reads the
+    conditioning directly. The limits depend on the dtype of
+    ``pivot_share``; see :data:`ILL_CONDITIONED_PIVOT_THRESHOLD_F64`.
+
+    Args:
+        namespace: The public function the message speaks for.
+        pivot_share: The output of :func:`min_pivot_share`.
+        advice: What to do about it. Appended to the message.
+
+    Raises:
+        ValueError: If ``pivot_share`` is not finite, or is below
+            :data:`SINGULAR_PIVOT_THRESHOLD_F32` in float32.
+
+    Warns:
+        JaxgsaWarning: If ``pivot_share`` is not refused but is below
+            :data:`ILL_CONDITIONED_PIVOT_THRESHOLD_F64` in float64 or
+            :data:`AMBIGUOUS_PIVOT_THRESHOLD_F32` in float32.
+    """
+    is_f64 = jnp.asarray(pivot_share).dtype == jnp.float64
+    share = float(pivot_share)
+    precision = (
+        ""
+        if is_f64
+        else " float32 rounding may be the cause: enable jax x64 "
+        "(jax.config.update('jax_enable_x64', True)) to fit in float64."
+    )
+    if not math.isfinite(share):
+        raise ValueError(
+            f"{namespace}: the Gram matrix of the design is numerically singular: "
+            "its Cholesky factorisation failed. The coefficients are not "
+            f"identified, so the indices are undefined.{precision} {advice}"
+        )
+    if not is_f64 and share < SINGULAR_PIVOT_THRESHOLD_F32:
+        raise ValueError(
+            f"{namespace}: the Gram matrix of the design is numerically singular: "
+            f"one basis column has only {share:.1e} of its variance left after the "
+            f"earlier columns explain it, below {SINGULAR_PIVOT_THRESHOLD_F32:.0e}. "
+            f"The coefficients are not identified, so the indices are undefined."
+            f"{precision} {advice}"
+        )
+    if is_f64 and share < ILL_CONDITIONED_PIVOT_THRESHOLD_F64:
+        warnings.warn(
+            f"{namespace}: the Gram matrix of the design is near singular: one "
+            f"basis column has only {share:.1e} of its variance left after the "
+            "earlier columns explain it. Near-singular or dependent inputs make "
+            "the indices unreliable. A very high order on Gaussian inputs can "
+            f"also cause this, and its indices can still be accurate. {advice}",
+            skip_file_prefixes=(PACKAGE_DIR,),
+            category=JaxgsaWarning,
+        )
+    elif not is_f64 and share < AMBIGUOUS_PIVOT_THRESHOLD_F32:
+        warnings.warn(
+            f"{namespace}: the Gram matrix of the design may be numerically "
+            f"singular: one basis column has only {share:.1e} of its variance left "
+            "after the earlier columns explain it. In float32 this cannot be told "
+            "apart from a singular design, so the indices may be undefined. Enable "
+            "jax x64 (jax.config.update('jax_enable_x64', True)) to resolve it. "
+            f"{advice}",
+            skip_file_prefixes=(PACKAGE_DIR,),
+            category=JaxgsaWarning,
+        )
+
+
+@jax.jit
+def _non_finite_stats(
+    coefficients: Array, cv_rmse: Array, rmse: Array, std_y: Array
+) -> tuple[Array, Array]:
+    """Count the non-finite fit entries that a constant output cannot explain.
+
+    A constant output slice has ``std(Y) == 0`` and legitimately reports
+    undefined ratios. A slice with spread has no such excuse, so a non-finite
+    leave-one-out or in-sample error there means the fit itself failed.
+
+    Args:
+        coefficients: Fitted coefficients, any shape.
+        cv_rmse: Leave-one-out RMSE per output slice.
+        rmse: In-sample RMSE per output slice, same shape as ``cv_rmse``.
+        std_y: Standard deviation of ``Y`` per slice, same shape as
+            ``cv_rmse``.
+
+    Returns:
+        ``(n_bad_coefficients, n_bad_slices)``.
+    """
+    spread = jnp.asarray(std_y) > 0
+    bad_slice = spread & ~(jnp.isfinite(cv_rmse) & jnp.isfinite(rmse))
+    return jnp.sum(~jnp.isfinite(coefficients)), jnp.sum(bad_slice)
+
+
+def check_fit_finite(
+    namespace: str,
+    coefficients: Array,
+    cv_rmse: Array | None,
+    rmse: Array | None,
+    std_y: Array,
+    *,
+    advice: str,
+) -> None:
+    """Refuse or warn when a fit produced non-finite numbers.
+
+    The other checks in this module skip non-finite entries, because a
+    constant output has none to report. That also hides a real failure: when
+    the Gram matrix is numerically singular, the Cholesky factor behind the
+    leave-one-out error is NaN, the coefficients can overflow, and every
+    index read from them is meaningless, yet the arrays keep their shapes.
+
+    Non-finite coefficients make the indices undefined, so the call raises.
+    A non-finite error on a slice with spread leaves the indices defined but
+    unverified, so the call warns.
+
+    Args:
+        namespace: The public function the message speaks for.
+        coefficients: Fitted coefficients, any shape.
+        cv_rmse: Leave-one-out RMSE per output slice, or ``None`` when the
+            fit reported none (the error check is then skipped).
+        rmse: In-sample RMSE per output slice, or ``None``.
+        std_y: Standard deviation of ``Y`` per output slice.
+        advice: What to do about it. Appended to the message.
+
+    Raises:
+        ValueError: If any coefficient is not finite.
+
+    Warns:
+        JaxgsaWarning: If ``cv_rmse`` or ``rmse`` is not finite on a slice
+            whose output is not constant.
+    """
+    check_errors = cv_rmse is not None and rmse is not None
+    n_coef, n_slices = _non_finite_stats(
+        coefficients,
+        cv_rmse if cv_rmse is not None else jnp.zeros(()),
+        rmse if rmse is not None else jnp.zeros(()),
+        std_y if check_errors else jnp.ones(()),
+    )
+    if int(n_coef):
+        raise ValueError(
+            f"{namespace}: the fitted coefficients are not finite, because the Gram "
+            "matrix of the design is numerically singular. The indices are "
+            f"undefined. {advice}"
+        )
+    if check_errors and int(n_slices):
+        warnings.warn(
+            f"{namespace}: cv_rmse or rmse is not finite on {int(n_slices)} output "
+            "slice(s) whose output is not constant. The Gram matrix of the design "
+            "is numerically singular, so the leave-one-out factorisation failed. "
+            f"The indices are unreliable. {advice}",
+            skip_file_prefixes=(PACKAGE_DIR,),
+            category=JaxgsaWarning,
+        )

@@ -380,7 +380,11 @@ def _get_delta_kernel(
             mean = (y_cls * mask_b).sum(axis=-1) / safe_counts  # (Dg, M)
             dev = (y_cls - mean[..., None]) * mask_b
             var = (dev**2).sum(axis=-1) / jnp.maximum(counts_b - 1.0, 1.0)
-            h = _kde_bandwidths(safe_counts, jnp.sqrt(var), bw_factor)  # (Dg, M)
+            # Double where: sqrt'(0) is infinite, so a zero-variance class
+            # would turn a zero cotangent into NaN in reverse mode.
+            pos_var = var > 0
+            std = jnp.where(pos_var, jnp.sqrt(jnp.where(pos_var, var, 1.0)), 0.0)
+            h = _kde_bandwidths(safe_counts, std, bw_factor)  # (Dg, M)
             # A degenerate class is one the output grid cannot resolve. A
             # zero-variance class gets bandwidth 0 and a zeroed density,
             # which biases delta far low. A class narrower than the grid
@@ -430,9 +434,12 @@ def _get_delta_kernel(
             order.
             """
             y_r = y[r]  # resampled column
-            h_full = _kde_bandwidths(
-                jnp.asarray(float(N), dtype=dtype), jnp.std(y_r, ddof=1), bw_factor
-            )
+            # Double where, as in _group_stats: a constant column must give a
+            # zero gradient, not NaN.
+            var_r = jnp.var(y_r, ddof=1)
+            pos_var_r = var_r > 0
+            std_r = jnp.where(pos_var_r, jnp.sqrt(jnp.where(pos_var_r, var_r, 1.0)), 0.0)
+            h_full = _kde_bandwidths(jnp.asarray(float(N), dtype=dtype), std_r, bw_factor)
             fy = _kde_full(y_r, grid, h_full)
             degenerate = y_r.max() == y_r.min()
             y_mean = y_r.mean()

@@ -69,12 +69,13 @@ def test_declared_provenance_is_exported_as_plain_attributes() -> None:
         result = _result(method, "scalar")
         attrs = result.to_dataset().attrs
         for name in type(result)._schema.meta:
+            key = type(result)._attr_aliases.get(name, name)
             value = getattr(result, name)
             if value is None:
-                assert name not in attrs
+                assert key not in attrs
             else:
-                assert attrs[name] == value
-                assert isinstance(attrs[name], (str, bool, int, float, complex))
+                assert attrs[key] == value
+                assert isinstance(attrs[key], (str, bool, int, float, complex))
 
 
 def test_ciinfo_repr_hides_bootstrap_arrays() -> None:
