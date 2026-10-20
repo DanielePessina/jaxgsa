@@ -122,6 +122,10 @@ Some fixes change index values where the old values were wrong. See Fixed.
 - `pawn` point values and bootstrap draws change by at most 1 ulp (6e-8 in float32). A constant output now gives exactly 0.
 - Bootstrap draws now come from one key per resample (`split(key, R)`) in `sobol`, `kucherenko`, `morris`, `borgonovo`, `dgsm` and `optimal_transport`. For a fixed `key`, every bootstrap replicate and every confidence interval changes. The intervals are statistically equivalent. Point estimates do not change. A draw still does not depend on chunk width or memory budget, and the full index matrix is no longer built.
 - `sobol` bootstrap replicates now use count-weighted moments, not a row gather. In float32 the replicates differ from a gather on the same draws by at most about 3e-6, and in x64 by about 4e-15. An input the model never reads now gives a first-order replicate of exactly 0 for `saltelli-jansen` and `mauntz-kucherenko`.
+- `dgsm` Poincare constant for a one-sided truncated Gaussian is now continuous
+  in the bound. Before, it jumped by about 8e-4 (relative) when the bound
+  crossed 5 std from the mean (`low=5.0` gave 0.0874775, `low=5.001` gave
+  0.0875459). Bounds just below 5 std now change by up to about 7e-4 relative.
 
 ### Performance
 

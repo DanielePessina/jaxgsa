@@ -142,18 +142,30 @@ def _effective_support(
     """
     lo = mean - _OPEN_SIDE_SD * std if low is None else low
     hi = mean + _OPEN_SIDE_SD * std if high is None else high
-    if not _is_far(mean, std, low, high):
+    far = _is_far(mean, std, low, high)
+    if not far and (low is None) == (high is None):
         return lo, hi
     a_std = -np.inf if low is None else (low - mean) / std
     b_std = np.inf if high is None else (high - mean) / std
-    lo_std = float(truncnorm.ppf(_TAIL_MASS, a_std, b_std))
+    # Mirror image, so the lower cut is as accurate as the upper one.
+    lo_std = -float(truncnorm.isf(_TAIL_MASS, -b_std, -a_std))
     hi_std = float(truncnorm.isf(_TAIL_MASS, a_std, b_std))
-    lo = mean + std * lo_std
-    hi = mean + std * hi_std
-    if low is not None:
-        lo = max(lo, low)
-    if high is not None:
-        hi = min(hi, high)
+    q_lo = mean + std * lo_std
+    q_hi = mean + std * hi_std
+    if far:
+        lo, hi = q_lo, q_hi
+        if low is not None:
+            lo = max(lo, low)
+        if high is not None:
+            hi = min(hi, high)
+        return lo, hi
+    # Ordinary one-sided truncation: the open side reaches the wider of
+    # mean +/- 8 std and the tail quantile. This matches the far path at the
+    # switch, so the constant is continuous in the bound.
+    if high is None:
+        hi = max(hi, q_hi)
+    if low is None:
+        lo = min(lo, q_lo)
     return lo, hi
 
 
