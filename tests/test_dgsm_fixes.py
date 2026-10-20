@@ -128,8 +128,12 @@ def test_bootstrap_is_independent_of_batch_size() -> None:
     ],
 )
 def test_truncated_gaussian_poincare_matches_1_1_1(kwargs, expected) -> None:
-    """Ordinary truncations keep the 1.1.1 interval, so the constant is unchanged."""
-    assert poincare_constant(GaussianSpec(**kwargs)) == pytest.approx(expected, rel=3e-12)
+    """Ordinary truncations keep the 1.1.1 interval, so the constant is unchanged.
+
+    The expected values come from macOS. The LAPACK eigensolver on Linux differs
+    by about 4e-12 relative, so the tolerance is 1e-10.
+    """
+    assert poincare_constant(GaussianSpec(**kwargs)) == pytest.approx(expected, rel=1e-10)
 
 
 def test_truncated_gaussian_poincare_mirror_symmetry() -> None:
