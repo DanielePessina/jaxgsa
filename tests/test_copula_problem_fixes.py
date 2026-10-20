@@ -88,8 +88,8 @@ def test_gaussian_draws_plan_is_lazy() -> None:
         np.array([[1.0, 0.5], [0.5, 1.0]])
     )
     draws = GaussianDraws(problem)
-    assert "plan" not in vars(draws)
+    assert draws._plan is None
     draws.joint(np.full((3, 2), 0.3))
-    assert "plan" not in vars(draws)
+    assert draws._plan is None
     draws.self_given_rest(np.full((3, 1), 0.3), np.zeros((3, 2)), 0)
-    assert "plan" in vars(draws)
+    assert draws._plan is not None

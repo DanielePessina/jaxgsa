@@ -651,18 +651,21 @@ def is_independent(R: np.ndarray) -> bool:
     return bool(np.allclose(R, np.eye(R.shape[0]), atol=1e-12))
 
 
-def build_conditional_plan(R: np.ndarray) -> _ConditionalPlan:
-    """Precompute every Gaussian conditional the correlated indices need.
+def build_conditional_plan(R: np.ndarray, chol_full: np.ndarray | None = None) -> _ConditionalPlan:
+    """Precompute the Gaussian conditionals the correlated indices need.
 
-    Both conditioning directions are needed once per parameter and reused for
-    every Monte-Carlo draw, so they are built up front in float64 rather than
-    re-derived inside the estimator loop.
+    The ``Z_i | Z_-i`` quantities are built once in float64 for all parameters.
+    The ``Z_-i | Z_i`` quantities are computed per parameter on demand, so the
+    estimator loop does not re-derive them and memory stays ``O(D^2)``.
 
     Args:
         R: ``(D, D)`` positive-definite correlation matrix with unit diagonal.
+        chol_full: Optional Cholesky factor of ``R``. Pass it to reuse a factor
+            the caller already holds. It is computed when omitted.
 
     Returns:
-        A :class:`_ConditionalPlan` with all quantities stacked over parameters.
+        A :class:`_ConditionalPlan` with the ``Z_i | Z_-i`` quantities stacked
+        over parameters and the ``Z_-i | Z_i`` quantities built lazily.
 
     Raises:
         ValueError: If ``D < 2``; conditioning on "the other parameters" is
@@ -697,7 +700,7 @@ def build_conditional_plan(R: np.ndarray) -> _ConditionalPlan:
         others=others,
         beta_self=beta_self,
         std_self=std_self,
-        chol_full=_safe_cholesky(R),
+        chol_full=_safe_cholesky(R) if chol_full is None else chol_full,
     )
 
     # Every conditional covariance is a Schur complement of R, so its smallest
@@ -760,8 +763,8 @@ def _warn_degenerate_conditionals(lifts: list[float], n_floored: int, min_cond_v
         "designs, VKOGA indices) carry noise near the scale of the "
         "conditional itself. Reduce the extreme correlation entries, or drop "
         "one of the nearly redundant parameters.",
-        # Two hops to the user: analyze()/sample() -> build_conditional_plan
-        # -> here.
+        # Frames: here, build_conditional_plan, the plan property. Level 4 is
+        # its caller inside jaxgsa; the exact user frame depends on the entry point.
         stacklevel=4,
         category=JaxgsaWarning,
     )

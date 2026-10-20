@@ -20,7 +20,6 @@ the end with :meth:`Draws.to_physical` (Kucherenko designs) or
 from __future__ import annotations
 
 from collections.abc import Sequence
-from functools import cached_property
 from operator import index as _as_index
 from typing import Protocol
 
@@ -408,16 +407,19 @@ class GaussianDraws:
         self.rest_dimension = problem.n_params - 1
         self.self_dimension = 1
         self._correlation = R
+        self._plan: _ConditionalPlan | None = None
         self._subset_plans: dict[tuple[int, ...], _SubsetPlan] = {}
 
-    @cached_property
+    @property
     def plan(self) -> _ConditionalPlan:
         """Conditional plan, built on first use.
 
         Joint and subset draws never read it, so Shapley and nested designs
         skip its cost.
         """
-        return build_conditional_plan(self._correlation)
+        if self._plan is None:
+            self._plan = build_conditional_plan(self._correlation, self.chol_full)
+        return self._plan
 
     @staticmethod
     def _check_width(u: np.ndarray, width: int, method: str) -> None:
