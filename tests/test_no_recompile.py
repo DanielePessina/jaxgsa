@@ -73,7 +73,9 @@ def _calls() -> dict[str, Callable[[], Any]]:
         ),
         "dgsm": lambda: jaxgsa.dgsm.analyze(PROBLEM, X, fn=_point, verbose=False),
         "efast": lambda: jaxgsa.efast.analyze(efa, Ye, verbose=False),
-        "hdmr": lambda: jaxgsa.hdmr.analyze(PROBLEM, X, Y, order=2, max_iter=10, verbose=False),
+        "hdmr": lambda: jaxgsa.hdmr.analyze(
+            PROBLEM, X, Y, order=2, max_iter=10, n_bootstrap=3, key=key, verbose=False
+        ),
         "hsic": lambda: jaxgsa.hsic.analyze(PROBLEM, X, Y, n_perms=5, key=key, verbose=False),
         "kucherenko": lambda: jaxgsa.kucherenko.analyze(kuc, Yk, verbose=False),
         "morris": lambda: jaxgsa.morris.analyze(mor, Ym, n_bootstrap=3, key=key, verbose=False),
@@ -83,10 +85,12 @@ def _calls() -> dict[str, Callable[[], Any]]:
         "pawn": lambda: jaxgsa.pawn.analyze(
             PROBLEM, X, Y, n_classes=4, n_bootstrap=3, key=key, verbose=False
         ),
-        "pce": lambda: jaxgsa.pce.analyze(PROBLEM, X, Y, order=3, verbose=False),
+        "pce": lambda: jaxgsa.pce.analyze(
+            PROBLEM, X, Y, order=3, n_bootstrap=3, key=key, verbose=False
+        ),
         "rank": lambda: jaxgsa.rank.analyze(PROBLEM, X, Y, n_bootstrap=3, key=key, verbose=False),
         "shapley": lambda: jaxgsa.shapley.analyze(
-            PROBLEM, X, Y, backend="pce", order=3, verbose=False
+            PROBLEM, X, Y, backend="pce", order=3, n_bootstrap=3, key=key, verbose=False
         ),
         "sobol": lambda: jaxgsa.sobol.analyze(sob, Ys, n_bootstrap=3, key=key, verbose=False),
         "vkoga": lambda: jaxgsa.vkoga.analyze(

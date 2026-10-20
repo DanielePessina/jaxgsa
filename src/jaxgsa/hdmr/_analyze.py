@@ -28,7 +28,7 @@ from jaxgsa._core.entry import (
     prepare,
     require,
 )
-from jaxgsa._core.fit_quality import warn_variance_fit
+from jaxgsa._core.fit_quality import check_degenerate_inputs, warn_variance_fit
 from jaxgsa._core.invalid import InvalidReport, OnInvalid
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -437,8 +437,11 @@ def analyze(
             does not give. Also if ``on_invalid`` is not one of the three
             policies, ``on_invalid="raise"`` (the default) and ``X`` or
             ``Y`` holds a non-finite value, or ``n_bootstrap > 0`` without a
-            ``key``. :func:`_analyze_hdmr_core` raises for the remaining
-            argument checks.
+            ``key``. Also if an input is constant, two inputs are equal in
+            every row, or an input is a linear combination of the others to
+            within rounding error: the fit cannot separate them and would
+            split their effect in any proportion. :func:`_analyze_hdmr_core`
+            raises for the remaining argument checks.
     """
     key = as_key(key, "hdmr")
     if _is_irregular_y(Y):
@@ -480,6 +483,13 @@ def analyze(
     )
     assert ctx.X is not None
     X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
+    # A constant, duplicated or linearly dependent input cannot be separated
+    # from the others, and the fit splits its effect between them in any
+    # proportion with no error. Skipped when non-finite rows were let through
+    # (`on_invalid="propagate"`): the check reads the inputs and needs them
+    # finite.
+    if bool(jnp.all(jnp.isfinite(X))):
+        check_degenerate_inputs("jaxgsa.hdmr", X, problem.names)
     if X.shape[0] < _RELIABLE_ROWS:
         warnings.warn(
             f"jaxgsa.hdmr: N={X.shape[0]} rows is below the {_RELIABLE_ROWS} the "
@@ -850,6 +860,34 @@ def indices(
     return HDMRIndices(*(core.layout.squeeze(getattr(core, name)) for name in _INDEX_FIELDS))
 
 
+def _hdmr_replicate(
+    rows: Array,
+    X: Array,
+    Y: Array,
+    *,
+    problem: Problem,
+    order: int,
+    max_iter: int,
+    n_intervals: int,
+    ridge: float,
+    slice_chunk_size: int | None,
+    batch_size: int | None,
+) -> dict[str, Array]:
+    """Refit the expansion on the rows ``rows`` and return the index fields."""
+    core = _hdmr_core(
+        problem,
+        X[rows],
+        Y[rows],
+        order=order,
+        max_iter=max_iter,
+        n_intervals=n_intervals,
+        ridge=ridge,
+        slice_chunk_size=slice_chunk_size,
+        batch_size=batch_size,
+    )
+    return {name: getattr(core, name) for name in _INDEX_FIELDS}
+
+
 def _bootstrap_indices(
     problem: Problem,
     X: Array,
@@ -869,7 +907,7 @@ def _bootstrap_indices(
     One replicate is a full refit: the rows are drawn with replacement, the
     B-spline bases are rebuilt on them, the backfitting runs again and the
     F-test is redone. No part of an HDMR index survives a resample without
-    that, so the replicates run as a Python loop over independent fits and
+    that, so the replicates run as a sequential ``lax.map`` over independent fits and
     the cost is ``n_bootstrap`` fits — an order of magnitude above a method
     that only re-reduces per-row numbers it already holds.
 
@@ -895,21 +933,21 @@ def _bootstrap_indices(
         shape.
     """
 
-    def _replicate(rows: Array) -> dict[str, Array]:
-        core = _hdmr_core(
-            problem,
-            X[rows],
-            Y[rows],
-            order=order,
-            max_iter=max_iter,
-            n_intervals=n_intervals,
-            ridge=ridge,
-            slice_chunk_size=slice_chunk_size,
-            batch_size=batch_size,
-        )
-        return {name: getattr(core, name) for name in _INDEX_FIELDS}
-
-    return bootstrap_draws(key, X.shape[0], n_bootstrap, _replicate)
+    return bootstrap_draws(
+        key,
+        n_bootstrap,
+        _hdmr_replicate,
+        (X, Y),
+        static=(
+            ("problem", problem),
+            ("order", order),
+            ("max_iter", max_iter),
+            ("n_intervals", n_intervals),
+            ("ridge", ridge),
+            ("slice_chunk_size", slice_chunk_size),
+            ("batch_size", batch_size),
+        ),
+    )
 
 
 def _analyze_hdmr_core(

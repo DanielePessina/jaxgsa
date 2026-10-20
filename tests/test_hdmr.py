@@ -273,7 +273,7 @@ def test_validation_errors():
     """Input validation should raise on bad inputs."""
     # Order 2, n_intervals 2: the largest term has 5**2 = 25 coefficients, so
     # the floor is 26 rows. Below it the fit is not computable.
-    X = jnp.ones((25, 3))
+    X = jax.random.uniform(jax.random.key(0), (25, 3))
     Y = jnp.ones(25)
 
     with pytest.raises(ValueError, match=r"jaxgsa\.hdmr: N=25 rows is too few"):
@@ -693,3 +693,22 @@ def test_invalid_order_is_refused_before_the_row_floor_with_drop():
     Y = np.asarray(X).sum(axis=1)
     with pytest.raises(ValueError, match="order must be 1, 2, or 3"):
         analyze_hdmr(PROBLEM, X, Y, order=5, on_invalid="drop")
+
+
+@pytest.mark.parametrize("kind", ["duplicate", "constant", "affine", "sum"])
+def test_degenerate_input_raises(kind):
+    """A constant, duplicated or linearly dependent input is refused, not split silently."""
+    rng = np.random.default_rng(0)
+    X = rng.uniform(0, 1, (500, 3)).astype(np.float32)
+    Y = 2 * X[:, 0] + X[:, 1] ** 2
+    if kind == "duplicate":
+        X[:, 2] = X[:, 0]
+    elif kind == "constant":
+        X[:, 2] = 0.5
+    elif kind == "affine":
+        X[:, 2] = 1.0 - 0.5 * X[:, 0]
+    else:
+        X[:, 2] = (X[:, 0] + X[:, 1]) / 2
+    problem = Problem(["a", "b", "c"], [(0, 1)] * 3)
+    with pytest.raises(ValueError, match="jaxgsa.hdmr"):
+        analyze_hdmr(problem, X, Y, verbose=False)

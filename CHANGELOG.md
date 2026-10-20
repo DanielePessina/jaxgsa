@@ -71,6 +71,7 @@ Some fixes change index values where the old values were wrong. See Fixed.
   `n_classes=10`) could go to the bin below. Only inputs that sit exactly on
   an edge change bin.
 - OT: with float64 on, the overlap weights of categorical inputs in `mode="univariate"` were rounded to float32. They now use the working dtype.
+- `hdmr.analyze` now raises `ValueError` for a constant input, two equal inputs, or an input that is a linear combination of others (for example `c = a`). Before, the fit split the effect between `a` and `c` in any proportion without an error (S1 of `a` 0.000 and of `c` 0.796). It uses the same check as `pce.analyze`.
 
 ### Changed values
 
@@ -89,6 +90,7 @@ Some fixes change index values where the old values were wrong. See Fixed.
   float32. A truncation of 7 sigma or wider at order 7 or lower moves by at
   most the old Hermite defect, 2e-4.
 - OT with categorical inputs, `mode="univariate"`, float64 only: `ot` changes by about 1e-11 to 1e-10 absolute (below 1e-9 relative), `diffusive` by up to a few 1e-9 relative, and the `ot` confidence interval endpoints by about 1e-10 absolute. The old values carried float32 rounding. Float32 runs and continuous inputs are bitwise unchanged.
+- Bootstrap intervals (`*_conf`) and `ci.replicates` of `hdmr`, `pce` and `shapley` change at rounding level. The row draws are the same. The largest change is 6e-5 in float32 (HDMR) and 4e-14 in float64. PCE and Shapley with the PCE backend are bitwise equal in float64. Point estimates do not change.
 
 ### Performance
 
@@ -129,6 +131,7 @@ Some fixes change index values where the old values were wrong. See Fixed.
   with categorical inputs change only by float rounding. Measured against
   1.1.2: at most about 1.5e-7 absolute in float32, and about 2e-16 absolute
   in x64. `borgonovo` with categorical inputs shares the change.
+- `hdmr.analyze`, `pce.analyze` and `shapley.analyze` run bootstrap replicates in one cached `jax.jit` with a sequential `lax.map`, not a Python loop. The program compiles once and a repeat call compiles nothing. Steady state is about 1.7 to 3 times faster; the first HDMR call with 100 replicates drops from 4.2 s to 1.0 s. Peak memory at N=32768 with 20 HDMR replicates rose from 478 to 576 MB.
 
 ### Docs
 

@@ -972,6 +972,29 @@ def _indices_3d(
     return S1, ST, S2
 
 
+def _pce_replicate(
+    rows: Array,
+    X: Array,
+    Y_3d: Array,
+    *,
+    problem: Problem,
+    order: int,
+    ridge: float,
+    fit_ratio: float,
+    batch_size: int | None,
+) -> tuple[Array, Array, Array, Array]:
+    """Refit the expansion on the rows ``rows`` and return indices and share."""
+    return _indices_and_share(
+        problem,
+        X[rows],
+        Y_3d[rows],
+        order=order,
+        ridge=ridge,
+        fit_ratio=fit_ratio,
+        batch_size=batch_size,
+    )
+
+
 def _bootstrap_indices(
     problem: Problem,
     X: Array,
@@ -990,8 +1013,8 @@ def _bootstrap_indices(
     design matrix is rebuilt on them and the least squares is solved
     again. Nothing about a PCE index survives a resample without that — the
     indices are functions of the coefficients, not of any per-row statistic
-    the point estimate already computed. So the replicates run as a Python
-    loop over independent fits rather than as a vmapped reduction, and the
+    the point estimate already computed. So the replicates run as a sequential
+    ``lax.map`` over independent fits rather than as a vmapped reduction, and the
     cost is ``n_bootstrap`` fits.
 
     The row draw is shared by every output slice, exactly as the point
@@ -1014,18 +1037,19 @@ def _bootstrap_indices(
         ``(T, K, ...)`` shape, and the share is a scalar per replicate.
     """
 
-    def _replicate(rows: Array) -> tuple[Array, Array, Array, Array]:
-        return _indices_and_share(
-            problem,
-            X[rows],
-            Y_3d[rows],
-            order=order,
-            ridge=ridge,
-            fit_ratio=fit_ratio,
-            batch_size=batch_size,
-        )
-
-    return bootstrap_draws(key, X.shape[0], n_bootstrap, _replicate)
+    return bootstrap_draws(
+        key,
+        n_bootstrap,
+        _pce_replicate,
+        (X, Y_3d),
+        static=(
+            ("problem", problem),
+            ("order", order),
+            ("ridge", ridge),
+            ("fit_ratio", fit_ratio),
+            ("batch_size", batch_size),
+        ),
+    )
 
 
 def indices(
