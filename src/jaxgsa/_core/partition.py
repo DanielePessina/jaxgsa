@@ -49,16 +49,12 @@ def _class_layout(N: int, M: int) -> tuple[np.ndarray, np.ndarray]:
     """Build static gather indices for equal-frequency rank classes.
 
     Class ``j`` holds the samples whose ordinal rank ``r`` (1-based)
-    satisfies ``e[j] < r <= e[j+1]`` with the exact integer edges
-    ``e[m] = (m * N) // M`` for ``m = 0..M``. This is an exact equal-frequency
-    split: the class sizes sum to ``N`` and differ from each other by at most
-    one. SALib takes the floor of the float edges ``linspace(0, N, M+1)``
-    instead. Float rounding can put one of those edges one row low (for
-    example ``N=60, M=22`` gives 29 for edge 11, not 30), so at some
-    ``(N, M)`` the classes here can differ from SALib's by one row. Classes
-    are padded to the largest size, and the kernels derive the validity mask
-    from the sizes (:func:`_mask_from_counts`), so downstream shapes stay
-    static.
+    satisfies ``m[j] < r <= m[j+1]`` with ``m = linspace(0, N, M+1)``. That is
+    the same membership rule as SALib. Both sides take the floor of the same
+    float edges, so the class sizes match SALib exactly; they differ from each
+    other by at most one. Classes are padded to the largest size, and the
+    kernels derive the validity mask from the sizes
+    (:func:`_mask_from_counts`), so downstream shapes stay static.
 
     Args:
         N: Number of samples.
@@ -69,7 +65,7 @@ def _class_layout(N: int, M: int) -> tuple[np.ndarray, np.ndarray]:
         rank-sorted array (entries beyond a class's size are clamped) and
         ``sizes (M,)`` holds the true class sizes.
     """
-    edges = (np.arange(M + 1, dtype=np.int64) * N) // M
+    edges = np.floor(np.linspace(0.0, N, M + 1)).astype(np.int64)
     sizes = np.diff(edges)
     n_pad = int(sizes.max())
     take = edges[:-1, None] + np.arange(n_pad)[None, :]

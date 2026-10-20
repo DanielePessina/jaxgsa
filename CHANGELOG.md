@@ -1,22 +1,5 @@
 # Changelog
 
-## 1.2.0 (unreleased)
-
-Some fixes change index values where the old values were wrong. See Fixed.
-
-### Fixed
-
-- Equal-frequency classes now use exact integer edges `(m * N) // M`. Before,
-  the edges were the floor of `linspace(0, N, M + 1)`. Float rounding put
-  some edges one row low, so one row went to the wrong class. This affects
-  `optimal_transport` and `borgonovo` (continuous inputs). Index values can
-  change for some `(N, M)`, for example `N=60, M=22`. At those points the
-  results can differ from SALib by one row per class.
-- `pawn` bin edges are now the exact values `k / n_classes`. Before, an
-  input value exactly on an interior edge (for example `0.3` with
-  `n_classes=10`) could go to the bin below. Only inputs that sit exactly on
-  an edge change bin.
-
 ## 1.1.2
 
 This release fixes bugs and makes several methods faster. Correct index

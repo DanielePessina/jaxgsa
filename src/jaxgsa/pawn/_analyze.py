@@ -191,12 +191,7 @@ def _equal_width_bins(X_u01: Array, n_classes: int) -> Array:
     and drops out of every conditional set. This happens when the caller
     passes inputs beyond the declared bounds of a ``uniform`` parameter. A
     value of exactly ``0.0`` maps to the first bin and ``1.0`` maps to the
-    last bin. Bin ``k`` is ``[k / n_classes, (k + 1) / n_classes)``, so a value
-    of exactly ``k / n_classes`` maps to bin ``k``. The edges are the
-    correctly rounded quotients ``k / n_classes``, not ``linspace(0, 1, ...)``:
-    ``linspace`` can put an interior edge one ulp high, and a sample that sits
-    exactly on that edge (a lattice design, for example) then falls into the
-    bin below.
+    last bin.
 
     A non-finite input takes the same sentinel. Under the two policies that
     remove or refuse it, ``"raise"`` and ``"drop"``, :func:`analyze` settles
@@ -214,7 +209,7 @@ def _equal_width_bins(X_u01: Array, n_classes: int) -> Array:
         Integer bin indices, shape ``(N, D)``, in ``[0, n_classes)``, or ``-1``
         for out-of-range or ``NaN`` samples.
     """
-    bin_edges = jnp.asarray(np.arange(n_classes + 1) / n_classes, dtype=X_u01.dtype)
+    bin_edges = jnp.linspace(0.0, 1.0, n_classes + 1)
     idx = jnp.clip(jnp.searchsorted(bin_edges, X_u01, side="right") - 1, 0, n_classes - 1)
     in_range = (X_u01 >= 0.0) & (X_u01 <= 1.0)
     return jnp.where(in_range, idx, -1)
