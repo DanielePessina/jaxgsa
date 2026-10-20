@@ -312,7 +312,7 @@ def _pairwise_quantile_by_selection(x: Array, q: float, *, skip_zero: bool = Fal
     )
     if n_zero is not None:
         # Every pair is zero: no non-zero distance exists. Return 0.
-        all_zero = n_zero == n * n
+        all_zero = n_zero == jnp.asarray(n * n, dtype=count_dtype)
         low_value = jnp.where(all_zero, 0.0, low_value)
         high_value = jnp.where(all_zero, 0.0, high_value)
 
