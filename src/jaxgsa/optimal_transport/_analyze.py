@@ -1248,13 +1248,13 @@ def analyze(
             enable float64 if you need it silent.
 
             Cost: the time is spent in Sinkhorn iterations. One solve
-            costs about 80 ns times ``N * P`` per iteration, and a default
+            costs about 1 to 3 ns times ``N * P`` per iteration, and a default
             solve needs a few hundred iterations in float32 and up to
             about 1000 in float64. ``"trajectory"`` mode runs one cloud
             per output, so its cost is ``K`` times the cost of one cloud.
             The loop over ``K`` adds no overhead, and a ``vmap`` over it
-            is slower. The float64 default ``1e-9`` is several times
-            slower than ``1e-5``, which gives the same indices to about
+            is slower. The float64 default ``1e-9`` is about twice as
+            slow as ``1e-5``, which gives the same indices to about
             five decimals in the cases we measured. Pass ``tol=1e-5``
             for a faster float64 run.
         dummy: Also push one synthetic parameter through the identical
