@@ -86,6 +86,12 @@ Some fixes change index values where the old values were wrong. See Fixed.
 - `pawn` KS statistics were off by 1 ulp because XLA turns the division into a reciprocal multiply. A constant output gave 6e-8 instead of 0. The gap is now computed from exact integer counts. Cumulative bin counts are int32, so they stay exact above N=2^24.
 - `sobol.analyze` with `n_bootstrap` no longer builds a full `(R, N)` index matrix outside the memory budget. At N=2^17, D=2, R=1000 and a 512 MiB budget, peak memory above the baseline falls from about 2800 MiB to about 450 MiB (146 MiB at a 64 MiB budget). The resample width now follows the budget.
 
+- `efast.sample` now warns (`JaxgsaWarning`) when `D >= 3` and
+  `n_per_curve < 4*M^2*(2*D-3) + 1`. Below this the two lowest frequencies are
+  1 and 2, and interacting inputs on that pair are under-sampled. At the
+  minimum N, Ishigami gives S1 of `x2` 0.80 against a true 0.44. Index values
+  do not change.
+
 ### Changed values
 
 - `vkoga` with independent inputs: `S_C` is now exactly 0 and `S_IU` drops

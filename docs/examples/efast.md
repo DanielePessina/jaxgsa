@@ -611,6 +611,8 @@ D is always the last axis.
   never be mismatched at `analyze()` time.
 - `n_per_curve >= 4*M^2*(D-1) + 1`. At the default `M = 4` that is 129 for
   `D = 3` and 577 for `D = 10`, and the total run count is `D` times that.
+  Below `4*M^2*(2*D-3) + 1` (193 for `D = 3`), `sample()` warns. Interacting
+  inputs can then be biased by 0.1 or more.
 - Indices outside `[0, 1]` mean too few samples or near-zero output variance.
   Indices inside `[0, 1]` mean nothing on their own, as the `M = 2` row above
   shows.

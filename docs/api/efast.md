@@ -29,7 +29,11 @@ sample(
 `n_per_curve` is the number of points along each curve, and there is one curve
 per parameter, so the total cost is `n_per_curve * D` runs. It must satisfy
 `n_per_curve >= 4*M^2*(D-1) + 1`, so that all `D` parameters can get distinct
-frequencies. Raising it raises `omega_0 = (n_per_curve - 1) // (2M)`, which
+frequencies. Below `4*M^2*(2*D-3) + 1` (193 for `D = 3`, 577 for `D = 6` at
+`M = 4`), the two lowest complementary frequencies are 1 and 2, and
+`sample()` warns. Two interacting inputs on that pair are under-sampled, and
+S1 and ST can be biased by 0.1 or more (Ishigami at the minimum N: S1 of `x2`
+0.80 against 0.44). Raising it raises `omega_0 = (n_per_curve - 1) // (2M)`, which
 pushes the focal parameter's harmonics further from the complementary
 frequencies and sharpens the indices, at proportionally more model runs.
 

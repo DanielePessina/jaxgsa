@@ -96,3 +96,14 @@ def test_indices_named_tuple_ci_and_repr():
     assert result.ci is None
     text = repr(design)
     assert "n_per_curve=1024" in text and "M=4" in text and len(text) < 200
+
+
+def test_sample_warns_below_resonance_free_n():
+    with pytest.warns(JaxgsaWarning, match="1 and 2"):
+        sample(ishigami.PROBLEM, n_per_curve=129, M=4, seed=0, verbose=False)
+
+
+def test_sample_silent_at_resonance_free_n():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        sample(ishigami.PROBLEM, n_per_curve=193, M=4, seed=0, verbose=False)
