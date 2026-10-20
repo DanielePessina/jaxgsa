@@ -6,6 +6,25 @@ Some fixes change index values where the old values were wrong. See Fixed.
 
 ### Fixed
 
+- `hdmr.analyze` with `order >= 2` no longer counts the same leftover once per
+  pair. Before, each pair was fitted alone against one first-order residual,
+  and a pair basis also spans the 1-D functions of its two inputs, so the sum
+  of `S` grew with `D` (1.14 at D = 9 and 3.07 at D = 23 for
+  `sin(2 pi x0) + x1^2 + 0.5 x2 + 2 x3 x4`, N = 1024) and the test error was
+  worse than order 1 (0.48 against 0.19 at D = 23). Now the pair basis is
+  projected off the first-order space and all pairs are solved together. Sum
+  of `S` is 0.97 to 0.98 and test NRMSE is 0.07 to 0.17 at D = 5 to 23, for N
+  = 1024 and 4096. Every `order >= 2` fit changes: pair and total-order
+  indices move (Ishigami `ST` of `x1` 0.59 to 0.57 and of `x2` 0.35 to 0.33
+  at 1000 rows). In-sample error above test error was the same overshoot, and
+  is gone. `result.C1` now holds the first-order coefficients plus the
+  projection shift, so that `predict` is the sum of the terms. `predict` uses
+  every term and ignores the F-test `select`. A third-order term is still not
+  projected off the pairs.
+- `hdmr` `ridge` now has an effect. The basis is scaled by `m^3` and the Gram
+  matrix was not divided by `N`, so `ridge=1.0` and `ridge=0.01` gave the same
+  NRMSE to three digits. Now `ridge` is relative to the mean diagonal of each
+  term's Gram matrix, so it does not depend on `N` or `n_intervals`.
 - `vkoga.analyze` now raises a `ValueError` when an input column of `X` is
   constant, equal to another column, or a linear combination of earlier
   columns (same check as `pce` and `hdmr`). Before, a duplicated input gave
@@ -89,6 +108,12 @@ Some fixes change index values where the old values were wrong. See Fixed.
 
 ### Changed values
 
+- `hdmr` `ridge` changes meaning and default (see Fixed). The default goes from
+  0.01 to 1e-6 relative to the Gram diagonal, which matches the old effective
+  strength, so order-1 fits at the default move by less than 1e-3 in `S1`
+  (Ishigami, 1000 rows). An order-1 fit that sets `ridge` itself changes by
+  an amount that depends on `N`: `ridge=0.01` used to mean about 1e-6 here,
+  and now means 1% of the diagonal and can erase a smooth effect.
 - `vkoga` with independent inputs: `S_C` is now exactly 0 and `S_IU` drops
   (Ishigami `x2` `S_IU` 0.0119 to 0.0035). See Fixed.
 - `vkoga` with correlated inputs and a non-Gaussian marginal (uniform and

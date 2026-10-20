@@ -371,7 +371,7 @@ def analyze(
     order: int = 2,
     max_iter: int = 100,
     n_intervals: int = 2,
-    ridge: float = 0.01,
+    ridge: float = 1e-6,
     slice_chunk_size: int | None = None,
     batch_size: int | None = None,
     n_bootstrap: int = 0,
@@ -623,7 +623,7 @@ def _hdmr_core(
     order: int = 2,
     max_iter: int = 100,
     n_intervals: int = 2,
-    ridge: float = 0.01,
+    ridge: float = 1e-6,
     slice_chunk_size: int | None = None,
     batch_size: int | None = None,
 ) -> _HDMRCore:
@@ -784,7 +784,7 @@ def indices(
     order: int = 2,
     max_iter: int = 100,
     n_intervals: int = 2,
-    ridge: float = 0.01,
+    ridge: float = 1e-6,
     slice_chunk_size: int | None = None,
     batch_size: int | None = None,
 ) -> HDMRIndices:
@@ -959,7 +959,7 @@ def _analyze_hdmr_core(
     order: int = 2,
     max_iter: int = 100,
     n_intervals: int = 2,
-    ridge: float = 0.01,
+    ridge: float = 1e-6,
     slice_chunk_size: int | None = None,
     batch_size: int | None = None,
     invalid: InvalidReport,
@@ -1002,9 +1002,15 @@ def _analyze_hdmr_core(
             the component functions. It also multiplies the coefficient count
             (the per-term basis grows as ``(n_intervals+3)^order``) and needs more
             samples to avoid overfitting.
-        ridge: Tikhonov regularization strength. Increase it for noisy Y or
-            small N, which gives smoother and more stable components.
-            Decrease it if genuine sharp features are being oversmoothed.
+        ridge: Tikhonov regularization strength, relative to the mean diagonal
+            of each term's Gram matrix ``B^T B``. It does not depend on ``N``
+            or on ``n_intervals``. At ``ridge=0.01``, a direction is shrunk when
+            its Gram eigenvalue is below about 1% of a typical column's energy.
+            Increase it for noisy Y or small N, which gives smoother and more
+            stable components. Decrease it if genuine sharp features are being
+            oversmoothed. The second-order blocks are rank-deficient (they are
+            orthogonal to the first-order space), so they use at least
+            ``sqrt(eps)`` of the working precision whatever you pass.
         slice_chunk_size: Maximum number of (T, K) output slices fitted per
             vmap. It caps peak device memory for large T*K, and a smaller
             value trades speed for memory. ``None`` (default) derives the

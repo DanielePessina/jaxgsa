@@ -39,10 +39,13 @@ reassociation that adding a zero to a float32 reduction can cause.
 """
 
 import math
+import warnings
+from collections.abc import Callable
 from functools import lru_cache
 from typing import NamedTuple
 
 import jax
+import jax.core
 import jax.numpy as jnp
 from jax import Array
 
@@ -174,6 +177,27 @@ def _resolve_slice_chunk_size(
 # ---------------------------------------------------------------------------
 
 
+def _ridge_eye(gram: Array, ridge: float, m: int) -> Array:
+    """Return the Tikhonov term ``ridge * mean(diag(gram)) * I`` per block.
+
+    The ridge is relative to the mean Gram diagonal of each block. The raw
+    Gram scales with ``N`` and with the basis scale ``m**3``, so an absolute
+    ``ridge`` would do nothing at large ``N`` and a different amount at each
+    ``n_intervals``. Relative to the diagonal, ``ridge=0.01`` always means
+    "shrink directions that carry less than 1% of a typical column's energy".
+
+    Args:
+        gram: Gram blocks, shape ``(..., m, m)``.
+        ridge: Relative ridge strength.
+        m: Block size.
+
+    Returns:
+        Array of shape ``(..., m, m)``.
+    """
+    scale = jnp.mean(jnp.diagonal(gram, axis1=-2, axis2=-1), axis=-1)
+    return ridge * scale[..., None, None] * jnp.eye(m)
+
+
 @lru_cache(maxsize=32)
 def _get_gram_backfit(m1: int, n1: int, max_iter: int, ridge: float):
     """Build and cache the vmapped Gram-space first-order backfit.
@@ -187,7 +211,8 @@ def _get_gram_backfit(m1: int, n1: int, max_iter: int, ridge: float):
 
     Tikhonov regularization keeps an ill-conditioned ``B^T B`` from blowing up
     the coefficients when the basis functions are nearly collinear or the
-    sample count is low. Iteration stops when the largest change in any
+    sample count is low. The ridge is relative to the mean Gram diagonal (see
+    :func:`_ridge_eye`). Iteration stops when the largest change in any
     dimension's coefficient energy falls below one part in a thousand of the
     largest energy itself, or after ``max_iter`` sweeps. The test is relative,
     not absolute: the coefficients scale with ``Y`` and with ``m**-3``, so an
@@ -201,8 +226,7 @@ def _get_gram_backfit(m1: int, n1: int, max_iter: int, ridge: float):
     """
 
     def backfit(G1: Array, G1_diag: Array, b1res: Array) -> Array:
-        lam_eye = ridge * jnp.eye(m1)
-        M = G1_diag + lam_eye  # (n1, m1, m1)
+        M = G1_diag + _ridge_eye(G1_diag, ridge, m1)  # (n1, m1, m1)
 
         # Initial fit: C1_j = M_j^{-1} B1_j^T Y_res, one solve per dimension.
         # Backfitting below corrects for inter-dimension coupling.
@@ -244,12 +268,11 @@ def _get_gram_backfit(m1: int, n1: int, max_iter: int, ridge: float):
 def _get_gram_higher_solver(m_basis: int, ridge: float):
     """Build and cache the vmapped Gram-space higher-order solver.
 
-    Higher-order terms are fit in a single shot, with no backfitting: each
-    term is solved independently against the same lower-order residual,
-    ``C_j = (B_j^T B_j + ridge * I)^{-1} B_j^T Y_res``, from the accumulated
-    per-term Gram blocks and moments. The lower-order structure is already
-    removed, so same-order tensor-product terms overlap little and one
-    joint-free pass is accurate in practice.
+    Each term is solved independently,
+    ``C_j = (G_j + ridge * mean(diag G_j) * I)^{-1} m_j``, from its Gram block
+    ``G_j`` and moment ``m_j``. The caller passes blocks that are already
+    orthogonal to every lower-order term (see :func:`_project_pairs`), so
+    same-order terms do not compete for the same leftover.
 
     Returns:
         A jitted function ``(BtB, BtY) -> C``. ``BtB``
@@ -259,11 +282,197 @@ def _get_gram_higher_solver(m_basis: int, ridge: float):
     """
 
     def solve_lane(BtB: Array, BtY: Array) -> Array:
-        lam_eye = ridge * jnp.eye(m_basis)
-        C = jax.vmap(lambda btb, bty: jnp.linalg.solve(btb + lam_eye, bty))(BtB, BtY)
+        lam = _ridge_eye(BtB, ridge, m_basis)
+        C = jax.vmap(jnp.linalg.solve)(BtB + lam, BtY)
         return C.T  # (m_basis, n_terms)
 
     return jax.jit(jax.vmap(solve_lane, in_axes=(None, 0)))
+
+
+@jax.jit
+def _first_order_pinv(G1: Array) -> Array:
+    """Pseudo-inverse of the flat first-order Gram matrix.
+
+    The first-order bases of different inputs share the constant function (each
+    sums to one), so the Gram has a null space. Eigenvalues below
+    ``sqrt(eps)`` of the largest are dropped.
+
+    Args:
+        G1: Flat Gram, shape ``(P, P)`` with ``P = m1 * n1``.
+
+    Returns:
+        The pseudo-inverse, shape ``(P, P)``.
+    """
+    w, V = jnp.linalg.eigh((G1 + G1.T) / 2)
+    keep = w > jnp.sqrt(jnp.finfo(G1.dtype).eps) * jnp.max(w)
+    inv = jnp.where(keep, 1.0 / jnp.where(keep, w, 1.0), 0.0)
+    return (V * inv[None, :]) @ V.T
+
+
+def _pair_normal_pass(
+    coefs: list[Array],
+    A: Array,
+    rows: list[tuple[int, int]],
+    X_p: Array,
+    w_full: Array,
+    build: Callable[..., list[Array]],
+    c2_idx: Array,
+    c3_idx: Array,
+    beta2: Array,
+    beta3: Array,
+) -> list[Array]:
+    """Apply the projected pair normal matrix to every lane chunk.
+
+    Args:
+        coefs: Pair coefficients per lane chunk, each ``(cs, n2, m2)``.
+        A: Projection of B2 onto the first-order space, ``(P, m2, n2)``.
+        rows: Row batch bounds.
+        X_p: Padded inputs.
+        w_full: Row mask.
+        build: Basis builder for orders up to 2.
+        c2_idx: Pair index table.
+        c3_idx: Triple index table.
+        beta2: Pair basis index table.
+        beta3: Triple basis index table.
+
+    Returns:
+        ``Bt^T Bt c`` for each lane chunk, without the ridge term.
+    """
+    vs = [jnp.einsum("pmj,ljm->lp", A, c) for c in coefs]
+    accs = [(jnp.zeros_like(v), jnp.zeros_like(c)) for v, c in zip(vs, coefs, strict=True)]
+    for lo, hi in rows:
+        B1_b, B2_b = build(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)[:2]
+        for j in range(len(coefs)):
+            accs[j] = _acc_pair_normal(B1_b, B2_b, coefs[j], vs[j], accs[j])
+    return [g2 - jnp.einsum("pmj,lp->ljm", A, g1) for g1, g2 in accs]
+
+
+def _joint_pair_solve(
+    BtB: Array,
+    rhs: list[Array],
+    *,
+    ridge: float,
+    max_iter: int,
+    sweep: Callable[[list[Array]], list[Array]],
+) -> tuple[list[Array], Array, float]:
+    """Solve all pair terms jointly by block-Jacobi preconditioned CG.
+
+    Fitting each pair alone against one residual counts the same leftover
+    once per pair, so the pairs add up to far more than the residual. The
+    joint ridge solution ``(Bt^T Bt + lam) c = Bt^T r`` has no such
+    overshoot. It is solved without forming the ``n2 m2`` square matrix: each
+    CG step is one pass over the rows (:func:`_pair_normal_pass`). The
+    per-term solve is the preconditioner and the start.
+
+    Args:
+        BtB: Projected per-term Gram blocks, ``(n2, m2, m2)``.
+        rhs: ``Bt^T r`` per lane chunk, each ``(cs, n2, m2)``.
+        ridge: Relative ridge, as in :func:`_ridge_eye`.
+        max_iter: Cap on CG steps.
+        sweep: Applies the unregularized normal matrix to a list of chunks.
+
+    Returns:
+        The pair coefficients per lane chunk, each ``(cs, m2, n2)``, the final
+        worst relative residual over all lanes, and the tolerance it was
+        held to.
+    """
+    m_basis = BtB.shape[1]
+    lam = _ridge_eye(BtB, ridge, m_basis)  # (n2, m2, m2)
+    lam_diag = jnp.diagonal(lam, axis1=-2, axis2=-1)  # (n2, m2)
+    Minv = jnp.linalg.inv(BtB + lam)
+
+    def precond(r: Array) -> Array:
+        return jnp.einsum("jmn,ljn->ljm", Minv, r)
+
+    def dot(a: list[Array], b: list[Array]) -> list[Array]:
+        """Per-lane inner products, one ``(cs,)`` array per lane chunk."""
+        return [jnp.sum(x * y, axis=(1, 2)) for x, y in zip(a, b, strict=True)]
+
+    def safe(d: Array) -> Array:
+        return jnp.where(d == 0, 1.0, d)
+
+    solver = _get_gram_higher_solver(m_basis, ridge)
+    # Start from the independent per-term solution, stored as (cs, n2, m2).
+    x = [solver(BtB, r).transpose(0, 2, 1) for r in rhs]
+    Mx = sweep(x)
+    r = [b - (m + lam_diag[None] * xx) for b, m, xx in zip(rhs, Mx, x, strict=True)]
+    z = [precond(rr) for rr in r]
+    # A zero right-hand side (a constant or padded lane) is already solved.
+    bnorm = [safe(jnp.sqrt(d)) for d in dot(rhs, rhs)]
+    eps = float(jnp.finfo(bnorm[0].dtype).eps)
+    tol = max(1e-7, 10 * eps)
+
+    def rel_res(r: list[Array]) -> Array:
+        return jnp.max(
+            jnp.stack([jnp.max(jnp.sqrt(d) / b) for d, b in zip(dot(r, r), bnorm, strict=True)])
+        )
+
+    def cond(state: tuple) -> Array:
+        _, r, _, _, k = state
+        return (rel_res(r) >= tol) & (k < max_iter)
+
+    def body(state: tuple) -> tuple:
+        x, r, p, rz, k = state
+        Mp = sweep(p)
+        Ap = [m + lam_diag[None] * pp for m, pp in zip(Mp, p, strict=True)]
+        pAp = dot(p, Ap)
+        # A lane that has already converged is frozen: its residual is noise,
+        # and CG on noise can return a huge step.
+        active = [jnp.sqrt(d) / b >= tol for d, b in zip(dot(r, r), bnorm, strict=True)]
+        alpha = [jnp.where(on, a / safe(d), 0.0) for on, a, d in zip(active, rz, pAp, strict=True)]
+        x = [xx + al[:, None, None] * pp for xx, al, pp in zip(x, alpha, p, strict=True)]
+        r = [rr - al[:, None, None] * a for rr, al, a in zip(r, alpha, Ap, strict=True)]
+        z = [precond(rr) for rr in r]
+        rz_new = dot(r, z)
+        beta = [
+            jnp.where(on, n / safe(o), 0.0) for on, n, o in zip(active, rz_new, rz, strict=True)
+        ]
+        p = [zz + be[:, None, None] * pp for zz, be, pp in zip(z, beta, p, strict=True)]
+        return x, r, p, rz_new, k + 1
+
+    x, r, _, _, _ = jax.lax.while_loop(cond, body, (x, r, z, dot(r, z), jnp.array(0)))
+    return [xx.transpose(0, 2, 1) for xx in x], rel_res(r), tol
+
+
+@lru_cache(maxsize=32)
+def _get_pair_solve(m: int, b: int, n_row_batches: int, max_iter: int, ridge: float):
+    """Build and cache the jitted joint pair solve.
+
+    It is cached on its static settings, so a repeated call with the same
+    shapes compiles nothing.
+
+    Returns:
+        A jitted function ``(X_p, w, c2_idx, c3_idx, beta2, beta3, A, BtB,
+        rhs) -> (C2, rel, tol)`` where ``rhs`` and ``C2`` stack the lane
+        chunks on the leading axis.
+    """
+    build = _get_build_bases(m, True, False)
+    rows = [(i * b, i * b + b) for i in range(n_row_batches)]
+
+    @jax.jit
+    def solve(
+        X_p: Array,
+        w_full: Array,
+        c2_idx: Array,
+        c3_idx: Array,
+        beta2: Array,
+        beta3: Array,
+        A: Array,
+        BtB: Array,
+        rhs: Array,
+    ) -> tuple[Array, Array]:
+        C, rel, _ = _joint_pair_solve(
+            BtB,
+            list(rhs),
+            ridge=ridge,
+            max_iter=max_iter,
+            sweep=lambda cs_: _pair_normal_pass(
+                cs_, A, rows, X_p, w_full, build, c2_idx, c3_idx, beta2, beta3
+            ),
+        )
+        return jnp.stack(C), rel
+
+    return solve
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +555,52 @@ def _acc_cross_gram1(B1_b: Array, G1: Array, colsum1: Array) -> tuple[Array, Arr
         G1 + jnp.einsum("rmj,rnk->jmkn", B1_b, B1_b),
         colsum1 + jnp.sum(B1_b, axis=0),
     )
+
+
+@jax.jit
+def _acc_cross_gram12(B1_b: Array, B2_b: Array, G12: Array) -> Array:
+    """Accumulate the cross-Gram between the flat first-order basis and B2.
+
+    Args:
+        B1_b: Masked first-order basis, shape ``(b, m1, n1)``.
+        B2_b: Second-order basis, shape ``(b, m2, n2)``.
+        G12: Running cross-Gram, shape ``(P, m2, n2)`` with ``P = m1 * n1``.
+
+    Returns:
+        The updated ``G12``.
+    """
+    return G12 + jnp.einsum("rp,rmj->pmj", B1_b.reshape(B1_b.shape[0], -1), B2_b)
+
+
+@jax.jit
+def _acc_pair_normal(
+    B1_b: Array,
+    B2_b: Array,
+    c: Array,
+    v: Array,
+    acc: tuple[Array, Array],
+) -> tuple[Array, Array]:
+    """Accumulate ``Bt^T Bt c`` for the projected pair basis, one row batch.
+
+    With ``Bt = B2 - B1 A`` the product is formed without ever building
+    ``Bt``: ``t = B2 c - B1 (A c)`` per row, then ``Bt^T t = B2^T t -
+    A^T (B1^T t)``. The second part is left to the caller, which holds ``A``.
+
+    Args:
+        B1_b: Masked first-order basis, shape ``(b, m1, n1)``.
+        B2_b: Second-order basis, shape ``(b, m2, n2)``.
+        c: Pair coefficients, shape ``(cs, n2, m2)``.
+        v: ``A c``, shape ``(cs, P)``.
+        acc: Running ``(B1^T t, B2^T t)``, shapes ``(cs, P)`` and
+            ``(cs, n2, m2)``.
+
+    Returns:
+        The updated accumulators.
+    """
+    B1f = B1_b.reshape(B1_b.shape[0], -1)
+    t = jnp.einsum("rmj,ljm->rl", B2_b, c) - B1f @ v.T
+    g1, g2 = acc
+    return g1 + jnp.einsum("rp,rl->lp", B1f, t), g2 + jnp.einsum("rmj,rl->ljm", B2_b, t)
 
 
 @jax.jit
@@ -440,6 +695,7 @@ def _get_stats_step(n1: int, n2: int):
         mean_f_c: Array,
         mean_y0m_c: Array,
         acc: tuple[Array, Array, Array, Array, Array, Array, Array],
+        corr: Array | None,
     ) -> tuple[Array, Array, Array, Array, Array, Array, Array]:
         acc_var_f, acc_cov_fy, acc_cov_fy0m, acc_ssr, acc_cross, acc_fsq, acc_res2 = acc
         # Per-term contributions f_j = B_j C_j, all orders side by side.
@@ -447,6 +703,11 @@ def _get_stats_step(n1: int, n2: int):
             [jnp.einsum("rmj,lmj->rlj", B, C) for B, C in zip(B_list, C_list, strict=True)],
             axis=2,
         )  # (b, cs, n)
+        if corr is not None:
+            # Pair terms are B2 C minus their projection onto the first-order
+            # space, so a pair term holds no 1-D function (see _project_pairs).
+            B1f = B_list[0].reshape(B_list[0].shape[0], -1)
+            F = F.at[:, :, n1 : n1 + n2].add(-jnp.einsum("rp,lpj->rlj", B1f, corr))
 
         # ANCOVA (Li et al., 2010). Sa = Var(f_j)/Var(Y) is the structural
         # share, Sb = Cov(f_j, sum_{k != j} f_k)/Var(Y) the correlative
@@ -733,20 +994,26 @@ def _fit_hdmr(
     diag = jnp.arange(n1)
     G1_diag = G1[diag, :, diag, :]  # (n1, m1, m1)
     backfit = _get_gram_backfit(m1, n1, max_iter, ridge)
-    C1_chunks = [
-        backfit(G1, G1_diag, carry1[j][0] - mean_z[s:e, None, None] * colsum1.T[None])
-        for j, (s, e) in enumerate(lanes)
-    ]  # each (cs, m1, n1)
+    b1res_chunks = [
+        carry1[j][0] - mean_z[s:e, None, None] * colsum1.T[None] for j, (s, e) in enumerate(lanes)
+    ]  # each (cs, n1, m1)
+    C1_chunks = [backfit(G1, G1_diag, b1res) for b1res in b1res_chunks]  # each (cs, m1, n1)
+    P = m1 * n1
+    # Flat first-order index p = m * n1 + j, the layout of a (m1, n1) array.
+    G1_flat = G1.transpose(1, 0, 3, 2).reshape(P, P)
 
     # ---- Passes 2/3: higher orders on the exact sequential residual -------
     colsums = [colsum1]
-    coef_chunks = [C1_chunks]
+    coef_chunks = [C1_chunks]  # what the residuals and predict() use
+    stat_chunks = [C1_chunks]  # what the per-term statistics use
+    corr_chunks: list[Array] | None = None
     for term_order, (n_terms, m_basis) in enumerate(((n2, m2), (n3, m3)), start=2):
         if not (order2 if term_order == 2 else order3):
             break
         BtB = jnp.zeros((n_terms, m_basis, m_basis), dtype=dtype)
         colsum = jnp.zeros((m_basis, n_terms), dtype=dtype)
         BtY = [jnp.zeros((cs, n_terms, m_basis), dtype=dtype) for _ in lanes]
+        G12 = jnp.zeros((P, m_basis, n_terms), dtype=dtype)
         # Solving order ``k`` needs the bases up through order ``k`` to
         # reconstruct the exact sequential residual. Do not build a higher
         # order basis that this pass cannot consume.
@@ -755,6 +1022,8 @@ def _fit_hdmr(
             B_all = build_bases_order(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)
             B_new = B_all[term_order - 1]
             BtB, colsum = _acc_gram(B_new, BtB, colsum)
+            if term_order == 2:
+                G12 = _acc_cross_gram12(B_all[0], B_new, G12)
             for j, (s, e) in enumerate(lanes):
                 BtY[j] = _acc_higher_moment(
                     B_new,
@@ -765,9 +1034,54 @@ def _fit_hdmr(
                     mean_z[s:e],
                     BtY[j],
                 )
-        solver = _get_gram_higher_solver(m_basis, ridge)
+        # The projected pair blocks are rank-deficient by construction, so they
+        # need a ridge floor even when the caller asks for none.
+        term_ridge = (
+            max(ridge, math.sqrt(float(jnp.finfo(dtype).eps))) if term_order == 2 else ridge
+        )
+        solver = _get_gram_higher_solver(m_basis, term_ridge)
         colsums.append(colsum)
-        coef_chunks.append([solver(BtB, BtY[j]) for j in range(n_chunks)])
+        if term_order == 2:
+            # Project the pair basis off the first-order space, so a pair term
+            # holds only what no sum of 1-D functions can explain.
+            A = (_first_order_pinv(G1_flat) @ G12.reshape(P, -1)).reshape(G12.shape)
+            BtB = BtB - jnp.einsum("pmj,pnj->jmn", A, G12)
+            BtB = (BtB + BtB.transpose(0, 2, 1)) / 2
+            rhs = []
+            for j in range(n_chunks):
+                # B1^T of the first-order residual: not exactly zero, because
+                # the backfit stops early and the ridge shrinks.
+                r1 = b1res_chunks[j].transpose(0, 2, 1).reshape(cs, P) - (
+                    C1_chunks[j].reshape(cs, P) @ G1_flat
+                )
+                rhs.append(BtY[j] - jnp.einsum("pmj,lp->ljm", A, r1))
+            C2_stack, rel = _get_pair_solve(n_intervals, b, n_row_batches, max_iter, term_ridge)(
+                X_p, w_full, c2_idx, c3_idx, beta2, beta3, A, BtB, jnp.stack(rhs)
+            )
+            C2_chunks = list(C2_stack)
+            tol = max(1e-7, 10 * float(jnp.finfo(dtype).eps))
+            # The check needs a concrete value; under jit or vmap there is none.
+            if not isinstance(rel, jax.core.Tracer) and float(rel) >= tol:
+                warnings.warn(
+                    f"jaxgsa.hdmr: the joint second-order solve did not converge in "
+                    f"max_iter={max_iter} steps (relative residual {float(rel):.1e}). "
+                    "Raise max_iter or ridge.",
+                    stacklevel=2,
+                )
+            corr_chunks, C1_fold = [], []
+            for j in range(n_chunks):
+                C2_j = C2_chunks[j]
+                corr_j = jnp.einsum("pmj,lmj->lpj", A, C2_j)  # (cs, P, n2)
+                corr_chunks.append(corr_j)
+                C1_fold.append(
+                    (C1_chunks[j].reshape(cs, P) - jnp.sum(corr_j, axis=2)).reshape(cs, m1, n1)
+                )
+            coef_chunks = [C1_fold, C2_chunks]
+            stat_chunks = [C1_chunks, C2_chunks]
+        else:
+            C3_chunks = [solver(BtB, BtY[j]) for j in range(n_chunks)]
+            coef_chunks.append(C3_chunks)
+            stat_chunks.append(C3_chunks)
 
     # ---- Term means from column sums (no extra pass needed) ---------------
     # mean(f_j) = (1^T B_j C_j) / N.
@@ -775,12 +1089,17 @@ def _fit_hdmr(
         jnp.concatenate(
             [
                 jnp.einsum("mj,lmj->lj", cols, C[j]) / N
-                for cols, C in zip(colsums, coef_chunks, strict=True)
+                for cols, C in zip(colsums, stat_chunks, strict=True)
             ],
             axis=1,
         )
         for j in range(n_chunks)
     ]  # each (cs, n)
+    if corr_chunks is not None:
+        colsum1_flat = colsum1.reshape(P)
+        for j in range(n_chunks):
+            shift_mean = jnp.einsum("p,lpj->lj", colsum1_flat, corr_chunks[j]) / N
+            mean_f[j] = mean_f[j].at[:, n1 : n1 + n2].add(-shift_mean)
     # mean of the leave-one-out sums Y0_minus_j = Y0 - f_j.
     mean_y0m = [jnp.sum(mf, axis=1, keepdims=True) - mf for mf in mean_f]
 
@@ -804,7 +1123,7 @@ def _fit_hdmr(
         for j, (s, e) in enumerate(lanes):
             accs[j] = stats_step(
                 B_all,
-                [c[j] for c in coef_chunks],
+                [c[j] for c in stat_chunks],
                 Y_p[lo:hi, s:e],
                 w_full[lo:hi],
                 shift[s:e],
@@ -812,6 +1131,7 @@ def _fit_hdmr(
                 mean_f[j],
                 mean_y0m[j],
                 accs[j],
+                None if corr_chunks is None else corr_chunks[j],
             )
 
     acc = tuple(jnp.concatenate([a[k] for a in accs]) for k in range(7))
