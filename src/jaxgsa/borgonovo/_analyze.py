@@ -1201,7 +1201,8 @@ def analyze(
         degen_parts.append(degen_b)
         floored_cols = floored_b if floored_cols is None else floored_cols | floored_b
         del groups_block, idx_block
-    assert floored_cols is not None
+    if floored_cols is None:
+        raise RuntimeError("jaxgsa.borgonovo: no replicate block was processed.")
     d_all = jnp.concatenate(d_parts, axis=0) if len(d_parts) > 1 else d_parts[0]
     s1_all = jnp.concatenate(s1_parts, axis=0) if len(s1_parts) > 1 else s1_parts[0]
     degen_all = jnp.concatenate(degen_parts, axis=0) if len(degen_parts) > 1 else degen_parts[0]
