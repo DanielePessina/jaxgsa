@@ -111,3 +111,49 @@ def test_second_call_compiles_nothing(method: str) -> None:
     _COMPILES.clear()
     jax.block_until_ready(jax.tree.leaves(call()))
     assert _COMPILES == [], f"{method}: {len(_COMPILES)} programs compiled on a repeated call"
+
+
+@pytest.mark.filterwarnings("ignore:.*Sinkhorn solves did not reach")
+@pytest.mark.parametrize("mode", ["univariate", "multivariate"])
+def test_ot_categorical_new_data_does_not_recompile(mode: str) -> None:
+    """New categorical data of the same shape reuses every program.
+
+    The class width is bucketed, so a new dataset with a slightly different
+    largest class keeps the same padded shape.
+    """
+    import numpy as np
+
+    problem = jaxgsa.Problem.from_dict(
+        {
+            "a": (-np.pi, np.pi),
+            "b": (-np.pi, np.pi),
+            "c": {"dist": "categorical", "probs": [0.5, 0.5]},
+        }
+    )
+
+    def data(seed: int) -> tuple[jax.Array, jax.Array]:
+        r = np.random.default_rng(seed)
+        X = r.uniform(-np.pi, np.pi, (200, 3))
+        X[:, 2] = r.choice(2, 200)
+        y = np.sin(X[:, 0]) + 7 * np.sin(X[:, 1]) ** 2 + X[:, 2]
+        return jnp.asarray(X), jnp.asarray(np.stack([y, y**2], 1))
+
+    def run(seed: int) -> None:
+        X, Y = data(seed)
+        jaxgsa.optimal_transport.analyze(
+            problem,
+            X,
+            Y,
+            mode=mode,
+            n_classes=5,
+            verbose=False,
+            max_iter=200,
+            dummy=True,
+            key=0,
+            n_bootstrap=4,
+        )
+
+    run(0)
+    before = len(_COMPILES)
+    run(1)
+    assert len(_COMPILES) == before

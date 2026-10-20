@@ -9,9 +9,12 @@ Some fixes change index values where the old values were wrong. See Fixed.
 - Equal-frequency classes now use exact integer edges `(m * N) // M`. Before,
   the edges were the floor of `linspace(0, N, M + 1)`. Float rounding put
   some edges one row low, so one row went to the wrong class. This affects
-  `optimal_transport` and `borgonovo` (continuous inputs). Index values can
-  change for some `(N, M)`, for example `N=60, M=22`. At those points the
-  results can differ from SALib by one row per class.
+  `optimal_transport` and `borgonovo` (continuous inputs). Only `(N, M)`
+  pairs where `floor(linspace)` differs from `(m * N) // M` change. For
+  example, at `N=60, M=22` one edge moves: Borgonovo delta changes by 0.013
+  (4.2% relative) and OT `ot` by 0.021 (4.1% relative). `(N=1000, M=7)` and
+  `(N=997, M=49)` are bitwise unchanged. At the changed pairs the results
+  can differ from SALib by one row per class.
 - `pawn` bin edges are now the exact values `k / n_classes`. Before, an
   input value exactly on an interior edge (for example `0.3` with
   `n_classes=10`) could go to the bin below. Only inputs that sit exactly on
@@ -23,18 +26,20 @@ Some fixes change index values where the old values were wrong. See Fixed.
   tensors in blocks of bootstrap replicates, sized by the memory budget
   (`jaxgsa.config.set_memory_budget`). Before, one `(R, D, M, P)` tensor held
   all replicates and ignored the budget. At `N=20000`, `D=10`, 500
-  bootstrap replicates, peak memory falls from 1198 MB to 961 MB with the
-  default budget, and to 531 MB with a 64 MiB budget. Blocking changes no
-  value: results are bitwise equal for any budget. No new argument.
+  bootstrap replicates, peak memory falls from 1198 MB to 844 MB with the
+  default budget, and to 531 MB with a 64 MiB budget. Replicate blocking
+  itself changes no value. A smaller budget also shrinks the automatic output-slice chunk,
+  which can move values by about 1 ulp (5.6e-17 in x64 for OT univariate).
+  No new argument.
 - `optimal_transport.analyze` no longer recompiles for every new categorical
   dataset of the same shape. The class width is now rounded up to a
   quarter-octave grid (a multiple of 8, never above `N`). On a repeated call
   with new data, the number of compile events falls from 60 to 0 (8 when
   the width crosses a bucket edge) in the
   `univariate` and `multivariate` modes. The padding is masked, so values
-  with categorical inputs change only by float rounding (about 1 ulp, at
-  most 7e-8 relative in float32). `borgonovo` with categorical inputs shares
-  the change.
+  with categorical inputs change only by float rounding. Measured against
+  1.1.2: at most about 1.5e-7 absolute in float32, and about 2e-16 absolute
+  in x64. `borgonovo` with categorical inputs shares the change.
 
 ## 1.1.2
 
