@@ -1226,8 +1226,14 @@ def analyze(
             enable float64 if you need it silent.
 
             Cost: the time is spent in Sinkhorn iterations. One solve
-            costs about 1 to 3 ns times ``N * P`` per iteration, and a default
-            solve needs a few hundred iterations in float32 and up to
+            costs about 1 to 3 ns times ``N * P`` per iteration, where
+            ``P`` is the size of one conditioning class (about
+            ``N / n_classes``, or the level count for a categorical
+            input). The figure was measured on an Apple M1 Pro. One
+            analysis runs about ``R * D * M`` solves: ``R`` replicates,
+            ``D`` parameters and ``M`` classes per parameter, plus the
+            synthetic parameters when ``dummy=True``. A default solve
+            needs a few hundred iterations in float32 and up to
             about 1000 in float64. ``"trajectory"`` mode runs one cloud
             per output, so its cost is ``K`` times the cost of one cloud.
             The loop over ``K`` adds no overhead, and a ``vmap`` over it
