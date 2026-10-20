@@ -246,6 +246,12 @@ equal in every row, and when an input is a linear combination of other inputs
 depend on the dtype or on `ridge`. In float32 it also raises when the QR pivot
 share of the design falls below 1e-5. float64 only warns, below 1e-9.
 
+Near that precision band, float32 can warn about an overfit even when the
+indices are exact. Example: three Gaussian inputs at order 13 give exact
+indices, but `cv_rmse` is about 2 times the standard deviation of `Y`. The
+leave-one-out error is the first number to lose precision in float32, so trust
+the indices and re-run in float64 to confirm.
+
 ## Traceable core
 
 `jaxgsa.pce.indices(problem, X, Y, *, order=3, ridge=1e-8, fit_ratio=0.5,

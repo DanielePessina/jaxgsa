@@ -56,6 +56,8 @@
 
 ### Changed values
 
+- The PCE fit now uses QR (see Fixed). Index values change only by float
+  rounding, listed below. The solver is also slower (see Performance).
 - PCE values change by float rounding in every fit, and so do Shapley values
   from the PCE backend. Ishigami, N = 1000, orders 3, 5 and 7: at most 7e-7
   in float32 and 1.4e-15 in float64, for S1, ST, S2, `cv_rmse` and the
