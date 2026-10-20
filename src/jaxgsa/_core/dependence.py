@@ -20,6 +20,7 @@ the end with :meth:`Draws.to_physical` (Kucherenko designs) or
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import cached_property
 from operator import index as _as_index
 from typing import Protocol
 
@@ -31,6 +32,7 @@ from scipy.stats import qmc
 
 from jaxgsa._core.copula import (
     _ConditionalPlan,
+    _safe_cholesky,
     _SubsetPlan,
     assemble_latent,
     build_conditional_plan,
@@ -401,12 +403,21 @@ class GaussianDraws:
         if R is None:
             R = independent_correlation(problem.n_params)
         self.problem = problem
-        self.plan: _ConditionalPlan = build_conditional_plan(R)
+        self.chol_full = _safe_cholesky(R)
         self.dimension = problem.n_params
         self.rest_dimension = problem.n_params - 1
         self.self_dimension = 1
         self._correlation = R
         self._subset_plans: dict[tuple[int, ...], _SubsetPlan] = {}
+
+    @cached_property
+    def plan(self) -> _ConditionalPlan:
+        """Conditional plan, built on first use.
+
+        Joint and subset draws never read it, so Shapley and nested designs
+        skip its cost.
+        """
+        return build_conditional_plan(self._correlation)
 
     @staticmethod
     def _check_width(u: np.ndarray, width: int, method: str) -> None:
@@ -418,7 +429,7 @@ class GaussianDraws:
     def joint(self, u: np.ndarray) -> np.ndarray:
         """Return correlated latent rows."""
         self._check_width(u, self.dimension, "joint")
-        return probit(u) @ self.plan.chol_full.T
+        return probit(u) @ self.chol_full.T
 
     def joint_led_by(self, u: np.ndarray, index: int) -> np.ndarray:
         """Draw ``Z_i`` from ``u[:, 0]``, then ``Z_-i | Z_i`` from the rest of ``u``."""

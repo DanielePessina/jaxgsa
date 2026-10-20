@@ -54,3 +54,42 @@ def test_invalid_correlation_type_rejected_without_correlation() -> None:
 def test_plan_has_no_marginal_factor() -> None:
     plan = build_conditional_plan(np.full((3, 3), 0.3) + 0.7 * np.eye(3))
     assert not hasattr(plan, "chol_marginal")
+
+
+def test_plan_matches_direct_conditionals_and_stays_small() -> None:
+    rng = np.random.default_rng(0)
+    A = rng.normal(size=(6, 6))
+    cov = A @ A.T + 6 * np.eye(6)
+    d = np.sqrt(np.diag(cov))
+    R = cov / np.outer(d, d)
+    plan = build_conditional_plan(R)
+    assert not hasattr(plan, "chol_rest")
+    for i in range(6):
+        rest = np.array([j for j in range(6) if j != i])
+        r = R[rest, i]
+        np.testing.assert_allclose(
+            plan.beta_self[i], np.linalg.solve(R[np.ix_(rest, rest)], r), atol=1e-12
+        )
+        np.testing.assert_allclose(
+            plan.std_self[i] ** 2, 1 - r @ np.linalg.solve(R[np.ix_(rest, rest)], r), atol=1e-12
+        )
+        np.testing.assert_array_equal(plan.beta_rest(i), r)
+        np.testing.assert_allclose(
+            plan.rest_factor(i) @ plan.rest_factor(i).T,
+            R[np.ix_(rest, rest)] - np.outer(r, r),
+            atol=1e-12,
+        )
+
+
+def test_gaussian_draws_plan_is_lazy() -> None:
+    from jaxgsa._core.dependence import GaussianDraws
+
+    problem = Problem.from_dict({"a": (0.0, 1.0), "b": (0.0, 1.0)}).with_correlation(
+        np.array([[1.0, 0.5], [0.5, 1.0]])
+    )
+    draws = GaussianDraws(problem)
+    assert "plan" not in vars(draws)
+    draws.joint(np.full((3, 2), 0.3))
+    assert "plan" not in vars(draws)
+    draws.self_given_rest(np.full((3, 1), 0.3), np.zeros((3, 2)), 0)
+    assert "plan" in vars(draws)

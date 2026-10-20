@@ -124,6 +124,14 @@ Some fixes change index values where the old values were wrong. See Fixed.
 
 ### Performance
 
+- The Gaussian-copula conditional plan (Kucherenko, VKOGA with correlated
+  inputs) no longer stores one Cholesky factor per input. At 500 inputs the
+  build drops from 4.2 s and 963 MiB to 0.24 s and 10 MiB. The plan is now
+  built only when a conditional draw needs it, so Kucherenko Shapley and
+  nested designs skip it. The regression of `Z_i` on the others now comes from
+  one inverse of the correlation matrix. Correlated `kucherenko` and `vkoga`
+  values can move by about 1e-15 relative in float64.
+
 - `vkoga` cross-validation no longer recompiles for each new dataset. The
   scorer compiles once, so repeated analyses skip some compile time (about
   0.2 to 0.4 s per new dataset in one small test). Wall-clock gains on small

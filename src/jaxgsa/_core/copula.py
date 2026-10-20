@@ -92,19 +92,17 @@ _NEAR_SINGULAR_CONDITIONAL = 5e-3
 RepairPolicy = Literal["declared", "fitted"]
 
 
-class _ConditionalPlan(NamedTuple):
+class _ConditionalPlan:
     """Closed-form Gaussian conditionals used by the correlated estimators.
 
-    All fields are indexed by the conditioning parameter ``i`` and expressed in
-    the latent standard-normal space, where ``R[i, i] == 1``.
+    Everything stored is ``O(D^2)``. The per-parameter Cholesky factor of
+    ``Z_-i | Z_i`` would need ``O(D^3)`` memory for all ``i``, so it is built
+    on demand by :meth:`rest_factor` and only the last one is cached.
 
     Attributes:
+        correlation: ``(D, D)`` correlation matrix the plan was built from.
         others: ``(D, D - 1)`` integer index of the parameters other than ``i``,
             in ascending order.
-        beta_rest: ``(D, D - 1)`` regression of ``Z_-i`` on ``Z_i``, i.e.
-            ``R[-i, i]``. Used to draw ``Z_-i | Z_i``.
-        chol_rest: ``(D, D - 1, D - 1)`` Cholesky factor of the conditional
-            covariance ``R[-i, -i] - R[-i, i] R[i, -i]``.
         beta_self: ``(D, D - 1)`` regression of ``Z_i`` on ``Z_-i``, i.e.
             ``R[i, -i] R[-i, -i]^{-1}``. Used to draw ``Z_i | Z_-i``.
         std_self: ``(D,)`` conditional standard deviation of ``Z_i | Z_-i``.
@@ -112,18 +110,66 @@ class _ConditionalPlan(NamedTuple):
             ``R`` the plan was built from, for drawing the joint latent
             sample. It travels with the plan so a caller cannot pair the
             conditionals of one matrix with the joint factor of another.
-
-    Note:
-        Append new fields, never insert them. This is a NamedTuple, so a new
-        field in the middle silently re-maps every positional read of it.
     """
 
-    others: np.ndarray
-    beta_rest: np.ndarray
-    chol_rest: np.ndarray
-    beta_self: np.ndarray
-    std_self: np.ndarray
-    chol_full: np.ndarray
+    def __init__(
+        self,
+        correlation: np.ndarray,
+        others: np.ndarray,
+        beta_self: np.ndarray,
+        std_self: np.ndarray,
+        chol_full: np.ndarray,
+    ) -> None:
+        """Store the eager parts of the plan.
+
+        Args:
+            correlation: ``(D, D)`` correlation matrix.
+            others: ``(D, D - 1)`` indices of the other parameters.
+            beta_self: ``(D, D - 1)`` regression of ``Z_i`` on ``Z_-i``.
+            std_self: ``(D,)`` conditional standard deviation of ``Z_i | Z_-i``.
+            chol_full: ``(D, D)`` Cholesky factor of ``correlation``.
+        """
+        self.correlation = correlation
+        self.others = others
+        self.beta_self = beta_self
+        self.std_self = std_self
+        self.chol_full = chol_full
+        self._rest_cache: tuple[int, np.ndarray] | None = None
+
+    def beta_rest(self, index: int) -> np.ndarray:
+        """Return ``R[-i, i]``, the regression of ``Z_-i`` on ``Z_i``."""
+        return self.correlation[self.others[index], index]
+
+    def rest_factor(self, index: int) -> np.ndarray:
+        """Return the Cholesky factor of the covariance of ``Z_-i | Z_i``.
+
+        The covariance is ``R[-i, -i] - R[-i, i] R[i, -i]``. The last factor is
+        cached, because the estimators call this repeatedly for one index.
+
+        Args:
+            index: The conditioning parameter ``i``.
+
+        Returns:
+            ``(D - 1, D - 1)`` lower-triangular factor.
+
+        Warns:
+            JaxgsaWarning: If the covariance needed an eigenvalue lift that
+                the up-front check at plan build time did not predict.
+        """
+        if self._rest_cache is not None and self._rest_cache[0] == index:
+            return self._rest_cache[1]
+        lifts: list[float] = []
+        factor = self._factor(index, lifts)
+        if lifts:
+            _warn_degenerate_conditionals(lifts, 0, np.inf)
+        self._rest_cache = (index, factor)
+        return factor
+
+    def _factor(self, index: int, lifts: list[float]) -> np.ndarray:
+        rest = self.others[index]
+        r_cross = self.correlation[rest, index]
+        cov_rest = self.correlation[np.ix_(rest, rest)] - np.outer(r_cross, r_cross)
+        return _safe_cholesky(cov_rest, lifts)
 
 
 def independent_correlation(n_params: int) -> np.ndarray:
@@ -633,51 +679,38 @@ def build_conditional_plan(R: np.ndarray) -> _ConditionalPlan:
     if D < 2:
         raise ValueError("Correlated sensitivity indices need at least 2 parameters")
 
-    others = np.empty((D, D - 1), dtype=np.int64)
-    beta_rest = np.empty((D, D - 1), dtype=np.float64)
-    chol_rest = np.empty((D, D - 1, D - 1), dtype=np.float64)
-    beta_self = np.empty((D, D - 1), dtype=np.float64)
-    std_self = np.empty(D, dtype=np.float64)
+    # Z_i | Z_-i from the precision matrix P = R^{-1}: the regression
+    # coefficients are -P[i, -i] / P[i, i] and the residual variance is
+    # 1 / P[i, i]. One inverse replaces D solves.
+    precision = np.linalg.inv(R)
+    precision = 0.5 * (precision + precision.T)
+    diag = np.diag(precision)
+    others = np.array([[j for j in range(D) if j != i] for i in range(D)], dtype=np.int64)
+    beta_self = -precision[np.arange(D)[:, None], others] / diag[:, None]
+    raw_residual_var = 1.0 / diag
+    n_floored = int(np.sum(raw_residual_var < _MIN_EIGENVALUE))
+    min_cond_var = float(raw_residual_var.min())
+    std_self = np.sqrt(np.maximum(raw_residual_var, _MIN_EIGENVALUE))
 
-    # One plan is built per analyze/sample call, so aggregating the repair
-    # diagnostics here and warning once at the end is exactly the
-    # once-per-call, not-per-parameter reporting the caller should see.
-    lifts: list[float] = []
-    n_floored = 0
-    min_cond_var = np.inf
-
-    for i in range(D):
-        rest = np.array([j for j in range(D) if j != i], dtype=np.int64)
-        others[i] = rest
-        R_rest = R[np.ix_(rest, rest)]
-        r_cross = R[rest, i]
-
-        # Z_-i | Z_i = z: mean r_cross * z (R[i, i] == 1), covariance the Schur
-        # complement. Jitter guards the Cholesky when a parameter is nearly a
-        # deterministic function of the others.
-        beta_rest[i] = r_cross
-        cov_rest = R_rest - np.outer(r_cross, r_cross)
-        chol_rest[i] = _safe_cholesky(cov_rest, lifts)
-
-        # Z_i | Z_-i: ordinary least squares of Z_i on the others.
-        solved = np.linalg.solve(R_rest, r_cross)
-        beta_self[i] = solved
-        raw_residual_var = 1.0 - float(r_cross @ solved)
-        if raw_residual_var < _MIN_EIGENVALUE:
-            n_floored += 1
-        min_cond_var = min(min_cond_var, raw_residual_var)
-        std_self[i] = np.sqrt(max(raw_residual_var, _MIN_EIGENVALUE))
-
-    _warn_degenerate_conditionals(lifts, n_floored, min_cond_var)
-
-    return _ConditionalPlan(
+    plan = _ConditionalPlan(
+        correlation=R,
         others=others,
-        beta_rest=beta_rest,
-        chol_rest=chol_rest,
         beta_self=beta_self,
         std_self=std_self,
         chol_full=_safe_cholesky(R),
     )
+
+    # Every conditional covariance is a Schur complement of R, so its smallest
+    # eigenvalue is at least that of R (Cauchy interlacing). When R is safely
+    # positive definite no Cholesky can need a lift and the per-parameter pass
+    # is skipped. Otherwise run it only to collect the lifts, keeping O(D^2)
+    # memory.
+    lifts: list[float] = []
+    if float(np.linalg.eigvalsh(R).min()) < _MIN_EIGENVALUE:
+        for i in range(D):
+            plan._factor(i, lifts)
+    _warn_degenerate_conditionals(lifts, n_floored, min_cond_var)
+    return plan
 
 
 def _warn_degenerate_conditionals(lifts: list[float], n_floored: int, min_cond_var: float) -> None:
@@ -757,7 +790,7 @@ def draw_rest_given_self(
     Returns:
         Latent ``Z_-i`` values, shaped by the broadcast of the two inputs.
     """
-    return z_self[..., None] * plan.beta_rest[index] + eps_rest @ plan.chol_rest[index].T
+    return z_self[..., None] * plan.beta_rest(index) + eps_rest @ plan.rest_factor(index).T
 
 
 def draw_self_given_rest(
