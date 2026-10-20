@@ -12,7 +12,7 @@ compile count can catch it.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any
 
 import jax
 import jax.monitoring
@@ -115,9 +115,7 @@ def test_second_call_compiles_nothing(method: str) -> None:
 
 @pytest.mark.filterwarnings("ignore:.*Sinkhorn solves did not reach")
 @pytest.mark.parametrize("mode", ["univariate", "multivariate"])
-def test_ot_categorical_new_data_does_not_recompile(
-    mode: Literal["univariate", "multivariate"],
-) -> None:
+def test_ot_categorical_new_data_does_not_recompile(mode: str) -> None:
     """New categorical data of the same shape reuses every program.
 
     The class width is bucketed, so a new dataset with a slightly different

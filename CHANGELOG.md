@@ -12,10 +12,7 @@ Some fixes change index values where the old values were wrong. See Fixed.
   `optimal_transport` and `borgonovo` (continuous inputs). Only `(N, M)`
   pairs where `floor(linspace)` differs from `(m * N) // M` change. For
   example, at `N=60, M=22` one edge moves: Borgonovo delta changes by 0.013
-  (4.2% relative) and OT `ot` by 0.021 (4.1% relative). At the same pair,
-  Borgonovo `S1` changes by 0.043 (5.9% relative), `delta_conf` by 0.019
-  and `ot_conf` by 0.029. Multivariate `ot` changes by 0.020. The sizes
-  are the same in float32 and float64. `(N=1000, M=7)` and
+  (4.2% relative) and OT `ot` by 0.021 (4.1% relative). `(N=1000, M=7)` and
   `(N=997, M=49)` are bitwise unchanged. At the changed pairs the results
   can differ from SALib by one row per class.
 - `pawn` bin edges are now the exact values `k / n_classes`. Before, an

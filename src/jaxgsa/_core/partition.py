@@ -4,15 +4,12 @@ Both the Borgonovo delta and optimal-transport estimators condition on classes
 of each input's value. Continuous inputs use equal-frequency classes of the
 ordinal rank. Categorical inputs use one class per level, and the class sizes
 are the observed level counts. The helpers here build static, padded gather
-indices per input and for every bootstrap replicate, one block of replicates
-at a time so the tensors stay inside the memory budget. The per-column
+indices once, per input and for every bootstrap replicate. The per-column
 analysis kernels therefore never re-rank the inputs, and all downstream shapes
 stay static under JIT.
 
-:func:`plan_partition` and :func:`replicate_blocks` are the entry points the
-analyzers use. :func:`plan_partition` makes the small shared plan.
-:func:`replicate_blocks` yields partition groups, one replicate block at a
-time. Every group has a canonical layout: it is a
+:func:`build_partition_groups` is the one entry point the analyzers use.
+It returns partition groups in a canonical layout: every group is a
 ``(cls_idx, counts)`` pair with
 
 - ``cls_idx (R, Dg, Mg, Pg)``: per-replicate global sample indices of
