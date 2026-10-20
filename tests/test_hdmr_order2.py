@@ -47,8 +47,17 @@ def _nrmse(pred, y) -> float:
 # N = 1024 at D = 23 has 253 pairs of 16 free coefficients each for 1024 rows.
 # Measured: order 2 still beats order 1 there (0.17 against 0.19), by a thin
 # margin, so the cell stays in with a looser ratio than the others.
-@pytest.mark.parametrize("N", [1024, 4096])
-@pytest.mark.parametrize("D", [5, 9, 15, 23])
+# D = 23 at N = 4096 takes about 20 s per fit (CG over 6325 pair coefficients)
+# and was the slowest test in the suite, so it runs with the slow tier: on the
+# schedule and before every release.
+@pytest.mark.parametrize(
+    ("D", "N"),
+    [
+        *[(D, N) for D in (5, 9, 15) for N in (1024, 4096)],
+        (23, 1024),
+        pytest.param(23, 4096, marks=pytest.mark.slow),
+    ],
+)
 def test_order2_beats_order1_and_sum_of_s_stays_near_one(x64, D, N):
     rng = np.random.default_rng(1)
     X = rng.uniform(size=(2 * N, D_MAX))[:, :D]
