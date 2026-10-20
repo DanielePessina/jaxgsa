@@ -17,6 +17,25 @@ Some fixes change index values where the old values were wrong. See Fixed.
   `n_classes=10`) could go to the bin below. Only inputs that sit exactly on
   an edge change bin.
 
+### Performance
+
+- `borgonovo.analyze` and `optimal_transport.analyze` now build the class
+  tensors in blocks of bootstrap replicates, sized by the memory budget
+  (`jaxgsa.config.set_memory_budget`). Before, one `(R, D, M, P)` tensor held
+  all replicates and ignored the budget. At `N=20000`, `D=10`, 500
+  bootstrap replicates, peak memory falls from 1198 MB to 961 MB with the
+  default budget, and to 531 MB with a 64 MiB budget. Blocking changes no
+  value: results are bitwise equal for any budget. No new argument.
+- `optimal_transport.analyze` no longer recompiles for every new categorical
+  dataset of the same shape. The class width is now rounded up to a
+  quarter-octave grid (a multiple of 8, never above `N`). On a repeated call
+  with new data, the number of compile events falls from 60 to 0 (8 when
+  the width crosses a bucket edge) in the
+  `univariate` and `multivariate` modes. The padding is masked, so values
+  with categorical inputs change only by float rounding (about 1 ulp, at
+  most 7e-8 relative in float32). `borgonovo` with categorical inputs shares
+  the change.
+
 ## 1.1.2
 
 This release fixes bugs and makes several methods faster. Correct index

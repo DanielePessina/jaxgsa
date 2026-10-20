@@ -80,10 +80,13 @@ from jaxgsa._core.irregular import (
 )
 from jaxgsa._core.partition import (
     PartitionGroup,
+    _bucket_width,
     _build_class_indices,
     _class_layout,
     _mask_from_counts,
     build_partition_groups,
+    plan_partition,
+    replicate_blocks,
 )
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
@@ -1021,11 +1024,30 @@ def _matched_dummy_group(key: Array, N: int, sizes: np.ndarray) -> PartitionGrou
         ``cls_idx (1, 1, M, P)``, ``counts (1, 1, M)``.
     """
     edges = np.concatenate([[0], np.cumsum(sizes)]).astype(np.int64)
-    P = int(sizes.max())
-    perm = jax.random.permutation(key, N)
-    take = jnp.minimum(jnp.asarray(edges[:-1])[:, None] + jnp.arange(P)[None, :], N - 1)  # (M, P)
-    cls_idx = perm[take][None, None]  # (1, 1, M, P)
+    # Bucket the width so the kernels compile once per bucket, not once per
+    # dataset. The padding is masked through the counts.
+    P = _bucket_width(int(sizes.max()), N)
+    cls_idx = _dummy_class_indices(key, jnp.asarray(edges[:-1]), N, P)
     return cls_idx, jnp.asarray(sizes)[None, None, :]
+
+
+@functools.partial(jax.jit, static_argnames=("N", "P"))
+def _dummy_class_indices(key: Array, starts: Array, N: int, P: int) -> Array:
+    """Gather a random permutation into padded classes, in one compiled call.
+
+    Args:
+        key: PRNG key for the random assignment.
+        N: Number of samples.
+        P: Padded class width.
+        starts: First position of every class in the permutation, ``(M,)``.
+
+    Returns:
+        Class indices ``(1, 1, M, P)``; entries past a class's size are
+        clamped duplicates.
+    """
+    perm = jax.random.permutation(key, N)
+    take = jnp.minimum(starts[:, None] + jnp.arange(P)[None, :], N - 1)  # (M, P)
+    return perm[take][None, None]
 
 
 @jax.jit
@@ -1430,9 +1452,13 @@ def analyze(
     # the declared level count per group in the same order, so a caller
     # never needs to rebuild it from cont_dims/cat_dims.
     t0 = _verbose.tic()
-    groups, group_levels, col_order = build_partition_groups(
+    # The class tensors are built per block of replicates (inside the memory
+    # budget); blocking changes no value.
+    plan = plan_partition(
         problem, X, all_idx, M, dims_levels, method="jaxgsa.optimal_transport.analyze"
     )
+    group_levels = plan.group_levels
+    col_order = plan.col_order
 
     # `_run` maps replicate indices and partition-layout groups to
     # (ot, advective, diffusive, degenerate) arrays with the parameter axis
@@ -1466,11 +1492,19 @@ def analyze(
 
     n_bad_parts: list[Array] = []
     n_solves_parts: list[int] = []
-    ot_all, adv_all, diff_all, degen_all, n_bad0, solves0 = _run(
-        all_idx, groups, group_levels, col_order
+    block_outs: list[tuple[Array, Array, Array, Array]] = []
+    for idx_block, groups_block in replicate_blocks(plan):
+        ot_b, adv_b, diff_b, degen_b, n_bad_b, solves_b = _run(
+            idx_block, groups_block, group_levels, col_order
+        )
+        block_outs.append((ot_b, adv_b, diff_b, degen_b))
+        n_bad_parts.append(n_bad_b)
+        n_solves_parts.append(solves_b)
+        del groups_block  # free this block's class tensors before the next
+    ot_all, adv_all, diff_all, degen_all = (
+        jnp.concatenate(parts, axis=0) if len(parts) > 1 else parts[0]
+        for parts in zip(*block_outs)
     )
-    n_bad_parts.append(n_bad0)
-    n_solves_parts.append(solves0)
 
     ot_dummy: Array | None = None
     if dummy:
@@ -1511,10 +1545,10 @@ def analyze(
             cont_dummy = _dummy_value(cont_group, None)
             dummy_vals.extend([cont_dummy] * len(cont_dims))
         if cat_dims:
-            # The categorical group is always last (build_partition_groups'
-            # order); its counts at replicate 0 give each real column's
+            # The plan keeps the level counts of replicate 0, which give each real column's
             # own observed, non-empty level sizes to match.
-            cat_counts0 = np.asarray(groups[-1][1][0])  # (Dc, M)
+            assert plan.cat_counts0 is not None
+            cat_counts0 = plan.cat_counts0  # (Dc, M)
             for j, key_j in enumerate(dummy_keys[1:]):
                 sizes_j = cat_counts0[j]
                 sizes_j = sizes_j[sizes_j > 0]
