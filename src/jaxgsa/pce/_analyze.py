@@ -46,7 +46,6 @@ from jaxgsa._core.result import CIInfo
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import GROUPED_MIN_D, _in_column_order
 from jaxgsa._core.validation import (
-    _is_constant_slice,
     _prepare_Y,
     as_key,
 )
@@ -467,12 +466,15 @@ def _fit_pce_streamed(
     # its orthogonal factor and the factorisation workspace, about 4*n_terms
     # floats per row, plus 2*M for the residual and right-hand-side arrays.
     bytes_per_row = jnp.dtype(dtype).itemsize * (4 * n_terms + 2 * M)
-    b = resolve_batch_size(bytes_per_row, N, batch_size)
+    # The batch width and the batch count come from the row count's bucket, so
+    # every N in a bucket reuses the compiled steps (see _bucket).
+    n_bucket = _bucket(N)
+    b = resolve_batch_size(bytes_per_row, n_bucket, batch_size)
 
     # Pad the sample axis so every batch traces at the same shape. The padded
     # rows are masked to zero inside the jitted steps, so they contribute
     # nothing to either pass.
-    n_batches = math.ceil(N / b)
+    n_batches = math.ceil(n_bucket / b)
     n_pad = n_batches * b - N
     X_p = pad_rows(X_ref, n_pad)
     Y_p = pad_rows(Y_flat, n_pad)
@@ -546,9 +548,75 @@ def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
     return itemsize * N * (4 * n_terms + 2 * M)
 
 
+def _bucket(n: int) -> int:
+    """Round a row count up to its bucket, eight buckets per octave.
+
+    A jitted fit compiles once per input shape. Rounding ``N`` up to a bucket
+    lets every ``N`` in the bucket reuse one compiled program, at the price of
+    at most 12.5% extra rows, which a 0/1 row mask removes from every sum.
+
+    Args:
+        n: Number of real rows.
+
+    Returns:
+        The smallest ``2**k * (1 + j/8)`` that is at least ``n``, as an
+        integer. Counts below 16 are their own bucket.
+    """
+    if n < 16:
+        return n
+    base = 1 << (n.bit_length() - 1)
+    step = base // 8
+    return base + -(-(n - base) // step) * step
+
+
+def _pad_x(X: Array) -> Array:
+    """Pad ``X`` with extra rows up to the bucket of its row count.
+
+    The extra rows repeat the first row, so the basis evaluates to finite
+    numbers there however the inputs are scaled. The fit multiplies the design
+    rows by a 0/1 mask, so none of them changes a sum.
+
+    Args:
+        X: Inputs in physical units, shape ``(N, D)``.
+
+    Returns:
+        ``X`` with the extra rows appended.
+    """
+    n_pad = _bucket(X.shape[0]) - X.shape[0]
+    if n_pad == 0:
+        return X
+    return jnp.concatenate([X, jnp.broadcast_to(X[:1], (n_pad, X.shape[1]))], axis=0)
+
+
+def _pad_y(Y_3d: Array) -> tuple[Array, int]:
+    """Pad ``Y`` with zero rows up to the bucket of its row count.
+
+    Args:
+        Y_3d: Outputs in canonical layout, shape ``(N, T, K)``.
+
+    Returns:
+        ``(Y_padded, N)``.
+    """
+    return pad_rows(Y_3d, _bucket(Y_3d.shape[0]) - Y_3d.shape[0]), Y_3d.shape[0]
+
+
+def _row_mask(n_total: int, n_rows: Array | int, dtype: jnp.dtype) -> Array:
+    """The 0/1 weight of each row of a padded array: 1 for a real row.
+
+    Args:
+        n_total: Rows in the padded array.
+        n_rows: Number of real rows. May be a traced scalar.
+        dtype: Dtype of the mask.
+
+    Returns:
+        Array of shape ``(n_total,)``.
+    """
+    return (jnp.arange(n_total) < n_rows).astype(dtype)
+
+
 @partial(jax.jit, static_argnames=("problem", "order"))
 def _single_pass_coefficients(
-    problem: Problem, X: Array, Y_3d: Array, ridge: float, *, order: int
+    problem: Problem, X: Array, Y_3d: Array, n_rows: Array | int, ridge: float, *, order: int
 ) -> tuple[Array, Array, Array]:
     """Fit the expansion in one pass, as a single compiled computation.
 
@@ -561,18 +629,24 @@ def _single_pass_coefficients(
     wants diagnostics, so :func:`analyze` and :func:`indices` fit bit for bit
     the same expansion. The diagnostics run in :func:`_single_pass_loo`.
 
+    ``X`` and ``Y_3d`` may carry extra rows after the first ``n_rows`` (see
+    :func:`_pad_to_bucket`). The design rows of those are zeroed, so a zero
+    row adds nothing to the QR factor or to ``Q^T Y``. ``n_rows`` is traced,
+    so every row count in a bucket shares one compiled program.
+
     Args:
         problem: Parameter names and distributions (static).
-        X: Inputs in physical units, shape ``(N, D)``.
-        Y_3d: Outputs in canonical layout, shape ``(N, T, K)``.
+        X: Inputs in physical units, shape ``(N_pad, D)``.
+        Y_3d: Outputs in canonical layout, shape ``(N_pad, T, K)``.
+        n_rows: Number of real rows, at most ``N_pad``.
         ridge: Tikhonov parameter of the ridge-augmented design.
         order: Effective (post-``_auto_order``) polynomial order.
 
     Returns:
         ``(coefficients, Phi, R)``: coefficients in terms-last layout, shape
-        ``(T, K, n_terms)``, the design matrix and the triangular QR factor of
-        the ridge-augmented design. A caller that skips the diagnostics drops
-        the design matrix.
+        ``(T, K, n_terms)``, the masked design matrix and the triangular QR
+        factor of the ridge-augmented design. A caller that skips the
+        diagnostics drops the design matrix.
     """
     N = X.shape[0]
     _, T, K = Y_3d.shape
@@ -580,6 +654,7 @@ def _single_pass_coefficients(
     X_ref, input_types = _map_to_reference(X, problem, order)
     Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
     Phi = build_design_matrix(X_ref, mi, input_types, order)
+    Phi = Phi * _row_mask(N, n_rows, Phi.dtype)[:, None]
     # The basis is identical for every output slice (the effective order
     # depends only on N and D), so fitting all T*K slices is ONE QR with
     # multiple right-hand sides.
@@ -590,16 +665,18 @@ def _single_pass_coefficients(
 
 @jax.jit
 def _single_pass_loo(
-    Phi: Array, R: Array, Y_3d: Array, coefficients: Array
+    Phi: Array, R: Array, Y_3d: Array, coefficients: Array, n_rows: Array | int
 ) -> tuple[Array, Array]:
     """Per-slice LOO and in-sample RMSE of a single-pass fit.
 
     Args:
-        Phi: Design matrix, shape ``(N, n_terms)``.
+        Phi: Masked design matrix, shape ``(N_pad, n_terms)``.
         R: Triangular QR factor of the ridge-augmented design, shape
             ``(n_terms, n_terms)``.
-        Y_3d: Outputs in canonical layout, shape ``(N, T, K)``.
+        Y_3d: Outputs in canonical layout, shape ``(N_pad, T, K)``, zero after
+            the first ``n_rows`` rows.
         coefficients: Fitted coefficients, shape ``(T, K, n_terms)``.
+        n_rows: Number of real rows.
 
     Returns:
         ``(loo_flat, rmse_flat)``, each of shape ``(T*K,)``.
@@ -609,15 +686,32 @@ def _single_pass_loo(
     coeffs_flat = coefficients.reshape(-1, coefficients.shape[-1]).T  # (n_terms, T*K)
     # R^T R = Phi^T Phi + ridge*I, so R.T is the Cholesky factor hat_diagonal
     # wants, and loo_error reuses it without carrying anything that scales
-    # with N.
-    loo_flat = loo_error(Phi, Y_flat, coeffs_flat, gram_chol=R.T)
-    rmse_flat = jnp.sqrt(jnp.mean((Y_flat - Phi @ coeffs_flat) ** 2, axis=0))
+    # with N. A zero row has leverage 0 and residual 0, so only the divisor
+    # needs the real count.
+    loo_flat = loo_error(Phi, Y_flat, coeffs_flat, gram_chol=R.T, n_rows=n_rows)
+    rmse_flat = jnp.sqrt(jnp.sum((Y_flat - Phi @ coeffs_flat) ** 2, axis=0) / n_rows)
     return loo_flat, rmse_flat
+
+
+def _masked_extremes(flat: Array, n_rows: Array | int) -> tuple[Array, Array]:
+    """The smallest and largest value per column over the real rows only.
+
+    Args:
+        flat: Array of shape ``(N_pad, S)``.
+        n_rows: Number of real rows.
+
+    Returns:
+        ``(lowest, highest)``, each of shape ``(S,)``.
+    """
+    real = _row_mask(flat.shape[0], n_rows, jnp.bool_)[:, None]
+    return jnp.min(jnp.where(real, flat, jnp.inf), axis=0), jnp.max(
+        jnp.where(real, flat, -jnp.inf), axis=0
+    )
 
 
 @partial(jax.jit, static_argnames=("D", "order", "budget"))
 def _sobol_from_fit(
-    coefficients: Array, Y_3d: Array, *, D: int, order: int, budget: int
+    coefficients: Array, Y_3d: Array, n_rows: Array | int, *, D: int, order: int, budget: int
 ) -> tuple[Array, Array, Array]:
     """Read the Sobol indices off a fitted expansion, as one compiled call.
 
@@ -627,7 +721,9 @@ def _sobol_from_fit(
 
     Args:
         coefficients: Fitted coefficients, shape ``(T, K, n_terms)``.
-        Y_3d: Outputs in canonical layout, shape ``(N, T, K)``.
+        Y_3d: Outputs in canonical layout, shape ``(N_pad, T, K)``, zero after
+            the first ``n_rows`` rows.
+        n_rows: Number of real rows.
         D: Number of parameters.
         order: Effective polynomial order that built the multi-index.
         budget: Active memory budget in bytes.
@@ -636,33 +732,39 @@ def _sobol_from_fit(
         ``(S1, ST, S2)`` in canonical ``(T, K, ...)`` layout.
     """
     _ = budget
-    N = Y_3d.shape[0]
     # is_constant reads the raw Y column, not the fit: a constant slice's
     # fitted non-constant coefficients are rarely bit-exact zero in float32
     # (M1), so the fit-only guard inside sobol_from_coefficients would miss
-    # most of them.
-    is_constant = _is_constant_slice(Y_3d.reshape(N, -1)).reshape(Y_3d.shape[1:])
+    # most of them. The extremes run over the real rows only.
+    lowest, highest = _masked_extremes(Y_3d.reshape(Y_3d.shape[0], -1), n_rows)
+    is_constant = (highest == lowest).reshape(Y_3d.shape[1:])
     return sobol_from_coefficients(coefficients, build_multi_index(D, order), is_constant)
 
 
 @jax.jit
 def _fit_summary(
-    loo_flat: Array, rmse_flat: Array, Y_3d: Array
+    loo_flat: Array, rmse_flat: Array, Y_3d: Array, n_rows: Array | int
 ) -> tuple[Array, Array, Array, Array]:
     """Shape the fit diagnostics and derive the explained variance.
 
     Args:
         loo_flat: Per-slice LOO RMSE, shape ``(T*K,)``.
         rmse_flat: Per-slice in-sample RMSE, shape ``(T*K,)``.
-        Y_3d: Outputs in canonical layout, shape ``(N, T, K)``.
+        Y_3d: Outputs in canonical layout, shape ``(N_pad, T, K)``, zero after
+            the first ``n_rows`` rows.
+        n_rows: Number of real rows.
 
     Returns:
         ``(loo, rmse, explained_variance, std)``, each of shape ``(T, K)``,
-        where ``std`` is ``sqrt(Var(Y))`` per slice.
+        where ``std`` is ``sqrt(Var(Y))`` per slice over the real rows.
     """
     T, K = Y_3d.shape[1:]
-    total_var = jnp.var(Y_3d, axis=0)  # (T, K)
-    is_constant = _is_constant_slice(Y_3d.reshape(Y_3d.shape[0], -1)).reshape(T, K)
+    flat = Y_3d.reshape(Y_3d.shape[0], -1)
+    real = _row_mask(flat.shape[0], n_rows, flat.dtype)[:, None]
+    centred = (flat - jnp.sum(flat * real, axis=0) / n_rows) * real
+    total_var = (jnp.sum(centred**2, axis=0) / n_rows).reshape(T, K)  # (T, K)
+    lowest, highest = _masked_extremes(flat, n_rows)
+    is_constant = (highest == lowest).reshape(T, K)
     loo = loo_flat.reshape(T, K)
     rmse = rmse_flat.reshape(T, K)
     # 1 - in-sample MSE / sample variance of Y, on the same rows. The residual
@@ -742,11 +844,16 @@ def _fit_pce_core(
     if not streamed:
         # Single-pass path: one jitted call maps the inputs, builds the design
         # matrix, solves the ridge least squares by QR and (optionally) the exact LOO.
-        coeffs, Phi, R = _single_pass_coefficients(problem, X, Y_3d, ridge, order=effective_order)
+        # The rows are padded to their bucket first, so every N in a bucket
+        # shares one compiled program (see _bucket).
+        Y_p, n_rows = _pad_y(Y_3d)
+        coeffs, Phi, R = _single_pass_coefficients(
+            problem, _pad_x(X), Y_p, n_rows, ridge, order=effective_order
+        )
         loo_flat = None
         rmse_flat = None
         if diagnostics:
-            loo_flat, rmse_flat = _single_pass_loo(Phi, R, Y_3d, coeffs)
+            loo_flat, rmse_flat = _single_pass_loo(Phi, R, Y_p, coeffs, n_rows)
     else:
         # Streamed path: same least squares and exact LOO, accumulated
         # over row batches so peak memory stays within the budget.
@@ -805,9 +912,11 @@ def _indices_and_share(
         diagnostics=False,
     )
     assert fit.pivot_share is not None
+    Y_p, n_rows = _pad_y(Y_3d)
     S1, ST, S2 = _sobol_from_fit(
         fit.coefficients,
-        Y_3d,
+        Y_p,
+        n_rows,
         D=problem.n_params,
         order=fit.order,
         budget=get_memory_budget(),
@@ -1215,14 +1324,16 @@ def analyze(
     # below then read their outputs on the host.
     assert fit.loo_flat is not None
     assert fit.rmse_flat is not None
+    Y_p, n_rows = _pad_y(ctx.Y3)
     S1, ST, S2 = _sobol_from_fit(
         fit.coefficients,
-        ctx.Y3,
+        Y_p,
+        n_rows,
         D=problem.n_params,
         order=fit.order,
         budget=get_memory_budget(),
     )  # S1/ST (T,K,D), S2 (T,K,D,D)
-    loo, rmse, explained_variance, y_std = _fit_summary(fit.loo_flat, fit.rmse_flat, ctx.Y3)
+    loo, rmse, explained_variance, y_std = _fit_summary(fit.loo_flat, fit.rmse_flat, Y_p, n_rows)
 
     # Non-finite numbers come first: the two checks below skip them, so a
     # failed fit would otherwise pass as a clean one.

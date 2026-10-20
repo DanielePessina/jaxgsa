@@ -678,6 +678,7 @@ def loo_error(
     coefficients: Array,
     ridge: float = 0.0,
     gram_chol: Array | None = None,
+    n_rows: Array | int | None = None,
 ) -> Array:
     """Efficient leave-one-out cross-validation error from the hat matrix.
 
@@ -700,6 +701,11 @@ def loo_error(
             reuse a factorization the caller already holds. It is the small
             factor, not an ``(n_terms, N)`` product, so reuse costs no memory
             that scales with ``N``.
+        n_rows: Number of real rows, when ``Phi`` and ``Y`` carry zero rows
+            after them (a padded fit). The sum of squared leave-one-out
+            residuals divides by this count. A zero row has leverage 0 and
+            residual 0, so it adds nothing to the sum. ``None`` means every
+            row is real, and the mean runs over all of them.
 
     Returns:
         Scalar LOO RMSE for 1-D ``Y``, or per-slice LOO RMSE of shape
@@ -712,4 +718,6 @@ def loo_error(
     if residuals.ndim == 2:
         denom = denom[:, None]  # broadcast the shared leverage over slices
     loo_residuals = residuals / denom
-    return jnp.sqrt(jnp.mean(loo_residuals**2, axis=0))
+    if n_rows is None:
+        return jnp.sqrt(jnp.mean(loo_residuals**2, axis=0))
+    return jnp.sqrt(jnp.sum(loo_residuals**2, axis=0) / n_rows)

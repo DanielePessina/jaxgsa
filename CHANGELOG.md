@@ -51,13 +51,22 @@
   z >= 38) truncations give exact indices. This also holds for `shapley` with
   the PCE backend. Untruncated Gaussian and uniform inputs are bitwise
   unchanged.
+- `pce.analyze`, `pce.indices` and `shapley` with the PCE backend no longer
+  recompile the fit for every new number of rows. The rows are padded to a
+  bucket (eight buckets per octave, so at most 12.5% extra rows), and a 0/1
+  row mask keeps the extra rows out of every sum. Row counts 497, 498 and 499
+  now share one compiled fit. The first `analyze` call at a new row count in
+  the same bucket took 0.8 s and now takes 0.4 s (N = 500, D = 6). The shared
+  input checks still compile small programs for each new row count.
 
 ### Changed values
 
 - PCE values change by float rounding in every fit, and so do Shapley values
   from the PCE backend. Ishigami, N = 1000, orders 3, 5 and 7: at most 4.2e-7
   in float32 and 6.7e-16 in float64, for S1, ST, S2, `cv_rmse` and the
-  bootstrap intervals. Fits that 1.1.2 refused in float32 now succeed.
+  bootstrap intervals. Fits that 1.1.2 refused in float32 now succeed. Row
+  padding changes the order of the sums, which adds float rounding of the same
+  size and no more.
 - PCE values change for every truncated Gaussian input, and so do Shapley
   values from the PCE backend. The old S1 error on a polynomial response was
   4e-3 to 5e-2 on the Legendre route (every truncation narrower than 7 sigma,
@@ -72,7 +81,9 @@
   222 ms to 655 ms for D = 6, order 6, N = 20000 (924 terms), and 152 ms to
   312 ms for D = 10, order 3, N = 50000. Small fits (D = 3, order 5, N = 1000)
   take about 2 ms in both. The estimate of fit memory, which decides when the
-  fit streams, grows from 2 to 4 arrays of the design size.
+  fit streams, grows from 2 to 4 arrays of the design size. Row padding adds
+  up to 12.5% more work for a row count just above a bucket edge, for example
+  N = 513 runs as 576 rows.
 
 ## 1.1.2
 

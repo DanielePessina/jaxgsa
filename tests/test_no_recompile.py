@@ -111,3 +111,35 @@ def test_second_call_compiles_nothing(method: str) -> None:
     _COMPILES.clear()
     jax.block_until_ready(jax.tree.leaves(call()))
     assert _COMPILES == [], f"{method}: {len(_COMPILES)} programs compiled on a repeated call"
+
+
+def test_pce_row_counts_in_one_bucket_share_one_compiled_fit() -> None:
+    """Three nearby row counts must compile the PCE fit once, not three times.
+
+    The fit pads its rows to a bucket (eight per octave), so 497, 498 and 499
+    rows all run the 512-row program. The shared checks in ``_core`` still
+    compile per shape, so the PCE programs are counted by their own caches.
+    """
+    from jaxgsa.pce import _analyze as pce_analyze
+
+    programs = (
+        pce_analyze._single_pass_coefficients,
+        pce_analyze._single_pass_loo,
+        pce_analyze._sobol_from_fit,
+        pce_analyze._fit_summary,
+    )
+    # Another test may already have compiled one of these shapes.
+    jax.clear_caches()
+    sizes = []
+    for n in (497, 498, 499):
+        X = jnp.asarray(sampling.monte_carlo(PROBLEM, n, seed=0))
+        Y = ishigami.evaluate(X)
+        jax.block_until_ready(
+            jax.tree.leaves(jaxgsa.pce.analyze(PROBLEM, X, Y, order=3, verbose=False))
+        )
+        sizes.append([program._cache_size() for program in programs])
+    assert sizes[1] == sizes[0] == sizes[2]
+    # And a row count in the next bucket compiles each program once more.
+    X = jnp.asarray(sampling.monte_carlo(PROBLEM, 600, seed=0))
+    jaxgsa.pce.analyze(PROBLEM, X, ishigami.evaluate(X), order=3, verbose=False)
+    assert [program._cache_size() for program in programs] == [size + 1 for size in sizes[0]]

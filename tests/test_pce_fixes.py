@@ -613,3 +613,91 @@ def test_truncated_basis_survives_predict_and_grouped_mapping():
     assert isinstance(result, pce.PCEResult)
     pred = np.asarray(result.predict(jnp.asarray(X)))
     np.testing.assert_allclose(pred, Y, atol=1e-2, rtol=1e-3)
+
+
+@pytest.mark.parametrize("n", [16, 17, 100, 255, 256, 257, 511, 513, 1000, 4097, 100_000])
+def test_row_bucket_is_close_above_n_and_idempotent(n):
+    from jaxgsa.pce._analyze import _bucket
+
+    b = _bucket(n)
+    assert n <= b <= n * 1.125 + 1
+    assert _bucket(b) == b
+
+
+def test_row_bucket_is_monotone_and_small_counts_are_their_own_bucket():
+    from jaxgsa.pce._analyze import _bucket
+
+    buckets = [_bucket(n) for n in range(1, 5000)]
+    assert buckets == sorted(buckets)
+    assert all(_bucket(n) == n for n in range(1, 16))
+    assert len(set(buckets[1000:4999])) < 40  # about 8 per octave
+
+
+@pytest.mark.parametrize("n", [511, 497, 300])
+@pytest.mark.parametrize("batch_size", [None, 128])
+def test_padded_fit_matches_an_unpadded_reference(n, batch_size):
+    # Rows are padded up to a bucket (512 for 511 and 497, 320 for 300). Every
+    # reduction over rows must ignore the extra rows: the fit, the LOO error,
+    # the in-sample error, the variance of Y and the constant-slice test. The
+    # reference solves the same ridge problem on the real rows only, in float64.
+    from jaxgsa.pce._analyze import _bucket
+    from jaxgsa.pce._engine import build_design_matrix, build_multi_index
+
+    assert _bucket(n) > n
+    rng = np.random.default_rng(5)
+    problem = jaxgsa.Problem(["a", "b", "c"], [(0, 1)] * 3)
+    X = rng.uniform(0, 1, (n, 3)).astype(np.float32)
+    Y = np.stack(
+        [
+            3.0 + 2 * X[:, 0] + X[:, 1] ** 2 + 0.1 * rng.standard_normal(n),
+            np.full(n, 7.0),  # a constant slice: the zero rows must not hide it
+        ],
+        axis=1,
+    ).astype(np.float32)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = pce.analyze(
+            problem, jnp.asarray(X), jnp.asarray(Y), order=3, batch_size=batch_size, verbose=False
+        )
+    assert isinstance(result, pce.PCEResult)
+
+    mi = build_multi_index(3, 3)
+    with jax.enable_x64():
+        Phi = np.asarray(
+            build_design_matrix(
+                jnp.asarray(2.0 * X.astype(np.float64) - 1.0), mi, ("uniform",) * 3, 3
+            )
+        )
+    y = Y[:, 0].astype(np.float64)
+    gram = Phi.T @ Phi + 1e-8 * np.eye(Phi.shape[1])
+    coef = np.linalg.solve(gram, Phi.T @ y)
+    resid = y - Phi @ coef
+    leverage = np.einsum("ij,ji->i", Phi, np.linalg.solve(gram, Phi.T))
+    loo = np.sqrt(np.mean((resid / (1 - leverage)) ** 2))
+    rmse = np.sqrt(np.mean(resid**2))
+    explained = 1 - rmse**2 / np.var(y)
+    c2 = coef[1:] ** 2
+    only = [(mi[1:, d] > 0) & ((mi[1:] > 0).sum(1) == 1) for d in range(3)]
+    s1 = np.array([c2[o].sum() for o in only]) / c2.sum()
+
+    tol = 5e-4
+    np.testing.assert_allclose(np.asarray(result.coefficients)[0], coef, atol=tol)
+    assert float(result.cv_rmse[0]) == pytest.approx(loo, rel=2e-3)
+    assert float(result.rmse[0]) == pytest.approx(rmse, rel=2e-3)
+    assert float(result.explained_variance[0]) == pytest.approx(explained, abs=2e-4)
+    np.testing.assert_allclose(np.asarray(result.S1)[0], s1, atol=2e-4)
+    assert np.all(np.isnan(np.asarray(result.S1)[1]))
+    assert np.isnan(float(result.explained_variance[1]))
+
+
+def test_indices_equals_analyze_bitwise_for_a_padded_row_count():
+    problem = jaxgsa.Problem(["a", "b", "c"], [(0, 1)] * 3)
+    rng = np.random.default_rng(2)
+    X = jnp.asarray(rng.uniform(0, 1, (497, 3)).astype(np.float32))
+    Y = X[:, 0] + X[:, 1] ** 2 + 0.05 * jnp.asarray(rng.standard_normal(497).astype(np.float32))
+    result = pce.analyze(problem, X, Y, order=3, verbose=False)
+    assert isinstance(result, pce.PCEResult)
+    S1, ST, S2 = pce.indices(problem, X, Y, order=3)
+    assert np.array_equal(np.asarray(S1), np.asarray(result.S1))
+    assert np.array_equal(np.asarray(ST), np.asarray(result.ST))
+    assert np.array_equal(np.asarray(S2), np.asarray(result.S2), equal_nan=True)
