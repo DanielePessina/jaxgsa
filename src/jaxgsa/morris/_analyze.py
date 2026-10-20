@@ -25,7 +25,7 @@ from jax import Array
 
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
-from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
+from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints, draw_row_matrix
 from jaxgsa._core.entry import at_least, bootstrap_checks, prepare
 from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
 from jaxgsa._core.irregular import (
@@ -582,7 +582,7 @@ def analyze(
         # Pre-generate all R bootstrap index sets, sampling with replacement.
         # Named resample_idx, not indices: `indices` is this module's public
         # transformable entry point.
-        resample_idx = jax.random.randint(key, shape=(n_bootstrap, r), minval=0, maxval=r)
+        resample_idx = draw_row_matrix(key, n_bootstrap, r)
 
         # One chunk materialises cs copies of the (r, D, T, K) effects tensor,
         # so a large T*K would otherwise exhaust device memory at the caller's

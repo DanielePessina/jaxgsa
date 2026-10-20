@@ -368,20 +368,26 @@ def test_the_bootstrap_batches_slices_and_resamples(monkeypatch):
     from jaxgsa.sobol import _chunking as sobol_chunking
 
     per_slice = sobol_chunking.slice_elements(sr.base_n, sr.n_params, sr.calc_second_order)
-    budget = per_slice * Y.dtype.itemsize * 4 * 2
+    # The resample width follows the count-row cost model: the draw, the
+    # randint transient and the count row, plus the weighted BA rows per slice.
+    per_resample = sr.base_n * (28 + Y.dtype.itemsize)
+    if sr.calc_second_order:
+        per_resample += sr.base_n * sr.n_params * Y.dtype.itemsize * 4
+    budget = per_resample * 2
+    assert per_slice > 0
     monkeypatch.setattr(sobol_chunking, "get_memory_budget", lambda: budget)
 
     widths: list[int] = []
     resample_widths: list[int] = []
     real_get = sobol_bootstrap._resample_kernel
 
-    def recording_get(estimator: str, calc_second_order: bool, single: bool):
-        kernel = real_get(estimator, calc_second_order, single)
+    def recording_get(estimator: str, calc_second_order: bool, n_params: int):
+        kernel = real_get(estimator, calc_second_order, n_params)
 
-        def recorder(idx, A, AB, BA, B):
+        def recorder(keys, A, AB, BA, B):
             widths.append(int(A.shape[0]))
-            resample_widths.append(int(idx.shape[0]))
-            return kernel(idx, A, AB, BA, B)
+            resample_widths.append(int(keys.shape[0]))
+            return kernel(keys, A, AB, BA, B)
 
         return recorder
 

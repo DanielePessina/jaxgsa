@@ -39,6 +39,61 @@ from jaxgsa._core.result import CIInfo
 _T = TypeVar("_T")
 
 
+def resample_keys(key: Array, n_bootstrap: int) -> Array:
+    """Return one PRNG key per bootstrap draw.
+
+    Draw ``r`` depends only on ``keys[r]``. Changing the chunk width or the
+    memory budget therefore changes no draw. The array of keys costs almost
+    nothing, unlike a pre-generated ``(R, N)`` index matrix.
+
+    Args:
+        key: The caller's PRNG key.
+        n_bootstrap: Number of draws, ``R``.
+
+    Returns:
+        A key array of shape ``(R,)``.
+    """
+    return jax.random.split(key, n_bootstrap)
+
+
+def draw_rows(key: Array, n: int) -> Array:
+    """Draw ``n`` row indices in ``[0, n)`` with replacement, from one draw key.
+
+    The dtype is ``int32`` on purpose. The default is ``int64`` under x64,
+    which doubles the memory of the draw.
+
+    Args:
+        key: One key from :func:`resample_keys`.
+        n: Number of rows, ``N``.
+
+    Returns:
+        An ``int32`` array of shape ``(n,)``.
+    """
+    return jax.random.randint(key, (n,), 0, n, dtype=jnp.int32)
+
+
+@partial(jax.jit, static_argnames=("n_bootstrap", "n"))
+def draw_row_matrix(key: Array, n_bootstrap: int, n: int) -> Array:
+    """Draw all bootstrap resamples as an ``(R, n)`` ``int32`` index matrix.
+
+    Row ``r`` is :func:`draw_rows` of ``resample_keys(key, R)[r]``. The rows
+    are drawn one at a time with ``lax.map``, so the transient of the random
+    bit generator is one row, not the whole matrix (measured 6x the matrix
+    for a single batched ``randint``). Use this where the method needs the
+    full index matrix. Methods that can chunk should call
+    :func:`resample_keys` and :func:`draw_rows` per chunk.
+
+    Args:
+        key: The caller's PRNG key.
+        n_bootstrap: Number of resamples, ``R``.
+        n: Number of rows to draw from, which is also the resample size.
+
+    Returns:
+        An ``int32`` array of shape ``(R, n)``.
+    """
+    return jax.lax.map(lambda k: draw_rows(k, n), resample_keys(key, n_bootstrap))
+
+
 @partial(jax.jit, static_argnames=("replicate_fn", "static", "n_bootstrap"))
 def _mapped_draws(
     key: Array,

@@ -33,7 +33,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints, interval
+from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints, interval, resample_keys
 from jaxgsa._core.entry import (
     bootstrap_checks,
     check_scalars,
@@ -824,8 +824,8 @@ def _analyze_bootstrap(
     The draws follow the same shape one level deeper. The atomic unit is one
     estimator call on one slice and one resample; the resamples of a slice are
     vmapped in a bounded batch, that pair is vmapped over a chunk of slices,
-    and both loops run on the host. The pre-generated random index matrix is
-    sliced contiguously, so changing either width does not change any draw.
+    and both loops run on the host. Each draw has its own key, so changing
+    either width does not change any draw.
     When ``keep_replicates=False``, each output chunk is reduced to CI
     endpoints before the next chunk is processed. Keeping replicates opts in
     to assembling the full public draw arrays.
@@ -839,11 +839,10 @@ def _analyze_bootstrap(
     base_n = A_flat.shape[1]
     total = T * K
 
-    # Pre-generate all R bootstrap index sets (sampling with replacement).
-    # Shared across (T, K) slices so every output sees the same resamples.
-    # Named resample_idx, not indices: `indices` is this module's public
-    # transformable entry point.
-    resample_idx = jax.random.randint(key, shape=(n_bootstrap, base_n), minval=0, maxval=base_n)
+    # One key per draw: draw r depends on draw_keys[r] alone, so the chunk
+    # widths change no draw and no (R, N) index matrix is ever built. Shared
+    # across (T, K) slices so every output sees the same resamples.
+    draw_keys = resample_keys(key, n_bootstrap)
 
     S1_out, ST_out, S2_raw = _point_indices_3d(
         A_flat,
@@ -901,7 +900,7 @@ def _analyze_bootstrap(
         B_chunk = pad_slice_axis(B_flat[start:end], cs)
         BA_chunk = None if BA_flat is None else pad_slice_axis(BA_flat[start:end], cs)
         s1_chunk, st_chunk, s2_chunk = _bootstrap_indices(
-            resample_idx,
+            draw_keys,
             A_chunk,
             AB_chunk,
             BA_chunk,

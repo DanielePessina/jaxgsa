@@ -61,7 +61,7 @@ from jax.typing import DTypeLike
 
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
-from jaxgsa._core.bootstrap import interval
+from jaxgsa._core.bootstrap import draw_row_matrix, interval
 from jaxgsa._core.entry import (
     _user_stacklevel,
     at_least,
@@ -1467,7 +1467,7 @@ def analyze(
     identity = jnp.arange(N, dtype=jnp.int32)[None, :]
     if n_bootstrap > 0:
         assert key_boot is not None  # a missing key was refused above
-        boot = jax.random.randint(key_boot, (n_bootstrap, N), 0, N, dtype=jnp.int32)
+        boot = draw_row_matrix(key_boot, n_bootstrap, N)
         all_idx = jnp.concatenate([identity, boot], axis=0)
     else:
         all_idx = identity

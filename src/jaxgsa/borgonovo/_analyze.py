@@ -64,7 +64,7 @@ from jax import Array
 
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
-from jaxgsa._core.bootstrap import interval
+from jaxgsa._core.bootstrap import draw_row_matrix, interval
 from jaxgsa._core.entry import (
     at_least,
     bootstrap_checks,
@@ -1163,7 +1163,7 @@ def analyze(
         # key is required by then, checked in the checks= above (fires
         # before prepare() has done any work).
         assert key is not None
-        boot = jax.random.randint(key, (n_bootstrap, N), 0, N, dtype=jnp.int32)
+        boot = draw_row_matrix(key, n_bootstrap, N)
         all_idx = jnp.concatenate([identity, boot], axis=0)
     else:
         all_idx = identity

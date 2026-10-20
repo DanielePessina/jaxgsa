@@ -84,6 +84,7 @@ Some fixes change index values where the old values were wrong. See Fixed.
 - `hsic.analyze` and `hsic.indices`: the median bandwidth now uses the median of the non-zero pairwise squared distances. Before, an atom holding more than half of the sample (for example 75% zeros) pulled the median to 0 and the kernel only tested equality. Columns with no tied values are unchanged. The 1.1.2 warning now fires on near-ties instead (median non-zero squared distance below 1e-6 times the variance), because those still collapse. The binary-column exemption is gone: a two-valued column now gets a real bandwidth.
 - `pawn.analyze` bootstrap intervals with `ci_method="quantile"` were biased upward. The KS maximum is not differentiable at a zero gap, so the replicates sit above the point estimate (null parameter, N=1000: point 0.072, replicate mean 0.111). The draws are now mean-centred on the point estimate before the quantiles are read. `ci.replicates` keeps the raw draws. The interval is not a confidence interval for the population index.
 - `pawn` KS statistics were off by 1 ulp because XLA turns the division into a reciprocal multiply. A constant output gave 6e-8 instead of 0. The gap is now computed from exact integer counts. Cumulative bin counts are int32, so they stay exact above N=2^24.
+- `sobol.analyze` with `n_bootstrap` no longer builds a full `(R, N)` index matrix outside the memory budget. At N=2^17, D=2, R=1000 and a 512 MiB budget, peak memory above the baseline falls from about 2800 MiB to about 450 MiB (146 MiB at a 64 MiB budget). The resample width now follows the budget.
 
 ### Changed values
 
@@ -118,6 +119,8 @@ Some fixes change index values where the old values were wrong. See Fixed.
 - `hsic` with tied values in an input or output: `R2` and `T` change because the bandwidth changes. Spike output (75% zeros), N=400: `R2` 0.0151 to 0.0066 and `T` 0.0304 to 0.0151 for the second parameter. Two-valued inputs change `T` only. Data with no ties is unchanged.
 - `pawn_conf` with `ci_method="quantile"` and `n_bootstrap>0` moves down by the mean bootstrap excess: about 0.03 for a null parameter at N=1000, about 0.006 for a strong one. The width is unchanged. `"gaussian"` intervals do not change.
 - `pawn` point values and bootstrap draws change by at most 1 ulp (6e-8 in float32). A constant output now gives exactly 0.
+- Bootstrap draws now come from one key per resample (`split(key, R)`) in `sobol`, `kucherenko`, `morris`, `borgonovo`, `dgsm` and `optimal_transport`. For a fixed `key`, every bootstrap replicate and every confidence interval changes. The intervals are statistically equivalent. Point estimates do not change. A draw no longer depends on chunk width or memory budget.
+- `sobol` bootstrap replicates now use count-weighted moments, not a row gather. In float32 the replicates differ from a gather on the same draws by at most about 3e-6, and in x64 by about 4e-15. An input the model never reads now gives a first-order replicate of exactly 0 for `saltelli-jansen` and `mauntz-kucherenko`.
 
 ### Performance
 
@@ -163,6 +166,7 @@ Some fixes change index values where the old values were wrong. See Fixed.
   1.1.2: at most about 1.5e-7 absolute in float32, and about 2e-16 absolute
   in x64. `borgonovo` with categorical inputs shares the change.
 - `hdmr.analyze`, `pce.analyze` and `shapley.analyze` run bootstrap replicates in one cached `jax.jit` with a sequential `lax.map`, not a Python loop. The program compiles once and a repeat call compiles nothing. Steady state is faster: about 7 times for HDMR (0.95 s to 0.13 s at N=1024, 50 replicates) and about 1.1 times for PCE. The first call is not faster, because compile time dominates it. Peak memory at N=32768 with 20 HDMR replicates rose from 478 to 576 MB.
+- `sobol` bootstrap runs on a count matrix and one matrix product per chunk. Measured on this machine (loaded, so read as ratios): N=2^17, D=2, R=1000 went from 3.0 s to 1.7 s. The design measured 2.8x at D=10 and 6.8x at D=50.
 
 ### Docs
 

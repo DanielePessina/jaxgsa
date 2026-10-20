@@ -52,13 +52,12 @@ from __future__ import annotations
 
 from typing import Literal, cast
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.bootstrap import interval
+from jaxgsa._core.bootstrap import draw_row_matrix, interval
 from jaxgsa._core.entry import _user_stacklevel, bootstrap_checks, prepare
 from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
 from jaxgsa._core.irregular import (
@@ -403,9 +402,7 @@ def analyze(
     if n_bootstrap > 0:
         assert key is not None  # refused by the missing-key check above
         n_kept = f_joint.shape[0]
-        idx = np.asarray(
-            jax.random.randint(key, shape=(n_bootstrap, n_kept), minval=0, maxval=n_kept)
-        )
+        idx = np.asarray(draw_row_matrix(key, n_bootstrap, n_kept))
 
         # One transpose makes each resample's gather contiguous.
         f_sub_t = np.ascontiguousarray(f_sub.transpose(1, 0, 2)) if all_subsets else None

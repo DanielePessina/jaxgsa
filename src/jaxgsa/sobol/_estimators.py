@@ -560,3 +560,145 @@ def second_order_kernel(
         return S1, ST, S2
 
     return kernel
+
+
+# ---------------------------------------------------------------------------
+# Weighted-moment forms, for the bootstrap
+# ---------------------------------------------------------------------------
+#
+# A bootstrap resample is a vector of counts ``c`` (how often each base row was
+# drawn). Every estimator above is a function of sample means, so a resample's
+# index is a function of the weighted means ``(c @ F) / N`` of a per-row
+# feature matrix ``F``. The features do not depend on the resample. The
+# bootstrap builds ``F`` once per slice and gets all resamples from one matrix
+# product, instead of gathering ``N`` rows per resample.
+#
+# The raw-moment variance below relies on ``A`` and ``B`` being standardized to
+# mean 0 and variance 1 before the estimators run (see
+# ``jaxgsa.sobol._analyze._separate_output_values``). Without that, the
+# difference ``E[x^2] - E[x]^2`` would lose digits for large output means.
+# Where an estimator can use a difference feature (``B (AB_j - A)``,
+# ``(A - AB_j)^2``), it does, so an inert input reads exactly 0.
+
+_N_SCALAR_COLUMNS = 5
+"""Leading feature columns: ``A``, ``B``, ``A^2``, ``B^2`` and ``A B``."""
+
+MomentFeatures = Callable[[Array, Array, Array, Array | None], Array]
+MomentFinalize = Callable[[Array, Array | None], tuple[Array, Array, Array | None]]
+
+
+def _scalar_features(A: Array, B: Array) -> list[Array]:
+    return [A[:, None], B[:, None], (A**2)[:, None], (B**2)[:, None], (A * B)[:, None]]
+
+
+def _blocks_saltelli_jansen(A: Array, AB: Array, B: Array, BA: Array | None) -> list[Array]:
+    return [B[:, None] * (AB - A[:, None]), (A[:, None] - AB) ** 2]
+
+
+def _blocks_jansen(A: Array, AB: Array, B: Array, BA: Array | None) -> list[Array]:
+    return [(B[:, None] - AB) ** 2, (A[:, None] - AB) ** 2]
+
+
+def _blocks_mauntz_kucherenko(A: Array, AB: Array, B: Array, BA: Array | None) -> list[Array]:
+    return [B[:, None] * (AB - A[:, None]), A[:, None] * (A[:, None] - AB)]
+
+
+def _blocks_pair(A: Array, AB: Array, B: Array, BA: Array | None) -> list[Array]:
+    return [AB, AB**2, B[:, None] * AB, A[:, None] * AB]
+
+
+def _blocks_azzini_rosati(A: Array, AB: Array, B: Array, BA: Array | None) -> list[Array]:
+    assert BA is not None
+    u = AB - A[:, None]
+    v = B[:, None] - BA
+    return [u * v, u**2 + v**2, (A - B)[:, None] ** 2 + (BA - AB) ** 2]
+
+
+_MOMENT_BLOCKS: dict[str, Callable[[Array, Array, Array, Array | None], list[Array]]] = {
+    "saltelli-jansen": _blocks_saltelli_jansen,
+    "jansen": _blocks_jansen,
+    "mauntz-kucherenko": _blocks_mauntz_kucherenko,
+    "janon-monod": _blocks_pair,
+    "martinez": _blocks_pair,
+    "azzini-rosati": _blocks_azzini_rosati,
+}
+
+
+def _moment_inv_var(s: Array) -> Array:
+    """Return ``1 / Var(concat(A, B))`` from weighted scalar means ``(R, 5)``."""
+    pooled_mean = (s[:, 0] + s[:, 1]) / 2.0
+    var = (s[:, 2] + s[:, 3]) / 2.0 - pooled_mean**2
+    return jnp.where(var == 0, jnp.nan, 1.0 / jnp.where(var == 0, 1.0, var))
+
+
+def _moment_paired_ratio(mu: Array, mv: Array, muv: Array, mu2: Array, mv2: Array) -> Array:
+    mean_uv = (mu + mv) / 2.0
+    return _safe_ratio(muv - mean_uv**2, (mu2 + mv2) / 2.0 - mean_uv**2)
+
+
+def _moment_correlation(mu: Array, mv: Array, muv: Array, mu2: Array, mv2: Array) -> Array:
+    spread = jnp.sqrt((mu2 - mu**2) * (mv2 - mv**2))
+    return _safe_ratio(muv - mu * mv, spread)
+
+
+def _moment_first_total(estimator: str, m: Array, D: int) -> tuple[Array, Array]:
+    """Map weighted feature means ``(R, P)`` to ``(S1, ST)``, each ``(R, D)``."""
+    s = m[:, :_N_SCALAR_COLUMNS]
+    blocks = m[:, _N_SCALAR_COLUMNS:].reshape(m.shape[0], -1, D)
+    mA, mB, mA2, mB2 = (s[:, i, None] for i in range(4))
+    if estimator == "azzini-rosati":
+        den = blocks[:, 2]
+        return _safe_ratio(2.0 * blocks[:, 0], den), _safe_ratio(blocks[:, 1], den)
+    if estimator in ("janon-monod", "martinez"):
+        mAB, mAB2, mBAB, mAAB = blocks[:, 0], blocks[:, 1], blocks[:, 2], blocks[:, 3]
+        ratio = _moment_paired_ratio if estimator == "janon-monod" else _moment_correlation
+        return (
+            ratio(mB, mAB, mBAB, mB2, mAB2),
+            1.0 - ratio(mA, mAB, mAAB, mA2, mAB2),
+        )
+    inv_var = _moment_inv_var(s)[:, None]
+    if estimator == "jansen":
+        return 1.0 - 0.5 * blocks[:, 0] * inv_var, 0.5 * blocks[:, 1] * inv_var
+    if estimator == "saltelli-jansen":
+        return blocks[:, 0] * inv_var, 0.5 * blocks[:, 1] * inv_var
+    return blocks[:, 0] * inv_var, blocks[:, 1] * inv_var  # mauntz-kucherenko
+
+
+def moment_form(
+    estimator: str, calc_second_order: bool, D: int
+) -> tuple[MomentFeatures, MomentFinalize]:
+    """Return the weighted-moment form of a named estimator, for the bootstrap.
+
+    ``features(A, AB, B, BA)`` maps one slice to a per-row feature matrix of
+    shape ``(N, P)``. With resample counts ``C`` of shape ``(R, N)``, the
+    weighted means are ``m = C @ F / N``, shape ``(R, P)``. ``finalize(m,
+    cross)`` maps them to ``(S1, ST, S2)``. ``cross`` is ``C-weighted
+    BA.T @ AB / N`` with shape ``(R, D, D)`` when ``calc_second_order``, else
+    ``None``. With ``C`` all ones this reproduces the point kernel.
+
+    Args:
+        estimator: One of :data:`ESTIMATORS`.
+        calc_second_order: Whether the design carries the BA blocks.
+        D: Number of input parameters.
+
+    Returns:
+        The ``(features, finalize)`` pair. ``S2`` is ``None`` when
+        ``calc_second_order`` is false.
+    """
+    blocks_fn = _MOMENT_BLOCKS[estimator]
+
+    def features(A: Array, AB: Array, B: Array, BA: Array | None) -> Array:
+        cols = _scalar_features(A, B) + blocks_fn(A, AB, B, BA)
+        return jnp.concatenate(cols, axis=1)
+
+    def finalize(m: Array, cross: Array | None) -> tuple[Array, Array, Array | None]:
+        S1, ST = _moment_first_total(estimator, m, D)
+        if not calc_second_order:
+            return S1, ST, None
+        assert cross is not None
+        inv_var = _moment_inv_var(m[:, :_N_SCALAR_COLUMNS])[:, None, None]
+        Vjk = (cross - m[:, 4, None, None]) * inv_var
+        S2 = Vjk - S1[:, :, None] - S1[:, None, :]
+        return S1, ST, S2
+
+    return features, finalize
