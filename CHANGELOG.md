@@ -63,8 +63,11 @@ Some fixes change index values where the old values were wrong. See Fixed.
   example, at `N=60, M=22` one edge moves: Borgonovo delta changes by 0.013
   (4.2% relative) and OT `ot` by 0.021 (4.1% relative). At the same pair,
   Borgonovo `S1` changes by 0.043 (5.9% relative), `delta_conf` by 0.019
-  and `ot_conf` by 0.029. Multivariate `ot` changes by 0.020. The sizes
-  are the same in float32 and float64. `(N=1000, M=7)` and
+  and `ot_conf` by 0.029. Multivariate `ot` changes by 0.020. Other outputs
+  move too: OT `ot_dummy` by 0.029 (6.3% relative; this can change
+  `above_dummy`), OT `advective` by 0.020 (5.4%), OT `S1` by 0.041 (5.4%),
+  OT `diffusive` by 0.0034 (1.2%) and Borgonovo `S1_conf` by 0.053
+  (5.9%). The sizes are the same in float32 and float64. `(N=1000, M=7)` and
   `(N=997, M=49)` are bitwise unchanged. At the changed pairs the results
   can differ from SALib by one row per class.
 - `pawn` bin edges are now the exact values `k / n_classes`. Before, an
