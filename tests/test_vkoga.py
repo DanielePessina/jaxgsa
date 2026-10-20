@@ -24,6 +24,7 @@ import warnings
 from typing import Any
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import single_precision_warning
@@ -31,6 +32,7 @@ from conftest import single_precision_warning
 import jaxgsa
 from jaxgsa import JaxgsaWarning
 from jaxgsa.problem import Problem
+from jaxgsa.vkoga import VKOGAResult
 
 # Closed-form linear-Gaussian reference, shared with test_kucherenko.py and the
 # custom-sampler tests. The correlated x64 fit is cached for the session.
@@ -1145,8 +1147,8 @@ def test_degenerate_training_inputs_raise():
         with pytest.raises(ValueError, match=message):
             jaxgsa.vkoga.analyze(
                 problem,
-                Xd,
-                y,
+                jnp.asarray(Xd),
+                jnp.asarray(y),
                 gamma=3.0,
                 ridge=1e-6,
                 max_centers=64,
@@ -1162,7 +1164,10 @@ def test_duplicate_rows_are_still_accepted():
     X = np.asarray(jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 128, seed=4))
     X = np.concatenate([X, X[:8]])
     with single_precision_warning():
-        result = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, _uniform_scalar(X), **SMALL_KWARGS)
+        result = jaxgsa.vkoga.analyze(
+            UNIFORM_PROBLEM, jnp.asarray(X), jnp.asarray(_uniform_scalar(X)), **SMALL_KWARGS
+        )
+    assert isinstance(result, VKOGAResult)
     assert np.all(np.isfinite(np.asarray(result.S_TC)))
 
 
@@ -1170,7 +1175,10 @@ def test_independent_inputs_have_exactly_zero_correlated_part():
     """With independent inputs S_U equals S_TC, so S_C is exactly 0 and S_IU = S_TU - S_TC."""
     X = jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 256, seed=5)
     with single_precision_warning():
-        result = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, _uniform_scalar(X), **SMALL_KWARGS)
+        result = jaxgsa.vkoga.analyze(
+            UNIFORM_PROBLEM, X, jnp.asarray(_uniform_scalar(X)), **SMALL_KWARGS
+        )
+    assert isinstance(result, VKOGAResult)
     np.testing.assert_array_equal(np.asarray(result.S_C), 0.0)
     np.testing.assert_allclose(
         np.asarray(result.S_IU), np.asarray(result.S_TU) - np.asarray(result.S_TC), atol=1e-12

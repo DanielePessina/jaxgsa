@@ -9,8 +9,8 @@ Some fixes change index values where the old values were wrong. See Fixed.
 - `vkoga.analyze` now raises a `ValueError` when an input column of `X` is
   constant, equal to another column, or a linear combination of earlier
   columns (same check as `pce` and `hdmr`). Before, a duplicated input gave
-  `S1` 0.86 against a true 0.79, and a constant input gave `ST` 0.18 against
-  a true 0. Duplicate rows are still allowed.
+  `S_TC` 0.86 against a true 0.79, and a constant input gave `S_TC` 0.18
+  against a true 0. Duplicate rows are still allowed.
 - `vkoga` with independent inputs now sets `S_U = S_TC`, so `S_C` is exactly
   0. Before, the fitted component functions left a spurious `S_C` up to
   8e-3 (Ishigami, `x2`) and an `S_IU` of 0.012 where the exact value is 0.
@@ -84,7 +84,8 @@ Some fixes change index values where the old values were wrong. See Fixed.
 
 ### Changed values
 
-- `vkoga` with independent inputs: `S_C` is now exactly 0 and `S_IU` drops (Ishigami `x2` `S_IU` 0.0119 to 0.0035). See Fixed.
+- `vkoga` with independent inputs: `S_C` is now exactly 0 and `S_IU` drops
+  (Ishigami `x2` `S_IU` 0.0119 to 0.0035). See Fixed.
 - `vkoga` with correlated inputs and a non-Gaussian marginal (uniform and
   other Legendre cases) now fits its component functions at degree 10, not 6.
   This removes a truncation bias in `S_U`, `S_C` and `S_IU` (Ishigami with
@@ -114,8 +115,7 @@ Some fixes change index values where the old values were wrong. See Fixed.
 
 ### Performance
 
-- `vkoga` cross-validation no longer recompiles for each new dataset. This
-  The scorer compiles once, so repeated analyses skip about 0.5 s of compile
+- `vkoga` cross-validation no longer recompiles for each new dataset. The scorer compiles once, so repeated analyses skip about 0.5 s of compile
   time. Wall-clock gains on small cases are within run-to-run noise.
 - The PCE fit is slower, because QR does more work than the normal
   equations. Steady-state `analyze` takes 2 to 3 times longer at large sizes:
