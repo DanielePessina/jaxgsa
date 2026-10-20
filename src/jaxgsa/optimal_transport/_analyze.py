@@ -51,12 +51,13 @@ from __future__ import annotations
 
 import functools
 import warnings
-from typing import Any, Literal, NamedTuple, cast
+from typing import Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
+from jax.typing import DTypeLike
 
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
@@ -177,7 +178,9 @@ def _aggregate_normalized(per_class: Array, weights: Array, V: Array) -> Array:
     return jnp.where(jnp.isnan(V), jnp.nan, normalized)
 
 
-def _quantile_rank_split(counts: Array, N: int, dtype: Any = None) -> tuple[Array, Array, Array]:
+def _quantile_rank_split(
+    counts: Array, N: int, dtype: DTypeLike | None = None
+) -> tuple[Array, Array, Array]:
     """Exact conditional-quantile coupling for every full-sample mass point.
 
     Both empirical quantile functions are piecewise constant: the
