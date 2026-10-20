@@ -127,3 +127,50 @@ def test_ridge_has_a_measurable_effect_at_any_n(x64):
         # to the Gram diagonal, which grows with N.
         assert err[1.0] > err[1e-2] + 0.05
         assert err[1e-2] > err[0.0] + 1e-4
+
+
+@pytest.mark.parametrize(("batch_size", "slice_chunk_size"), [(None, None), (300, 2)])
+def test_dual_pair_solve_matches_dense_solve(x64, monkeypatch, batch_size, slice_chunk_size):
+    """The sample-space pair solve gives the exact ridge solution.
+
+    At D = 6 and 9 intervals there are 15 * 144 = 2160 pair coefficients for
+    1024 rows, the case the dual solve is for. Measured agreement with the
+    dense solve is 4e-11 in S.
+    """
+    from jaxgsa.hdmr import _fit
+
+    D, N = 6, 1024
+    X = np.random.default_rng(0).random((N, D))
+    Y = np.stack(
+        [
+            np.sin(2 * np.pi * X[:, 0])
+            + X[:, 1] ** 2
+            + 2 * X[:, 2] * X[:, 3]
+            + k * X[:, 4] * X[:, 5]
+            for k in range(3)
+        ],
+        axis=1,
+    )
+    problem = Problem(names=[f"x{i}" for i in range(D)], bounds=[(0.0, 1.0)] * D)
+    assert _fit._pair_solver(N, 3, 15, 144, 8) == "dual"
+    S = {}
+    for kind in ("dense", "dual"):
+        monkeypatch.setattr(_fit, "_pair_solver", lambda *_, k=kind: k)
+        S[kind] = np.asarray(
+            _fit_quiet(problem, X, Y, batch_size, slice_chunk_size).S, dtype=float
+        )
+    np.testing.assert_allclose(S["dual"], S["dense"], rtol=1e-7, atol=1e-9)
+
+
+def _fit_quiet(problem, X, Y, batch_size, slice_chunk_size) -> HDMRResult:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return _fit(
+            problem,
+            X,
+            Y,
+            order=2,
+            n_intervals=9,
+            batch_size=batch_size,
+            slice_chunk_size=slice_chunk_size,
+        )

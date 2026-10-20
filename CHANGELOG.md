@@ -2,6 +2,10 @@
 
 ## 1.2.0 (unreleased)
 
+### Performance
+
+- `hdmr.analyze` at `order=2` in float64 now solves the pair terms in sample space when there are more pair coefficients than rows and the solve fits the memory budget. It gives the same ridge solution as the direct solve (S agrees to 4e-11 in the tests), and one factorization serves every output. Measured at D = 23, 12 splines (`n_intervals=9`), N = 4096, 291 outputs, 2 GiB budget: 21 s and 3.2 GB peak. 1.2.0b2 used conjugate gradients there and did not finish in 26 min. Peak memory of the solve is about 2 x N^2 x 8 bytes (4.3 GB at N = 16,384), so N = 16,384 needs a budget of about 4.5 GiB; below that the fit falls back to conjugate gradients.
+
 ### Changed
 
 - `hdmr.analyze` now raises `ValueError` for `order=3`. Third-order terms were fitted one at a time and counted the same leftover variance more than once, so the indices summed above 1. Use `order=1` or `order=2`. `hdmr.indices` raises too.

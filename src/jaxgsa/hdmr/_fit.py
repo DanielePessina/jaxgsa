@@ -38,6 +38,7 @@ lane is an independent lane -- so it cannot move a number by more than the
 reassociation that adding a zero to a float32 reduction can cause.
 """
 
+import functools
 import math
 import warnings
 from collections.abc import Callable
@@ -628,18 +629,219 @@ def _acc_gram22(B2_b: Array, G22: Array) -> Array:
     return G22 + B2f.T @ B2f
 
 
-def _dense_pair_fits(n2: int, m2: int, itemsize: int) -> bool:
-    """Return whether to solve the projected pair system directly.
+def _pair_solver(N: int, L: int, n2: int, m2: int, itemsize: int) -> str:
+    """Choose how to solve the projected pair system.
 
-    Only in float64. The direct solve holds about three ``K x K`` arrays (the
-    Gram, its projected copy and the factor), with ``K = n2 * m2``, so it must
-    fit the memory budget. In float32 an underdetermined pair system (more
-    free coefficients than rows) makes the direct solve unstable: measured at
+    ``"dense"`` solves the ``K x K`` normal equations, ``K = n2 * m2``.
+    ``"dual"`` solves the same ridge problem as an ``N x N`` system in sample
+    space, which is smaller when there are more pair coefficients than rows.
+    Both give the exact ridge solution, so the smaller one is used when it fits
+    the memory budget: about three ``K x K`` arrays for ``"dense"``; two
+    ``N x N`` arrays (the projected kernel and its factor) plus the ``N x L``
+    residual and weights for ``"dual"``. ``"cg"`` is
+    the matrix-free fallback.
+
+    Direct solves run only in float64. In float32 an underdetermined pair
+    system (more free coefficients than rows) makes them unstable: measured at
     D = 15, N = 1024, test NRMSE 1.7 against 0.17 with CG, which stops early
     and so regularizes.
+
+    Args:
+        N: Number of rows.
+        L: Number of output lanes, padded.
+        n2: Number of pair terms.
+        m2: Pair basis size.
+        itemsize: Bytes per element of the working dtype.
+
+    Returns:
+        ``"dense"``, ``"dual"`` or ``"cg"``.
     """
+    if itemsize < 8:
+        return "cg"
     K = n2 * m2
-    return itemsize >= 8 and 3 * K * K * itemsize <= get_memory_budget()
+    budget = get_memory_budget()
+    dense_ok = 3 * K * K * itemsize <= budget
+    dual_ok = (2 * N * N + 2 * N * L) * itemsize <= budget
+    if dual_ok and (N < K or not dense_ok):
+        return "dual"
+    return "dense" if dense_ok else "cg"
+
+
+@jax.jit
+def _residual1(
+    B1_b: Array, C1_c: Array, Y_bc: Array, w: Array, shift_c: Array, mean_z_c: Array
+) -> Array:
+    """Return the first-order residual ``Y - f0 - B1 C1`` for one block.
+
+    Args:
+        B1_b: Masked first-order basis, shape ``(b, m1, n1)``.
+        C1_c: First-order coefficients, shape ``(cs, m1, n1)``.
+        Y_bc: This block of Y, shape ``(b, cs)``.
+        w: Row mask, shape ``(b,)``.
+        shift_c: The first row of Y for these lanes, shape ``(cs,)``.
+        mean_z_c: Mean of the shifted response per lane, shape ``(cs,)``.
+
+    Returns:
+        The residual, shape ``(b, cs)``, zero on padded rows.
+    """
+    Y_res = (Y_bc - shift_c[None, :]) - mean_z_c[None, :]
+    return (Y_res - jnp.einsum("rmj,lmj->rl", B1_b, C1_c)) * w[:, None]
+
+
+@jax.jit
+def _pair_kernel_rows(B1_t: Array, B1: Array, inv_lam: Array) -> Array:
+    """Rows of the pair kernel ``sum_p (G_i o G_j) / lam_p``.
+
+    A pair basis is the tensor product of two first-order bases, so its row
+    Gram is the elementwise product of theirs: ``B2_p B2_p^T = G_i o G_j``
+    with ``G_i = B1_i B1_i^T``. The ``N x K`` pair basis is never built.
+
+    Args:
+        B1_t: First-order basis of these rows, shape ``(t, m1, n1)``.
+        B1: First-order basis of all rows, shape ``(N, m1, n1)``.
+        inv_lam: ``1 / lam_p`` on the upper triangle, zero elsewhere,
+            shape ``(n1, n1)``.
+
+    Returns:
+        The kernel rows, shape ``(t, N)``.
+    """
+    G = jnp.einsum("tmi,nmi->itn", B1_t, B1)
+    # Two steps, so no (n1, n1, t, N) intermediate is ever formed.
+    H = jnp.einsum("ij,jtn->itn", inv_lam, G)
+    return jnp.sum(G * H, axis=0)
+
+
+@functools.partial(jax.jit, static_argnames=("t",))
+def _dual_pair_weights(B1: Array, inv_lam: Array, U: Array, Y_res: Array, t: int) -> Array:
+    """Return ``P1 (P1 K2 P1 + I)^-1 y`` for every lane.
+
+    ``K2`` is the pair kernel of :func:`_pair_kernel_rows` and
+    ``P1 = I - U U^T`` removes the first-order span. The projected kernel is
+    written tile by tile into one ``N x N`` buffer, so the unprojected kernel
+    is never held: peak memory is that buffer plus its Cholesky factor.
+
+    Args:
+        B1: First-order basis of the real rows, shape ``(N, m1, n1)``.
+        inv_lam: ``1 / lam_p`` on the upper triangle, shape ``(n1, n1)``.
+        U: Orthonormal basis of the first-order span, shape ``(N, r)``.
+        Y_res: First-order residuals, shape ``(N, L)``.
+        t: Kernel rows per tile.
+
+    Returns:
+        The sample-space weights, shape ``(N, L)``.
+    """
+    N = B1.shape[0]
+    n_tiles = -(-N // t)
+    Np = n_tiles * t
+    # Padded rows have a zero basis, so their kernel rows and columns are zero
+    # and the identity decouples them; their residual is zero too.
+    B1p, Up, Yp = (pad_rows(A, Np - N) for A in (B1, U, Y_res))
+
+    def rows(i: Array) -> Array:
+        return _pair_kernel_rows(jax.lax.dynamic_slice_in_dim(B1p, i * t, t), B1p, inv_lam)
+
+    def ku_tile(i: Array, KU: Array) -> Array:
+        return jax.lax.dynamic_update_slice_in_dim(KU, rows(i) @ Up, i * t, axis=0)
+
+    KU = jax.lax.fori_loop(0, n_tiles, ku_tile, jnp.zeros_like(Up))
+    # P1 K2 P1 = K2 - Z U^T - U Z^T with Z = K2 U - U (U^T K2 U) / 2.
+    Z = KU - 0.5 * Up @ (Up.T @ KU)
+    diag = jnp.arange(t)
+
+    def kp_tile(i: Array, Kp: Array) -> Array:
+        Zi = jax.lax.dynamic_slice_in_dim(Z, i * t, t)
+        Ui = jax.lax.dynamic_slice_in_dim(Up, i * t, t)
+        blk = rows(i) - Zi @ Up.T - Ui @ Z.T
+        blk = blk.at[diag, i * t + diag].add(1.0)
+        return jax.lax.dynamic_update_slice_in_dim(Kp, blk, i * t, axis=0)
+
+    Kp = jax.lax.fori_loop(0, n_tiles, kp_tile, jnp.zeros((Np, Np), dtype=B1.dtype))
+    Lc = jnp.linalg.cholesky(Kp, symmetrize_input=False)
+    a = jax.scipy.linalg.solve_triangular(Lc, Yp, lower=True)
+    a = jax.scipy.linalg.solve_triangular(Lc, a, lower=True, trans=1)
+    return (a - Up @ (Up.T @ a))[:N]
+
+
+@jax.jit
+def _acc_pair_dual(B2_b: Array, a_b: Array, acc: Array) -> Array:
+    """Accumulate ``B2^T a`` for one row batch.
+
+    Args:
+        B2_b: Second-order basis, shape ``(b, m2, n2)``.
+        a_b: Sample-space weights of these rows, shape ``(b, L)``.
+        acc: Running product, shape ``(L, n2, m2)``.
+
+    Returns:
+        The updated product.
+    """
+    return acc + jnp.einsum("rmj,rl->ljm", B2_b, a_b)
+
+
+def _dual_pair_solve(
+    G1_flat: Array,
+    BtB: Array,
+    Y_res: Array,
+    X_p: Array,
+    w_full: Array,
+    rows: list[tuple[int, int]],
+    basis_args: tuple[int, Array, Array, Array, Array],
+    n_chunks: int,
+    cs: int,
+    ridge: float,
+) -> Array:
+    """Solve all pair terms jointly in sample space.
+
+    With ``Bt = P1 B2`` the projected pair basis and ``Lam`` the per-term
+    ridge, the pair coefficients are ``(Bt^T Bt + Lam)^-1 Bt^T y``. The
+    identity ``(B^T B + Lam)^-1 B^T = Lam^-1 B^T (B Lam^-1 B^T + I)^-1``
+    turns this into one ``N x N`` system, factored once for every lane. It is
+    the exact ridge solution, the same as :func:`_dense_pair_solve`, and is
+    smaller whenever there are more pair coefficients than rows.
+
+    Args:
+        G1_flat: Flat first-order Gram, shape ``(P, P)``.
+        BtB: Projected per-term Gram blocks, ``(n2, m2, m2)``, for the ridge
+            scale.
+        Y_res: First-order residuals of the real rows, shape ``(N, L)``.
+        X_p: Padded inputs, shape ``(N_pad, D)``.
+        w_full: Row mask, shape ``(N_pad,)``.
+        rows: Row batch bounds.
+        basis_args: ``(n_intervals, c2_idx, c3_idx, beta2, beta3)``.
+        n_chunks: Number of lane chunks.
+        cs: Lanes per chunk.
+        ridge: Relative ridge.
+
+    Returns:
+        The pair coefficients, ``(n_chunks, cs, m2, n2)``.
+    """
+    n_intervals, c2_idx, c3_idx, beta2, beta3 = basis_args
+    N = Y_res.shape[0]
+    n2, m2, _ = BtB.shape
+    build1 = _get_build_bases(n_intervals, False, False)
+    B1 = jnp.concatenate(
+        [build1(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)[0] for lo, hi in rows]
+    )[:N]
+    n1 = B1.shape[2]
+
+    # Orthonormal basis of the first-order span, with the eigenvalue cut of
+    # _first_order_pinv; a dropped direction gets a zero column.
+    w, V = jnp.linalg.eigh((G1_flat + G1_flat.T) / 2)
+    keep = w > jnp.sqrt(jnp.finfo(G1_flat.dtype).eps) * jnp.max(w)
+    U = B1.reshape(N, -1) @ (V * jnp.where(keep, 1.0 / jnp.sqrt(jnp.where(keep, w, 1.0)), 0.0))
+
+    lam = ridge * jnp.mean(jnp.diagonal(BtB, axis1=-2, axis2=-1), axis=-1)  # (n2,)
+    inv_lam = jnp.zeros((n1, n1), dtype=B1.dtype).at[c2_idx[:, 0], c2_idx[:, 1]].set(1.0 / lam)
+    itemsize = jnp.dtype(B1.dtype).itemsize
+    t = max(1, min(N, get_memory_budget() // (8 * n1 * N * itemsize)))
+    a = pad_rows(_dual_pair_weights(B1, inv_lam, U, Y_res, t), X_p.shape[0] - N)
+
+    build2 = _get_build_bases(n_intervals, True, False)
+    acc = jnp.zeros((a.shape[1], n2, m2), dtype=B1.dtype)
+    for lo, hi in rows:
+        B2_b = build2(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)[1]
+        acc = _acc_pair_dual(B2_b, a[lo:hi], acc)
+    C2 = acc / lam[None, :, None]
+    return C2.reshape(n_chunks, cs, n2, m2).transpose(0, 1, 3, 2)
 
 
 @jax.jit
@@ -1145,8 +1347,13 @@ def _fit_hdmr(
         colsum = jnp.zeros((m_basis, n_terms), dtype=dtype)
         BtY = [jnp.zeros((cs, n_terms, m_basis), dtype=dtype) for _ in lanes]
         G12 = jnp.zeros((P, m_basis, n_terms), dtype=dtype)
-        dense = term_order == 2 and _dense_pair_fits(n_terms, m_basis, jnp.dtype(dtype).itemsize)
+        kind = (
+            _pair_solver(N, n_chunks * cs, n_terms, m_basis, itemsize) if term_order == 2 else "cg"
+        )
+        dense = kind == "dense"
         G22 = jnp.zeros((n_terms * m_basis,) * 2 if dense else (0, 0), dtype=dtype)
+        # The dual solve needs the first-order residual in sample space.
+        res_rows: list[Array] = []
         # Solving order ``k`` needs the bases up through order ``k`` to
         # reconstruct the exact sequential residual. Do not build a higher
         # order basis that this pass cannot consume.
@@ -1159,6 +1366,23 @@ def _fit_hdmr(
                 G12 = _acc_cross_gram12(B_all[0], B_new, G12)
                 if dense:
                     G22 = _acc_gram22(B_new, G22)
+                if kind == "dual":
+                    res_rows.append(
+                        jnp.concatenate(
+                            [
+                                _residual1(
+                                    B_all[0],
+                                    C1_chunks[j],
+                                    Y_p[lo:hi, s:e],
+                                    w_full[lo:hi],
+                                    shift[s:e],
+                                    mean_z[s:e],
+                                )
+                                for j, (s, e) in enumerate(lanes)
+                            ],
+                            axis=1,
+                        )
+                    )
             for j, (s, e) in enumerate(lanes):
                 BtY[j] = _acc_higher_moment(
                     B_new,
@@ -1192,6 +1416,20 @@ def _fit_hdmr(
             if dense:
                 C2_stack = _dense_pair_solve(
                     G22, G12, A, BtB, jnp.stack(rhs), jnp.asarray(term_ridge, dtype=dtype)
+                )
+                rel = None
+            elif kind == "dual":
+                C2_stack = _dual_pair_solve(
+                    G1_flat,
+                    BtB,
+                    jnp.concatenate(res_rows)[:N],
+                    X_p,
+                    w_full,
+                    rows,
+                    (n_intervals, c2_idx, c3_idx, beta2, beta3),
+                    n_chunks,
+                    cs,
+                    term_ridge,
                 )
                 rel = None
             else:
