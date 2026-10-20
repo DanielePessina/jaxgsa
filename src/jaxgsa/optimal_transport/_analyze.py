@@ -1548,7 +1548,9 @@ def analyze(
             # The plan keeps the level counts of replicate 0, which give each real column's
             # own observed, non-empty level sizes to match.
             if plan.cat_counts0 is None:
-                raise RuntimeError("jaxgsa.optimal_transport: categorical level counts are missing.")
+                raise RuntimeError(
+                    "jaxgsa.optimal_transport: categorical level counts are missing."
+                )
             cat_counts0 = plan.cat_counts0  # (Dc, M)
             for j, key_j in enumerate(dummy_keys[1:]):
                 sizes_j = cat_counts0[j]
