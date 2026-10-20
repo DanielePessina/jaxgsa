@@ -125,7 +125,9 @@ Some fixes change index values where the old values were wrong. See Fixed.
 - `dgsm` Poincare constant for a one-sided truncated Gaussian is now continuous
   in the bound. Before, it jumped by about 8e-4 (relative) when the bound
   crossed 5 std from the mean (`low=5.0` gave 0.0874775, `low=5.001` gave
-  0.0875459). Bounds just below 5 std now change by up to about 7e-4 relative.
+  0.0875459). Bounds just below 5 std now change by up to about 1e-3 relative (1.05e-3 at
+  `low=5.0`). The change fades out below a bound of about -0.3 std: 3e-5 at
+  `low=3`, 2.7e-7 at `low=0`.
 
 ### Performance
 

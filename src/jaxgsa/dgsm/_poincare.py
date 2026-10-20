@@ -117,17 +117,19 @@ def _effective_support(
 ) -> tuple[float, float]:
     """Return the interval the spectral solve runs on.
 
-    Ordinarily each side is its declared bound, or ``mean +/- 8 std`` if the
-    side is open. That is exact for any bound near the mean, and it keeps a
-    truncation and its mirror image equal.
+    Ordinarily each side is its declared bound. An open side is the wider of
+    ``mean +/- 8 std`` and the ``1e-15`` tail quantile of the truncated
+    distribution. That is exact for any bound near the mean, and it keeps a
+    truncation and its mirror image equal. With both sides open, or both
+    closed, the bounds are used as they are.
 
     The declared bounds can instead sit far from the mass, where the Gaussian
     weight underflows (a bound past 8 std from the mean). Or one bound can
-    exclude the mean by more than 5 std. Then the mass piles against the bound nearest the mean,
-    and a fixed stand-in such as ``mean +/- 8 std`` can lie on the wrong side
-    of the declared bound on the other side. Only in that case are the bounds
-    cut to the quantiles of the truncated distribution itself that leave
-    ``1e-15`` of the mass in each tail. Those come from
+    exclude the mean by more than 5 std. Then the mass piles against the bound
+    nearest the mean, and a fixed stand-in such as ``mean +/- 8 std`` can lie
+    on the wrong side of the declared bound on the other side. In that case
+    both bounds are cut to the quantiles of the truncated distribution itself
+    that leave ``1e-15`` of the mass in each tail. Those come from
     :class:`scipy.stats.truncnorm`, which works in log space and stays
     accurate in the far tail.
 
