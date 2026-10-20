@@ -1,12 +1,16 @@
 # Changelog
 
-## 1.2.0 (unreleased)
+## 1.2.0b2 (2026-10-20, pre-release)
 
-Changes since 1.2.0b1.
+Pre-release for testing. 1.2.0b1 was tagged on GitHub but never published to PyPI: its release check failed on the HSIC overflow fixed below. This release contains everything in 1.2.0b1 plus the changes in this section.
 
 ### Added
 
 - `kucherenko.sample` now accepts categorical inputs when the problem has a custom sampler (`problem.with_sampler`). The sampler draws every conditional itself, so it can stratify on an input such as sex. Measured on a sex-stratified NLME case with exact values: all 40 indices within 1.5 standard errors over 8 seeds. Without a custom sampler a categorical input still raises.
+
+### Fixed
+
+- `hsic` median bandwidth in float32 at N = 65,535: an all-zero check compared the pair count with a Python integer that does not fit in int32, and raised `OverflowError`. Introduced in 1.2.0b1; 1.1.2 is not affected.
 
 ### Docs
 
