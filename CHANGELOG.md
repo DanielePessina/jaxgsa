@@ -1,6 +1,8 @@
 # Changelog
 
-## 1.2.0 (unreleased)
+## 1.2.0b3 (2026-10-20, pre-release)
+
+Pre-release for testing. Contains everything in 1.2.0b2 plus the changes in this section.
 
 ### Performance
 
