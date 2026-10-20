@@ -15,8 +15,8 @@ Some fixes change index values where the old values were wrong. See Fixed.
   projected off the first-order space and all pairs are solved together. Sum
   of `S` is 0.97 to 0.98 and test NRMSE is 0.07 to 0.17 at D = 5 to 23, for N
   = 1024 and 4096. Every `order >= 2` fit changes: pair and total-order
-  indices move (Ishigami `ST` of `x1` 0.59 to 0.57 and of `x2` 0.35 to 0.33
-  at 1000 rows). In-sample error above test error was the same overshoot, and
+  indices move (Ishigami at 1000 rows: `ST` of `x3` 0.287 to 0.221, analytic
+  0.244; `ST` of `x2` 0.339 to 0.325; `S1` does not move). In-sample error above test error was the same overshoot, and
   is gone. `result.C1` now holds the first-order coefficients plus the
   projection shift, so that `predict` is the sum of the terms. `predict` uses
   every term and ignores the F-test `select`. A third-order term is still not
@@ -110,10 +110,10 @@ Some fixes change index values where the old values were wrong. See Fixed.
 
 - `hdmr` `ridge` changes meaning and default (see Fixed). The default goes from
   0.01 to 1e-6 relative to the Gram diagonal, which matches the old effective
-  strength, so order-1 fits at the default move by less than 1e-3 in `S1`
-  (Ishigami, 1000 rows). An order-1 fit that sets `ridge` itself changes by
-  an amount that depends on `N`: `ridge=0.01` used to mean about 1e-6 here,
-  and now means 1% of the diagonal and can erase a smooth effect.
+  strength. Order-1 fits at the default move by 2e-4 or less (Ishigami, 1000
+  rows, `S1`). An order-1 fit that sets `ridge` itself changes by an amount
+  that depends on `N`. `ridge=0.01` used to mean about 1e-6 here and now means
+  1% of the diagonal: Ishigami `S1` of `x2` goes from 0.311 to 0.013.
 - `vkoga` with independent inputs: `S_C` is now exactly 0 and `S_IU` drops
   (Ishigami `x2` `S_IU` 0.0119 to 0.0035). See Fixed.
 - `vkoga` with correlated inputs and a non-Gaussian marginal (uniform and
