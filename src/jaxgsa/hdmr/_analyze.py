@@ -20,6 +20,7 @@ from jax import Array
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.bootstrap import bootstrap_draws, interval
 from jaxgsa._core.entry import (
+    _METHOD_ALIAS,
     ScalarCheck,
     at_least,
     bootstrap_checks,
@@ -489,7 +490,7 @@ def analyze(
     # (`on_invalid="propagate"`): the check reads the inputs and needs them
     # finite.
     if bool(jnp.all(jnp.isfinite(X))):
-        check_degenerate_inputs("jaxgsa.hdmr", X, problem.names)
+        check_degenerate_inputs(_METHOD_ALIAS.get() or "jaxgsa.hdmr", X, problem.names)
     if X.shape[0] < _RELIABLE_ROWS:
         warnings.warn(
             f"jaxgsa.hdmr: N={X.shape[0]} rows is below the {_RELIABLE_ROWS} the "

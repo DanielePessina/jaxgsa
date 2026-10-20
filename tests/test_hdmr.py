@@ -711,4 +711,4 @@ def test_degenerate_input_raises(kind):
         X[:, 2] = (X[:, 0] + X[:, 1]) / 2
     problem = Problem(["a", "b", "c"], [(0, 1)] * 3)
     with pytest.raises(ValueError, match="jaxgsa.hdmr"):
-        analyze_hdmr(problem, X, Y, verbose=False)
+        analyze_hdmr(problem, jnp.asarray(X), jnp.asarray(Y), verbose=False)

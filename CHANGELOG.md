@@ -90,7 +90,7 @@ Some fixes change index values where the old values were wrong. See Fixed.
   float32. A truncation of 7 sigma or wider at order 7 or lower moves by at
   most the old Hermite defect, 2e-4.
 - OT with categorical inputs, `mode="univariate"`, float64 only: `ot` changes by about 1e-11 to 1e-10 absolute (below 1e-9 relative), `diffusive` by up to a few 1e-9 relative, and the `ot` confidence interval endpoints by about 1e-10 absolute. The old values carried float32 rounding. Float32 runs and continuous inputs are bitwise unchanged.
-- Bootstrap intervals (`*_conf`) and `ci.replicates` of `hdmr`, `pce` and `shapley` change at rounding level. The row draws are the same. The largest change is 6e-5 in float32 (HDMR) and 4e-14 in float64. PCE and Shapley with the PCE backend are bitwise equal in float64. Point estimates do not change.
+- Bootstrap intervals (`*_conf`) and `ci.replicates` of `hdmr`, `pce` and `shapley` change at rounding level. The row draws are the same. The largest change is 6e-5 in float32 (HDMR) and 4e-14 in float64. PCE and Shapley with the PCE backend are equal to about 1e-16 in float64. Point estimates do not change.
 
 ### Performance
 
