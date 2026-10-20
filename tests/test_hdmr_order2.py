@@ -54,11 +54,19 @@ def test_order2_beats_order1_and_sum_of_s_stays_near_one(x64, D, N):
     X = rng.uniform(size=(2 * N, D_MAX))[:, :D]
     Y = _f(X)
     problem = Problem(names=[f"x{i}" for i in range(D)], bounds=[(0.0, 1.0)] * D)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        Xj, Yj = jnp.asarray(X), jnp.asarray(Y)
-        o1 = _fit(problem, Xj[:N], Yj[:N], order=1, n_intervals=3)
+    Xj, Yj = jnp.asarray(X), jnp.asarray(Y)
+    o1 = _fit(problem, Xj[:N], Yj[:N], order=1, n_intervals=3)
+    # Where the pair system is well posed the default call must be silent.
+    # Hard cells (D = 15 at N = 1024, D = 23) may warn: the joint solve stops
+    # at its iteration budget, or there are more pair coefficients than rows.
+    clean = D <= 9 or (D, N) == (15, 4096)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         o2 = _fit(problem, Xj[:N], Yj[:N], order=2, n_intervals=3)
+    if clean:
+        assert [str(w.message) for w in caught if "jaxgsa.hdmr" in str(w.message)] == []
+    if D == 23 and N == 1024:
+        assert any("pair coefficients" in str(w.message) for w in caught)
     test1 = _nrmse(o1.predict(Xj[N:]), Y[N:])
     test2 = _nrmse(o2.predict(Xj[N:]), Y[N:])
     train2 = _nrmse(o2.predict(Xj[:N]), Y[:N])
@@ -70,6 +78,10 @@ def test_order2_beats_order1_and_sum_of_s_stays_near_one(x64, D, N):
     # The model is exactly additive plus one pair, so sum S is about the
     # explained variance. It was 1.14 at D = 9 and 3.07 at D = 23 before.
     assert abs(float(np.sum(np.asarray(o2.S))) - 1.0) < 0.05
+    # The only true pair x3 x4 has analytic S2 about 0.034. Extra pairs absorb
+    # it when N is too small (0.005 at D = 23, N = 1024), so check the rest.
+    if (D, N) not in {(15, 1024), (23, 1024)}:
+        assert float(np.asarray(o2.S2)[3, 4]) == pytest.approx(0.034, abs=0.01)
 
 
 def test_ishigami_order2_matches_analytic_indices(x64):

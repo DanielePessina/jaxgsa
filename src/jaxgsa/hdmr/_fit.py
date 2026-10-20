@@ -347,6 +347,18 @@ def _pair_normal_pass(
     return [g2 - jnp.einsum("pmj,lp->ljm", A, g1) for g1, g2 in accs]
 
 
+_PAIR_ITER_FACTOR = 10
+
+
+def _pair_tol(eps: float) -> float:
+    """Return the relative residual the joint pair CG is held to.
+
+    A looser value (1e-4) was measured to stop early: at D = 15, N = 1024 the
+    test NRMSE was 0.14 against 0.05 at 1e-7.
+    """
+    return max(1e-7, 10 * eps)
+
+
 def _joint_pair_solve(
     BtB: Array,
     rhs: list[Array],
@@ -400,7 +412,7 @@ def _joint_pair_solve(
     # A zero right-hand side (a constant or padded lane) is already solved.
     bnorm = [safe(jnp.sqrt(d)) for d in dot(rhs, rhs)]
     eps = float(jnp.finfo(bnorm[0].dtype).eps)
-    tol = max(1e-7, 10 * eps)
+    tol = _pair_tol(eps)
 
     def rel_res(r: list[Array]) -> Array:
         return jnp.max(
@@ -1055,16 +1067,25 @@ def _fit_hdmr(
                     C1_chunks[j].reshape(cs, P) @ G1_flat
                 )
                 rhs.append(BtY[j] - jnp.einsum("pmj,lp->ljm", A, r1))
-            C2_stack, rel = _get_pair_solve(n_intervals, b, n_row_batches, max_iter, term_ridge)(
-                X_p, w_full, c2_idx, c3_idx, beta2, beta3, A, BtB, jnp.stack(rhs)
-            )
+            C2_stack, rel = _get_pair_solve(
+                n_intervals, b, n_row_batches, _PAIR_ITER_FACTOR * max_iter, term_ridge
+            )(X_p, w_full, c2_idx, c3_idx, beta2, beta3, A, BtB, jnp.stack(rhs))
             C2_chunks = list(C2_stack)
-            tol = max(1e-7, 10 * float(jnp.finfo(dtype).eps))
+            n_pair_coef = n2 * n_intervals * n_intervals
+            if n_pair_coef > N:
+                warnings.warn(
+                    f"jaxgsa.hdmr: order 2 has {n_pair_coef} pair coefficients for "
+                    f"{N} samples. The pair fit can interpolate the data, so pair "
+                    "indices may be too small or too large. Use more samples, "
+                    "fewer inputs or a smaller n_intervals.",
+                    stacklevel=2,
+                )
+            tol = _pair_tol(float(jnp.finfo(dtype).eps))
             # The check needs a concrete value; under jit or vmap there is none.
             if not isinstance(rel, jax.core.Tracer) and float(rel) >= tol:
                 warnings.warn(
                     f"jaxgsa.hdmr: the joint second-order solve did not converge in "
-                    f"max_iter={max_iter} steps (relative residual {float(rel):.1e}). "
+                    f"{_PAIR_ITER_FACTOR * max_iter} steps (10 x max_iter) (relative residual {float(rel):.1e}). "
                     "Raise max_iter or ridge.",
                     stacklevel=2,
                 )

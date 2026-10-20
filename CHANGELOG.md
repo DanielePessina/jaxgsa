@@ -12,9 +12,13 @@ Some fixes change index values where the old values were wrong. See Fixed.
   of `S` grew with `D` (1.14 at D = 9 and 3.07 at D = 23 for
   `sin(2 pi x0) + x1^2 + 0.5 x2 + 2 x3 x4`, N = 1024) and the test error was
   worse than order 1 (0.48 against 0.19 at D = 23). Now the pair basis is
-  projected off the first-order space and all pairs are solved together. Sum
-  of `S` is 0.97 to 0.98 and test NRMSE is 0.07 to 0.17 at D = 5 to 23, for N
-  = 1024 and 4096. Every `order >= 2` fit changes: pair and total-order
+  projected off the first-order space and all pairs are solved together. At the
+  default ridge, sum of `S` is 1.000 and test NRMSE is 0.009 to 0.15 at D = 5
+  to 23 (0.01 at D = 5, 0.15 at D = 23, N = 1024; 0.025 at D = 23, N = 4096).
+  The joint solve gets 10 x `max_iter` CG steps. It warns when it still does
+  not converge (D = 15 at N = 1024, D = 23). It also warns when there are more
+  pair coefficients than samples (D = 23 at N = 1024): the pairs then fit the
+  data too closely and the true pair `S2` reads too small (0.005 against 0.034). Every `order >= 2` fit changes: pair and total-order
   indices move (Ishigami at 1000 rows: `ST` of `x3` 0.287 to 0.221, analytic
   0.244; `ST` of `x2` 0.339 to 0.325; `S1` does not move). In-sample error above test error was the same overshoot, and
   is gone. `result.C1` now holds the first-order coefficients plus the
