@@ -146,11 +146,18 @@ def test_borgonovo_blocks_match_one_block(tiny_budget, x64):
         )
     assert isinstance(ref, borgonovo.BorgonovoResult)
     assert isinstance(blocked, borgonovo.BorgonovoResult)
-    np.testing.assert_allclose(ref.delta, blocked.delta, rtol=_RTOL[x64], atol=_ATOL[x64])
     np.testing.assert_allclose(
-        ref.delta_conf, blocked.delta_conf, rtol=_RTOL[x64], atol=_ATOL[x64]
+        np.asarray(ref.delta), np.asarray(blocked.delta), rtol=_RTOL[x64], atol=_ATOL[x64]
     )
-    np.testing.assert_allclose(ref.S1, blocked.S1, rtol=_RTOL[x64], atol=_ATOL[x64])
+    np.testing.assert_allclose(
+        np.asarray(ref.delta_conf),
+        np.asarray(blocked.delta_conf),
+        rtol=_RTOL[x64],
+        atol=_ATOL[x64],
+    )
+    np.testing.assert_allclose(
+        np.asarray(ref.S1), np.asarray(blocked.S1), rtol=_RTOL[x64], atol=_ATOL[x64]
+    )
 
 
 @pytest.mark.filterwarnings("ignore:.*Sinkhorn solves did not reach")
@@ -184,8 +191,18 @@ def test_ot_blocks_match_one_block(tiny_budget, mode, x64):
         blocked = run()
     assert isinstance(ref, optimal_transport.OTResult)
     assert isinstance(blocked, optimal_transport.OTResult)
-    np.testing.assert_allclose(ref.ot, blocked.ot, rtol=_RTOL[x64], atol=_ATOL[x64])
-    np.testing.assert_allclose(ref.ot_conf, blocked.ot_conf, rtol=_RTOL[x64], atol=_ATOL[x64])
-    np.testing.assert_allclose(ref.advective, blocked.advective, rtol=_RTOL[x64], atol=_ATOL[x64])
-    np.testing.assert_allclose(ref.diffusive, blocked.diffusive, rtol=_RTOL[x64], atol=_ATOL[x64])
-    np.testing.assert_allclose(ref.ot_dummy, blocked.ot_dummy, rtol=_RTOL[x64], atol=_ATOL[x64])
+    np.testing.assert_allclose(
+        np.asarray(ref.ot), np.asarray(blocked.ot), rtol=_RTOL[x64], atol=_ATOL[x64]
+    )
+    np.testing.assert_allclose(
+        np.asarray(ref.ot_conf), np.asarray(blocked.ot_conf), rtol=_RTOL[x64], atol=_ATOL[x64]
+    )
+    np.testing.assert_allclose(
+        np.asarray(ref.advective), np.asarray(blocked.advective), rtol=_RTOL[x64], atol=_ATOL[x64]
+    )
+    np.testing.assert_allclose(
+        np.asarray(ref.diffusive), np.asarray(blocked.diffusive), rtol=_RTOL[x64], atol=_ATOL[x64]
+    )
+    np.testing.assert_allclose(
+        np.asarray(ref.ot_dummy), np.asarray(blocked.ot_dummy), rtol=_RTOL[x64], atol=_ATOL[x64]
+    )
