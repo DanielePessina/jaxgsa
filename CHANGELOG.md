@@ -1,6 +1,8 @@
 # Changelog
 
-## 1.2.0 (unreleased)
+## 1.2.0 (2026-10-21)
+
+Contains everything in the 1.2.0 pre-releases (b1 to b3, below) plus the changes in this section.
 
 ### Memory
 
@@ -19,6 +21,16 @@ Peak memory was measured with XLA's compile-time memory analysis, at the shapes 
 
 - jaxgsa now requires `jax>=0.11.2` and `jaxlib>=0.11.2`. The memory figures above hold on jax 0.11.2. jax 0.8 to 0.10 do not fuse some of the new kernels and write out large temporary arrays. For example, `borgonovo` at N = 20,000 with a 400-point grid needs 5.4 GB of temporary memory on jax 0.10, against 39 MiB on jax 0.11. jax 0.11.0 is excluded because the test suite ran a 16 GB CI runner out of memory on it.
 - `config.set_memory_budget` warns when the budget comes out above 1 TiB. The number is read in megabytes unless `unit=` is given, so passing bytes by mistake turned batching off.
+
+### Fixed
+
+- `hdmr.indices`, and HDMR bootstrap replicates, no longer warn. The order-2 size warnings and the warning for an unconverged pair solve now come from `hdmr.analyze` only, and point at your line.
+- `hdmr` order 2: the direct and conjugate-gradient pair solves now drop a pair whose basis has almost no spread, as the sample-space solve already did. The three solves agree on such inputs.
+- `pce`, `hdmr` and `shapley` bootstraps now follow a `set_memory_budget` call made after an earlier bootstrap run. Before, the compiled replicate program kept the old batching.
+- The Gaussian-copula conditional plan warns once about a lifted conditional factor, not once more per input.
+- `pce` prices the single-pass fit at the padded row count, with the padded copies of X and Y. Near a bucket edge the fit could exceed the memory budget by up to about 12%.
+- `sobol` bootstrap prepares each output chunk once, not twice. Point estimates can differ from the no-bootstrap path by rounding (up to 2e-7 in float32) when the bootstrap uses a narrower chunk.
+- The `hsic` check for collapsed columns no longer builds a full pair-distance matrix: about 16 MB per column, down from 64 MB.
 
 ## 1.2.0b3 (2026-10-20, pre-release)
 
