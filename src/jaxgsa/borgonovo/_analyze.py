@@ -24,10 +24,11 @@ permutation. The point estimate and its interval are therefore always computed
 under identical conventions.
 
 Two things are computed once and reused. The class-partition indices are built
-per parameter for every replicate, then reused across output-column chunks.
-The JIT-compiled per-column kernel is cached only on the scalar estimator
+per parameter for every replicate, then reused by every batch of output
+columns. The JIT-compiled kernel is cached only on the scalar estimator
 settings, that is the grid size, the bandwidth rule, the degenerate-class
-floor and the grid tile width, so it captures no sample-sized constants.
+floor, the grid tile width and the column batch width, so it captures no
+sample-sized constants.
 
 The estimator details mirror ``SALib.analyze.delta``: an equal-frequency
 ordinal rank partition, the Plischke class-count heuristic, Silverman KDE
@@ -63,7 +64,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.batching import resolve_batch_size
+from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
 from jaxgsa._core.bootstrap import draw_row_matrix, interval
 from jaxgsa._core.entry import (
     at_least,
@@ -179,26 +180,38 @@ _DELTA_RANGE_TOL = 0.05
 # this guard and stays.
 _DISCRETE_MAX_DISTINCT = 20
 _DISCRETE_MIN_MULTIPLICITY = 5
-# Live copies of the conditional-KDE tensor to budget for. The tensor is
-# built, exponentiated, masked and then reduced, and the XLA CPU runtime was
-# measured holding roughly three of those stages resident at once. The slice
-# chunk is sized against this multiple so the peak stays inside the
-# transient-memory budget rather than three times over it.
-_KDE_LIVE_TENSORS = 3
-# Target size of one conditional-KDE grid tile, in bytes. This is a working
-# set, not a cap: the tile only has to be wide enough to keep the CPU busy,
-# and making it wider buys nothing but resident pages. 16 MiB was measured as
-# the point where the curve flattens; below it the per-tile dispatch starts to
-# show, above it the peak grows with no gain in speed. The real cap is the
-# transient-memory budget, which the slice chunk is sized against.
-_KDE_TILE_TARGET_BYTES = 16 * 1024**2
-# Narrowest conditional-KDE grid tile the sizing rule will pick. Tiling never
-# reorders the mathematics: each grid point keeps its own sum over its own
-# class members. XLA is still free to reassociate that sum differently for a
-# different tile shape, and at a tile of exactly one grid point it does,
-# because there is no longer a grid axis to vectorize over; the result then
-# moves in the last few bits (measured at 3e-8). Every wider tile returns the
-# untiled result exactly, which the test suite pins, so the rule stops at two.
+# Live copies of the per-column class gather ``y[cls_idx]``, shape
+# ``(Dg, M, P)``, that one output column keeps resident. XLA builds the
+# gather, a transposed copy and the centred deviations. The conditional-KDE
+# tile itself fuses into its reduction and costs no extra memory. Compile-only
+# memory analysis grows by 3.1 gathers per column in a batch, in float32 and
+# float64, across N from 2k to 100k and grid sizes from 20 to 400. The
+# constant is held in tenths.
+_GATHER_TENTHS = 31
+# A column count that the batch does not divide leaves a short last batch.
+# XLA compiles it as a second step. Each column in that short batch keeps
+# about two more gathers alive. This was fitted on remainders of 1 to 15.
+_REMAINDER_GATHERS_PER_COLUMN = 2
+# Batch-independent transient memory is ``N * itemsize * (total + 22)``. The
+# term ``total`` is the transposed copy of the output columns. The 22 covers
+# the resampled column, the full-sample KDE and the scan state. It does not
+# depend on the grid size. Fitted on compile-only runs for N from 2k to 100k,
+# grid sizes 20 to 400, 8 to 256 columns, in both precisions.
+_FIXED_EXTRA_COLUMNS = 22
+# Widest column batch the budget rule picks on its own. Temp memory is linear
+# in the batch up to about 32 columns. Past that XLA's schedule changes, and
+# the compiled temp jumps by up to 1.4x over the linear estimate and moves
+# up and down from one width to the next. A batch of 16 is already past the
+# point where batching buys speed, so the rule stops there. A caller can
+# still pass a larger ``slice_chunk_size``.
+_MAX_AUTO_COL_BATCH = 16
+# Output-grid tile width the kernel is asked for by default. The
+# conditional-KDE tile fuses, so the whole grid goes in one tile. The
+# tile argument stays so a caller can still bound the working set by hand.
+# Tiling never reorders the mathematics: each grid point keeps its own sum
+# over its own class members. XLA is still free to reassociate that sum
+# differently for a different tile shape, and at a tile of exactly one
+# grid point it does (measured at 3e-8), so a tile is at least two wide.
 _MIN_GRID_TILE = 2
 
 
@@ -251,6 +264,7 @@ def _get_delta_kernel(
     degenerate_tol: float,
     degenerate_bw: float | None,
     grid_chunk: int,
+    col_batch: int | None = None,
 ):
     """Return a JIT-compiled delta/S1 kernel for static estimator settings.
 
@@ -272,12 +286,17 @@ def _get_delta_kernel(
             h_full, grid_step)``.
         grid_chunk: Output-grid points evaluated per conditional-KDE tile
             (static). ``grid_chunk >= grid_size`` evaluates the whole grid
-            in one tile. A smaller value evaluates the grid in sequential
-            tiles, which bounds the ``(Dg, M, grid_chunk, P)`` kernel
-            tensor that dominates this method's peak memory. Every grid
+            in one tile. This is the default, because the tile fuses into
+            its reduction and costs no memory. A smaller value evaluates
+            the grid in sequential tiles of that width. Every grid
             point keeps its own untouched sum over the class members, so
             tiling reorders nothing; any width of two or more returns the
             untiled result exactly.
+        col_batch: Output columns processed together per step (static).
+            The kernel walks the columns with :func:`jax.lax.map` in
+            batches of this size, so only one batch of per-column
+            gathers is live at a time. ``None`` processes every column in
+            one :func:`jax.vmap`, which is the whole input width.
 
     Returns:
         A jitted callable ``(Y_cols (N, C), all_idx (R, N), groups) ->
@@ -464,9 +483,16 @@ def _get_delta_kernel(
                 counts_r = counts_g[i]  # (G, M)
                 mask_r = _mask_from_counts(counts_r, cls_r.shape[-1]).astype(dtype)
                 layouts.append((cls_r, mask_r, counts_r.astype(dtype)))
-            d, s1, degen, floored = jax.vmap(lambda y, grid: _col_stats(y, grid, r, layouts))(
-                Y_cols.T, grids
-            )
+            if col_batch is None or col_batch >= Y_cols.shape[1]:
+                d, s1, degen, floored = jax.vmap(lambda y, grid: _col_stats(y, grid, r, layouts))(
+                    Y_cols.T, grids
+                )
+            else:
+                d, s1, degen, floored = jax.lax.map(
+                    lambda yg: _col_stats(yg[0], yg[1], r, layouts),
+                    (Y_cols.T, grids),
+                    batch_size=col_batch,
+                )
             return carry, (d, s1, degen, floored)
 
         R = all_idx.shape[0]
@@ -479,53 +505,85 @@ def _get_delta_kernel(
 
 def _resolve_slice_chunks(
     groups: Sequence[tuple[Array | jax.ShapeDtypeStruct, ...]],
-    Y_cols: Array,
+    Y_cols: Array | jax.ShapeDtypeStruct,
     grid_size: int,
     slice_chunk_size: int | None,
 ) -> tuple[int, int]:
-    """Size the output-column chunk and the output-grid tile.
+    """Size the output-column batch and the output-grid tile.
 
-    Peak memory is the conditional-KDE tensor. It holds one output-grid
-    point per padded class slot, so it costs
-    ``columns * sum_g(Dg * Mg * Pg) * grid_points`` elements. This sizes it
-    from the real per-group layout: assuming that product is ``~ D * N``
-    holds for equal-frequency continuous classes, but it under-counts badly
-    for an imbalanced categorical column, where every level is padded up to
-    the largest one.
+    The kernel walks the output columns with :func:`jax.lax.map` in
+    batches. Each column in a batch holds the class gather
+    ``y[cls_idx]``, ``(Dg, M, P)`` per group, a few times over. This sizes
+    the batch from the real per-group layout: assuming that product is
+    ``~ D * N`` holds for equal-frequency continuous classes, but it
+    under-counts badly for an imbalanced categorical column, where every
+    level is padded up to the largest one. The estimate also holds a
+    fixed term that grows with ``N`` and the column count, and a term for
+    a short last batch.
 
-    Two knobs bound that tensor, and they answer different questions. The
-    slice chunk answers "how much of the output can be in flight at once",
-    and the transient-memory budget is its cap. The grid tile answers "how
-    much of the KDE has to be resident to keep the CPU busy", and a
-    working-set target is its cap; the tile is where nearly all of the
-    saving is, because tiling costs no extra passes over the data.
+    The conditional-KDE tile fuses into its reduction, so the output grid
+    needs no tiling and the tile is the whole grid.
+
+    The width is the largest one, up to 16, whose estimate fits the
+    budget. Wider batches give no more speed, and compiled memory stops
+    being linear in the width past about 32.
 
     Both numbers come from shapes and Python scalars only, so this is
     traceable: :func:`indices` and :func:`analyze` share it and therefore
-    pick the same chunking for the same call.
+    pick the same batching for the same call.
 
     Args:
         groups: Canonical partition groups from
             :func:`jaxgsa._core.partition.replicate_blocks`.
-        Y_cols: Output columns ``(N, T*K)``, read for its dtype and width.
+        Y_cols: Output columns ``(N, T*K)``, read for its dtype and shape.
         grid_size: Number of output-grid points.
         slice_chunk_size: Caller override, or ``None`` for the budget.
 
     Returns:
         ``(slice_chunk, grid_chunk)``.
     """
-    total = Y_cols.shape[1]
-    layout_elems = sum(g[0].shape[1] * g[0].shape[2] * g[0].shape[3] for g in groups)
+    n_rows, total = Y_cols.shape
     itemsize = jnp.dtype(jnp.result_type(Y_cols.dtype, jnp.float32)).itemsize
-    bytes_per_column_grid_point = layout_elems * itemsize
-    cs = resolve_batch_size(
-        bytes_per_column_grid_point * _KDE_LIVE_TENSORS, total, slice_chunk_size
-    )
-    grid_chunk = min(
-        grid_size,
-        max(_MIN_GRID_TILE, _KDE_TILE_TARGET_BYTES // (cs * bytes_per_column_grid_point)),
-    )
-    return cs, grid_chunk
+    if slice_chunk_size is not None:
+        cs = resolve_batch_size(1, total, slice_chunk_size)
+        return cs, grid_size
+    budget = get_memory_budget()
+    top = min(total, _MAX_AUTO_COL_BATCH)
+    cs = 1
+    for width in range(top, 0, -1):
+        if _estimate_transient_bytes(groups, n_rows, total, itemsize, width) <= budget:
+            cs = width
+            break
+    return cs, grid_size
+
+
+def _estimate_transient_bytes(
+    groups: Sequence[tuple[Array | jax.ShapeDtypeStruct, ...]],
+    n_rows: int,
+    total: int,
+    itemsize: int,
+    batch: int,
+) -> int:
+    """Estimate the kernel's XLA temp memory for a column batch.
+
+    Args:
+        groups: Canonical partition groups; read for their layout shapes.
+        n_rows: Number of samples N.
+        total: Number of output columns ``T*K``.
+        itemsize: Bytes per floating-point element.
+        batch: Output columns per lax.map step.
+
+    Returns:
+        Estimated temp bytes: a fixed term of ``N * (total + 22)`` elements,
+        plus the class gathers of every column in a batch, plus two more
+        gathers for each column left over when the batch does not divide
+        the column count.
+    """
+    layout_elems = sum(g[0].shape[1] * g[0].shape[2] * g[0].shape[3] for g in groups)
+    gather = layout_elems * itemsize * _GATHER_TENTHS / 10
+    fixed = n_rows * itemsize * (total + _FIXED_EXTRA_COLUMNS)
+    remainder = _REMAINDER_GATHERS_PER_COLUMN * (total % batch) if batch < total else 0
+    return int(fixed + gather * (batch + remainder))
 
 
 def _run_delta_kernel(
@@ -561,52 +619,27 @@ def _run_delta_kernel(
             full-sample bandwidth.
         degenerate_bw: Degenerate-class bandwidth floor, as a fraction of
             the full-sample bandwidth, or ``None`` for ``"auto"``.
-        slice_chunk_size: Output columns per kernel call, or ``None`` for
-            the transient-memory budget.
+        slice_chunk_size: Output columns per batch, or ``None`` for the
+            transient-memory budget.
 
     Returns:
         ``(d_all, s1_all, degen_all, floored_cols)``. ``d_all`` and
         ``s1_all`` have shape ``(R, T*K, D)``, ``degen_all`` ``(R, T*K)``,
         and ``floored_cols`` ``(T*K,)``.
     """
-    total = Y_cols.shape[1]
     cs, grid_chunk = _resolve_slice_chunks(groups, Y_cols, grid_size, slice_chunk_size)
-    kernel = _get_delta_kernel(grid_size, bw_factor, degenerate_tol, degenerate_bw, grid_chunk)
-    d_parts, s1_parts, degen_parts, floored_parts = [], [], [], []
-    for start in range(0, total, cs):
-        chunk = Y_cols[:, start : start + cs]
-        n_real = chunk.shape[1]
-        if n_real < cs:
-            # Pad the ragged trailing chunk back to the full width so the
-            # jitted kernel compiles for one shape only. Output columns are
-            # analysed independently, so a repeated column cannot change a
-            # real column's answer, and the padding is sliced off at once.
-            # The chunk width does change how XLA tiles the in-column
-            # reductions, so a different slice_chunk_size can move a value
-            # by a couple of ulps in float32 — which is why
-            # test_slice_chunk_size_invariance compares at rtol=1e-6, not
-            # bitwise.
-            pad = jnp.broadcast_to(chunk[:, :1], (chunk.shape[0], cs - n_real))
-            chunk = jnp.concatenate([chunk, pad], axis=1)
-        d, s1, degen, floored = kernel(chunk, all_idx, tuple(groups))
-        if n_real < cs:
-            d, s1 = d[:, :n_real], s1[:, :n_real]
-            degen, floored = degen[:, :n_real], floored[:, :n_real]
-        if col_order is not None:
-            d = d[..., col_order]
-            s1 = s1[..., col_order]
-        d_parts.append(d)
-        s1_parts.append(s1)
-        degen_parts.append(degen)
-        # Keep the flag per output column, not per chunk: a failure message
-        # has to name the column whose class was floored.
-        floored_parts.append(floored.any(axis=0))
-    return (
-        jnp.concatenate(d_parts, axis=1),
-        jnp.concatenate(s1_parts, axis=1),
-        jnp.concatenate(degen_parts, axis=1),
-        jnp.concatenate(floored_parts),
+    kernel = _get_delta_kernel(
+        grid_size, bw_factor, degenerate_tol, degenerate_bw, grid_chunk, col_batch=cs
     )
+    # One call covers every output column. The kernel walks them in batches
+    # of ``cs`` with lax.map, so the transient memory is one batch wide.
+    d, s1, degen, floored = kernel(Y_cols, all_idx, tuple(groups))
+    if col_order is not None:
+        d = d[..., col_order]
+        s1 = s1[..., col_order]
+    # Keep the flag per output column, not per batch: a failure message has
+    # to name the column whose class was floored.
+    return d, s1, degen, floored.any(axis=0)
 
 
 def _slice_label(flat_index: int, trailing: tuple[int, ...], problem: Problem) -> str:
@@ -918,17 +951,20 @@ def analyze(
             when ``n_bootstrap > 0``. Pass ``jax.random.key(0)`` if you have
             an integer seed.
         slice_chunk_size: Number of flattened ``T*K`` output columns
-            processed per kernel call. ``None`` derives it from the
+            processed together in one step. The kernel walks the columns in
+            batches of this size. ``None`` derives it from the
             transient-memory budget
             (:func:`jaxgsa.config.set_memory_budget`) and the real class
-            layout. Pass a positive integer to override it. One column
-            costs the summed padded class layout ``sum_g(Dg * Mg * Pg)``
-            per output-grid point. That layout is about ``D * N`` for
-            continuous parameters; an imbalanced categorical parameter
-            pads every level up to the largest one, so it can be many
-            times ``D * N``. The grid is then evaluated in tiles, so peak
-            memory follows the tile rather than the whole grid, and a
-            narrower chunk is rarely the knob that saves memory here.
+            layout, up to 16 columns. Pass a positive integer to override
+            it. Each column in a batch holds about three copies of the
+            summed padded class layout ``sum_g(Dg * Mg * Pg)``. That layout
+            is about ``D * N`` for continuous parameters; an imbalanced
+            categorical parameter pads every level up to the largest one,
+            so it can be many times ``D * N``. Peak memory is therefore
+            about ``3 * slice_chunk_size * D * N`` elements plus a small
+            fixed term, and the output grid is not tiled. A batch width
+            that divides ``T*K`` evenly uses less memory than one that
+            leaves a short last batch.
         degenerate_tol: A conditioning class counts as degenerate when its
             KDE bandwidth is below this fraction of the full-sample
             bandwidth. Degenerate classes get the floored bandwidth below.
@@ -1410,7 +1446,7 @@ def indices(
             reads ``N`` only, so it stays static under a trace.
         grid_size: Number of output-grid points, as in :func:`analyze`.
         bandwidth: KDE bandwidth rule, as in :func:`analyze`.
-        slice_chunk_size: Output columns per kernel call, as in
+        slice_chunk_size: Output columns per batch, as in
             :func:`analyze`.
         degenerate_tol: Degenerate-class threshold, as in :func:`analyze`.
             The floor it triggers is applied inside the kernel with

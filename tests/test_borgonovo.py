@@ -19,8 +19,11 @@ from jaxgsa.benchmarks import gaussian_linear, ishigami
 from jaxgsa.borgonovo import analyze
 from jaxgsa.borgonovo._analyze import (
     _DEGENERATE_BW_FRACTION,
+    _DEGENERATE_BW_TOL,
+    _estimate_transient_bytes,
     _get_delta_kernel,
     _plischke_n_classes,
+    _resolve_slice_chunks,
 )
 from jaxgsa.problem import Problem
 from jaxgsa.sampling import monte_carlo
@@ -160,6 +163,62 @@ class TestGridTiling:
         tiled = _get_delta_kernel(100, None, 1e-2, None, grid_chunk)(*args)
         for a, b in zip(untiled, tiled):
             np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-6)
+
+    @pytest.mark.parametrize("col_batch", [1, 2, 3])
+    def test_column_batching_matches_the_vmapped_result(self, given_ishigami_xy, col_batch):
+        """Walking the columns in lax.map batches returns the vmapped result.
+
+        Three batch widths on five columns cover a batch of one, an even
+        split with a remainder, and a remainder batch.
+        """
+        X, Y = given_ishigami_xy
+        X, Y = X[:1024], Y[:1024]
+        Y_cols = jnp.stack([Y, Y**2, jnp.sin(Y), jnp.cos(Y), Y**3], axis=1)
+        args = self._kernel_inputs(X, Y_cols)
+        full = _get_delta_kernel(100, None, 1e-2, None, 100)(*args)
+        batched = _get_delta_kernel(100, None, 1e-2, None, 100, col_batch)(*args)
+        for a, b in zip(full, batched):
+            np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-7)
+
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+    @pytest.mark.parametrize(
+        ("n", "total", "grid", "budget_mib"),
+        [
+            (4096, 32, 100, 512),  # the batch divides the column count
+            (4096, 37, 100, 512),  # a short last batch
+            (20000, 40, 20, 8),  # a tight budget with a short last batch
+            (20000, 16, 400, 512),  # a large grid
+        ],
+    )
+    def test_compiled_temp_memory_matches_the_estimate(self, dtype, n, total, grid, budget_mib):
+        """The estimate tracks the compiled temp memory from above and below.
+
+        Compile only: nothing runs, so this costs no sample-sized memory.
+        The estimate is what the batch width is chosen from. Temp memory
+        above 1.1 times it means a budget can be overrun. Temp memory far
+        below it means the estimate wastes budget, so a floor is checked too.
+        """
+        D, n_rep = 10, 2
+        n_classes = _plischke_n_classes(n)
+        pts = -(-n // n_classes)
+        S = jax.ShapeDtypeStruct
+        groups = (
+            (S((n_rep, D, n_classes, pts + 1), jnp.int32), S((n_rep, D, n_classes), jnp.int32)),
+        )
+        Y = S((n, total), jax.dtypes.canonicalize_dtype(dtype))
+        jaxgsa.config.set_memory_budget(budget_mib, unit="mib")
+        try:
+            cs, grid_chunk = _resolve_slice_chunks(groups, Y, grid, None)
+        finally:
+            jaxgsa.config.set_memory_budget(512, unit="mib")
+        kernel = _get_delta_kernel(grid, None, _DEGENERATE_BW_TOL, None, grid_chunk, cs)
+        compiled = kernel.lower(Y, S((n_rep, n), jnp.int32), groups).compile()
+        temp = compiled.memory_analysis().temp_size_in_bytes
+        # With x64 off a float64 struct still compiles as float32.
+        itemsize = jnp.dtype(jax.dtypes.canonicalize_dtype(dtype)).itemsize
+        estimate = _estimate_transient_bytes(groups, n, total, itemsize, cs)
+        assert temp <= 1.1 * estimate
+        assert temp >= 0.5 * estimate
 
     def test_memory_budget_narrows_the_working_set(self, given_ishigami_xy):
         """A small budget still returns the same answer.

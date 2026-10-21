@@ -366,10 +366,10 @@ and grid, with two deliberate differences. It is deterministic given the
 data, where SALib computes its central estimate on a random resample. And it
 returns `delta = S1 = 0` for a constant output where SALib raises.
 
-Peak memory scales with `slice_chunk_size * D * N * grid_size`. Lower
-`slice_chunk_size` for long time-series outputs, though the output grid is
-evaluated in tiles, so peak memory follows the tile rather than the whole
-grid and a narrower chunk is rarely the knob that saves you.
+Peak memory scales with about `3 * slice_chunk_size * D * N` values, plus a
+small fixed term. There is no grid tiling. Lower `slice_chunk_size` for long
+time-series outputs. The default picks the widest batch, up to 16 columns,
+that fits the memory budget.
 
 Correlated inputs are supported. The estimator partitions on ordinal ranks
 and compares output densities, so a declared `problem.correlation` does not
