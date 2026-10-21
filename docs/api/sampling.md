@@ -211,10 +211,10 @@ problem itself describes.
 That lets you test your assumed input ranges without drawing a new design:
 
 ```python
-samples = jaxgsa.sobol.sample(problem, n_samples=8192, seed=0)
+design = jaxgsa.sobol.sample(problem, n_samples=8192, seed=0)
 
-narrow = samples.transform({"x1": {"low": 0.0, "high": 1.0}, ...})
-wide   = samples.transform({"x1": {"low": -1.0, "high": 2.0}, ...})
+narrow = design.transform({"x1": {"low": 0.0, "high": 1.0}, ...})
+wide   = design.transform({"x1": {"low": -1.0, "high": 2.0}, ...})
 ```
 
 `theta` has the type `jaxgsa.sobol.Theta`: a mapping keyed by parameter name, then

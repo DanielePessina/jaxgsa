@@ -83,6 +83,21 @@ export default defineConfig({
           ],
         },
         {
+          text: 'How do I...',
+          items: [
+            {
+              text: 'Use existing data',
+              link: '/guide/existing-data',
+            },
+            { text: 'Handle failed runs', link: '/guide/failed-runs' },
+            {
+              text: 'Differentiate Sobol indices',
+              link: '/guide/differentiable-sobol',
+            },
+            { text: 'Run on GPU', link: '/guide/gpu' },
+          ],
+        },
+        {
           text: 'Understand',
           items: [
             { text: 'Concepts', link: '/guide/concepts' },
@@ -98,6 +113,7 @@ export default defineConfig({
           items: [
             { text: 'Scaling to large problems', link: '/guide/scale' },
             { text: 'Benchmarks', link: '/guide/benchmarks' },
+            { text: 'Validation', link: '/guide/validation' },
             { text: 'Configuration', link: '/guide/configuration' },
           ],
         },

@@ -28,7 +28,7 @@ analyze(
 ) -> SobolResult | IrregularResult
 ```
 
-`Y` holds the model outputs at each unique row of `samples.samples`,
+`Y` holds the model outputs at each unique row of `design.samples`,
 in that row order. Accepted shapes are `(n_runs,)`, `(n_runs, K)` and
 `(n_runs, T, K)`. Indices are computed independently for every `(t, k)` slice.
 
@@ -48,8 +48,8 @@ def ishigami(X):
         + 0.1 * X[:, 2] ** 4 * jnp.sin(X[:, 0])
     )
 
-samples = jaxgsa.sobol.sample(problem, n_samples=8192, seed=0, verbose=False)
-result = jaxgsa.sobol.analyze(samples, ishigami(samples.samples), verbose=False)
+design = jaxgsa.sobol.sample(problem, n_samples=8192, seed=0, verbose=False)
+result = jaxgsa.sobol.analyze(design, ishigami(design.samples), verbose=False)
 
 result.S1        # Array([0.3223, 0.4361, 0.0014], dtype=float32)
 result.ST        # Array([0.556 , 0.4417, 0.2413], dtype=float32)
@@ -60,7 +60,7 @@ result.S2.shape  # (3, 3)
 size arguments. `n_samples` is the minimum number of model runs. `base_n` sets
 the base points exactly and must be a power of two. Giving both, or neither,
 raises `ValueError`. `scramble=False` with a `seed` also raises, because the
-unscrambled sequence is deterministic. `repr(samples)` prints the run counts
+unscrambled sequence is deterministic. `repr(design)` prints the run counts
 and `base_n`, not the arrays.
 
 The analytical answer for Ishigami is `S1 = [0.3139, 0.4424, 0.0]` and
@@ -126,7 +126,7 @@ number, so it cannot run under `jax.jit` or `jax.vmap`. `indices` reads
 nothing, so it can.
 
 ```python
-S1, ST, S2 = jaxgsa.sobol.indices(samples, Y)
+S1, ST, S2 = jaxgsa.sobol.indices(design, Y)
 ```
 
 The return is a `SobolIndices` named tuple with the fields `S1`, `ST` and `S2`,
@@ -157,7 +157,7 @@ For every option, `S2` uses the cross-moment construction of
 estimates. jaxgsa averages the two directional estimates as described above.
 
 ```python
-result = jaxgsa.sobol.analyze(samples, Y, estimator="azzini-rosati")
+result = jaxgsa.sobol.analyze(design, Y, estimator="azzini-rosati")
 ```
 
 They all converge to the same indices. They differ in how much sampling noise
@@ -212,8 +212,8 @@ jax.config.update("jax_enable_x64", True)
 theta = {name: {"low": -np.pi, "high": np.pi} for name in problem.names}
 
 def s1(theta):
-    Y = ishigami(samples.transform(theta))   # your model must be JAX-differentiable
-    return jaxgsa.sobol.indices(samples, Y)[0]
+    Y = ishigami(design.transform(theta))   # your model must be JAX-differentiable
+    return jaxgsa.sobol.indices(design, Y)[0]
 
 dS1 = jax.jacrev(s1)(theta)
 dS1["x1"]["low"]     # Array([ 0.0278, -0.0369,  0.003 ])

@@ -2,6 +2,15 @@
 
 ## 1.2.1 (unreleased)
 
+### Documentation
+
+- README: "Start from your situation" replaces "Choose a method". Each row names the existing function for a common need: given data, failed runs, many outputs, correlated or categorical inputs, gradients, small budgets.
+- New guide pages: "Sensitivity indices from existing data", "Failed model runs", "Differentiable Sobol indices in JAX" and "Sobol indices on GPU". The GPU page says the published benchmarks are CPU only.
+- New "Validation" page: each method's reference checks, their tier and tolerance, and the test file.
+- Concepts: why an S1 estimate can come out slightly above ST. The studio's Sobol result card says the same.
+- Getting started: a field-by-field guide to the verbose output.
+- Examples, the API reference and docstrings call the sample object `design`, as the getting-started guide does.
+
 ### Fixed
 
 - Zenodo labelled every deposit from 1.1.0 to 1.2.0 as version 1.1.0, because `.zenodo.json` pinned the version. The field is gone, so Zenodo now takes the version from the release tag.

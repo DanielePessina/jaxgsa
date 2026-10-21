@@ -24,7 +24,7 @@ sensitivity estimator.
 The `n_samples` argument does not mean the same thing for every sampler.
 `sobol.sample(problem, n_samples)` treats it as a total evaluation budget and
 chooses a base count. eFAST and Morris expose their curve and trajectory sizes
-directly. Inspect `samples.samples.shape[0]` before launching the model.
+directly. Inspect `design.samples.shape[0]` before launching the model.
 
 ## Choose a scaling strategy
 
