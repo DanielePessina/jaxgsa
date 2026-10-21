@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.2.0 (unreleased)
+
+### Memory
+
+Peak memory was measured with XLA's compile-time memory analysis, at the shapes given. Results are unchanged unless a tolerance is stated.
+
+- `morris`: the bootstrap runs one resample at a time. Temporary memory at r = 1000, D = 23, 291 outputs, 200 resamples: 1021 MiB before, 51 MiB now. Results are bitwise identical.
+- `borgonovo`: output columns run in batches of at most 16, and the output grid is no longer tiled. At N = 16,384, D = 23, 291 outputs: 732 MiB before, 199 MiB now, and about 1.8 times faster. `slice_chunk_size` now sets the batch width. Results agree to 7e-18 in float64.
+- `hsic`: the input kernels and their complements are built in place, and the per-output kernel handles one input at a time when all inputs at once would not fit the memory budget. At N = 2048, D = 23: setup 736 MiB before, 64 MiB now; per output 773 MiB before, 101 MiB now. Gradients use no more memory than before. HSIC now reads the memory budget.
+- `kucherenko`: the bootstrap uses resample counts, not gathered copies of the outputs. At N = 16,384, D = 23, 291 outputs it held about 2.8 GB per replicate; it now stays within the memory budget. It is about 3 times faster. Results agree to 1e-14, also for outputs with rare large spikes.
+- `sobol` and `efast`: the outputs are split and standardized one slice chunk at a time, so the full copies of Y are gone when there is more than one chunk. At N = 16,384, D = 23, 291 outputs with second order this saves about 3.7 GB for Sobol. eFAST is bitwise identical. Sobol on (N, T, K) outputs over several chunks differs by rounding (4.5e-7 in float32, 6e-16 in float64).
+- `hdmr`: the statistics pass and the pair Gram work through the terms in blocks when the whole working set does not fit half the memory budget. At D = 23, `n_intervals=9`, N = 4096, 291 outputs, 2 GiB: statistics pass 1140 MiB before, 279 MiB now; the row batch doubles. Small fits keep the old path and speed.
+- `pce`: the memory estimate of the streamed fit now covers the leave-one-out pass (it used 1.28 times its estimate).
+- `optimal_transport`: the multivariate and trajectory modes keep one fewer N x P array, and warn when their estimated peak exceeds the memory budget.
+
+### Changed
+
+- `config.set_memory_budget` warns when the budget comes out above 1 TiB. The number is read in megabytes unless `unit=` is given, so passing bytes by mistake turned batching off.
+
 ## 1.2.0b3 (2026-10-20, pre-release)
 
 Pre-release for testing. Contains everything in 1.2.0b2 plus the changes in this section.
