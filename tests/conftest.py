@@ -39,6 +39,20 @@ pytest_plugins = [
 ]
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _free_compiled_programs():
+    """Drop JAX's in-memory compiled programs after each test file.
+
+    Every jitted kernel a test compiles stays in JAX's caches for the life
+    of the worker. Over the whole suite this grew to about 10 GB on a CI
+    runner (16 GB) and ran it out of memory with jax 0.11.0. A later file
+    that needs a program again loads it from the disk cache above instead
+    of compiling it.
+    """
+    yield
+    jax.clear_caches()
+
+
 @pytest.fixture(autouse=True)
 def _silence_verbose(request, monkeypatch):
     """Silence the verbose seam for the whole suite.

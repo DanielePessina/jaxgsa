@@ -17,7 +17,7 @@ Peak memory was measured with XLA's compile-time memory analysis, at the shapes 
 
 ### Changed
 
-- jaxgsa now requires `jax>=0.11` and `jaxlib>=0.11`. The memory figures above hold on jax 0.11. jax 0.8 to 0.10 do not fuse some of the new kernels and write out large temporary arrays. For example, `borgonovo` at N = 20,000 with a 400-point grid needs 5.4 GB of temporary memory on jax 0.10, against 39 MiB on jax 0.11.
+- jaxgsa now requires `jax>=0.11.2` and `jaxlib>=0.11.2`. The memory figures above hold on jax 0.11.2. jax 0.8 to 0.10 do not fuse some of the new kernels and write out large temporary arrays. For example, `borgonovo` at N = 20,000 with a 400-point grid needs 5.4 GB of temporary memory on jax 0.10, against 39 MiB on jax 0.11. jax 0.11.0 is excluded because the test suite ran a 16 GB CI runner out of memory on it.
 - `config.set_memory_budget` warns when the budget comes out above 1 TiB. The number is read in megabytes unless `unit=` is given, so passing bytes by mistake turned batching off.
 
 ## 1.2.0b3 (2026-10-20, pre-release)

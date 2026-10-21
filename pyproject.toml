@@ -35,8 +35,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "jax>=0.11",
-    "jaxlib>=0.11",
+    "jax>=0.11.2",
+    "jaxlib>=0.11.2",
     "numpy>=2",
     "scipy>=1.15",
     "xarray>=2026.2.0",
