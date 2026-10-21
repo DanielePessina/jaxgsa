@@ -229,7 +229,9 @@ def _sinkhorn_w2(
     log_g = jnp.where(valid, g_safe, neg_inf)
 
     log_plan = log_f[:, None] + log_K + log_g[None, :]
-    # <P, C> on the scaled cost, mapped back to the original scale. exp of
-    # -inf (padded columns) is exactly 0, so pads contribute nothing.
-    cost = (jnp.exp(log_plan) * (C / scale)).sum() * scale
+    # <P, C> on the scaled cost, mapped back to the original scale. Since
+    # log_K = -(C / scale) / epsilon, C / scale = -epsilon * log_K, so the
+    # cost reads off log_K and C need not stay live. exp of -inf (padded
+    # columns) is exactly 0, and log_K is finite there, so pads add nothing.
+    cost = -(jnp.exp(log_plan) * log_K).sum() * (scale * epsilon)
     return cost, err

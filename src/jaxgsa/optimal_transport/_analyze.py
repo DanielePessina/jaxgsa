@@ -60,7 +60,7 @@ from jax import Array
 from jax.typing import DTypeLike
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.batching import resolve_batch_size
+from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
 from jaxgsa._core.bootstrap import draw_row_matrix, interval
 from jaxgsa._core.entry import (
     _user_stacklevel,
@@ -922,6 +922,56 @@ def _run_joint(
     )
 
 
+# Live (N, P) blocks in one Sinkhorn solve: the log-kernel, the logsumexp
+# temporaries and the plan. Measured at 3.9 blocks by compile-only analysis of
+# _joint_kernel; priced at 4.
+_JOINT_BLOCKS = 4
+
+
+def _joint_peak_bytes(N: int, P: int, dtype: DTypeLike) -> int:
+    """Estimate the peak transient bytes of one joint (Sinkhorn) solve.
+
+    The joint kernel solves one class at a time (``lax.map``), so the peak is
+    a few ``(N, P)`` blocks, with ``P`` the padded class width. It grows as
+    ``N**2 / M`` and no per-class chunking lowers it.
+
+    Args:
+        N: Number of samples.
+        P: Padded class width.
+        dtype: Compute dtype.
+
+    Returns:
+        Estimated peak bytes.
+    """
+    return _JOINT_BLOCKS * N * P * jnp.dtype(dtype).itemsize
+
+
+def _warn_joint_memory(N: int, P: int, dtype: DTypeLike, M: int, stacklevel: int) -> None:
+    """Warn when one joint Sinkhorn solve is expected to exceed the memory budget.
+
+    Args:
+        N: Number of samples.
+        P: Padded class width.
+        dtype: Compute dtype.
+        M: Number of classes.
+        stacklevel: Passed to :func:`warnings.warn`.
+    """
+    need = _joint_peak_bytes(N, P, dtype)
+    budget = get_memory_budget()
+    if need <= budget:
+        return
+    warnings.warn(
+        f"jaxgsa.optimal_transport: one Sinkhorn solve is expected to need about "
+        f"{need / 2**30:.2f} GiB (about {_JOINT_BLOCKS} blocks of N={N} by "
+        f"class width {P}), above the {budget / 2**30:.2f} GiB memory budget. "
+        f"The size grows as N**2 / n_classes and cannot be batched. Raise n_classes "
+        f"(now {M}) to shrink the class width, lower N, or raise the budget with "
+        "jaxgsa.config.set_memory_budget if the device has room.",
+        stacklevel=stacklevel,
+        category=JaxgsaWarning,
+    )
+
+
 def _resolve_tol(tol: float | None, dtype: jnp.dtype) -> float:
     """Default the Sinkhorn stopping tolerance to what the dtype can resolve."""
     if tol is not None:
@@ -1505,6 +1555,11 @@ def analyze(
         max_iter_s = jnp.asarray(max_iter, jnp.int32)
         tol_s = jnp.asarray(tol, dtype)
         clouds = _build_clouds(Y_3d, mode, standardize_outputs)
+        P_est = max(
+            [-(-N // M)] * bool(cont_dims) + [plan._cat_pad] * bool(cat_dims),
+            default=1,
+        )
+        _warn_joint_memory(N, P_est, dtype, M, stacklevel=2)
 
     def _run(
         idx: Array,

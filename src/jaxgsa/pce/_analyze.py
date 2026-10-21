@@ -465,7 +465,12 @@ def _fit_pce_streamed(
     # floats (the running product). The QR step then holds the stacked block,
     # its orthogonal factor and the factorisation workspace, about 4*n_terms
     # floats per row, plus 2*M for the residual and right-hand-side arrays.
-    bytes_per_row = jnp.dtype(dtype).itemsize * (4 * n_terms + 2 * M)
+    # The LOO step is dearer: the design block, the leverage solve against R
+    # and the residuals measured about 5.4*n_terms floats per row, so it is
+    # priced at 6*n_terms. Both passes share one batch width, so the dearer
+    # pass sets it when diagnostics run.
+    floats_per_term = 6 if diagnostics else 4
+    bytes_per_row = jnp.dtype(dtype).itemsize * (floats_per_term * n_terms + 2 * M)
     # The batch width and the batch count come from the row count's bucket, so
     # every N in a bucket reuses the compiled steps (see _bucket).
     n_bucket = _bucket(N)
