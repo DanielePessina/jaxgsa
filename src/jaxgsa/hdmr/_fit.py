@@ -40,10 +40,9 @@ reassociation that adding a zero to a float32 reduction can cause.
 
 import functools
 import math
-import warnings
 from collections.abc import Callable
 from functools import lru_cache
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 import jax.core
@@ -51,7 +50,6 @@ import jax.numpy as jnp
 from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget, pad_rows, resolve_batch_size
-from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.hdmr._engine import _build_B1, _build_B2, _build_B3, term_order_map
 
 # ---------------------------------------------------------------------------
@@ -210,8 +208,60 @@ def _ridge_eye(gram: Array, ridge: float, m: int) -> Array:
     Returns:
         Array of shape ``(..., m, m)``.
     """
-    scale = jnp.mean(jnp.diagonal(gram, axis1=-2, axis2=-1), axis=-1)
-    return ridge * scale[..., None, None] * jnp.eye(m)
+    return ridge * _ridge_scale(gram)[..., None, None] * jnp.eye(m)
+
+
+def _ridge_scale(gram: Array) -> Array:
+    """Return the mean Gram diagonal per block, the scale of the relative ridge.
+
+    Args:
+        gram: Gram blocks, shape ``(..., m, m)``.
+
+    Returns:
+        Array of shape ``(...)``.
+    """
+    return jnp.mean(jnp.diagonal(gram, axis1=-2, axis2=-1), axis=-1)
+
+
+def _live_pairs(BtB: Array, ridge: float | Array) -> tuple[Array, Array]:
+    """Return the per-term ridge and which terms are live.
+
+    A pair whose projected Gram is near zero (an input with almost no spread)
+    holds nothing beyond the first order. Its ridge is then tiny and the
+    round-off left by the projection makes its block near-singular or
+    indefinite, which turns the coefficients of every lane into huge values or
+    NaN. Every pair solver drops such a pair alike, with zero coefficients.
+
+    Args:
+        BtB: Projected per-term Gram blocks, ``(n2, m2, m2)``.
+        ridge: Relative ridge, as in :func:`_ridge_eye`.
+
+    Returns:
+        The per-term ridge ``ridge * mean(diag)``, shape ``(n2,)``, and a
+        boolean mask of the live terms, shape ``(n2,)``.
+    """
+    lam = ridge * _ridge_scale(BtB)
+    live = lam > jnp.sqrt(jnp.finfo(lam.dtype).eps) * jnp.max(lam)
+    return lam, live
+
+
+def _eigen_cut(G: Array) -> tuple[Array, Array, Array]:
+    """Eigen-decompose a symmetric Gram and flag the directions to keep.
+
+    Eigenvalues below ``sqrt(eps)`` of the largest are dropped: the
+    first-order bases of different inputs share the constant function, so the
+    Gram has a null space.
+
+    Args:
+        G: Gram matrix, shape ``(P, P)``.
+
+    Returns:
+        The eigenvalues ``w``, the eigenvectors ``V`` and the boolean mask
+        ``keep``, shapes ``(P,)``, ``(P, P)`` and ``(P,)``.
+    """
+    w, V = jnp.linalg.eigh((G + G.T) / 2)
+    keep = w > jnp.sqrt(jnp.finfo(G.dtype).eps) * jnp.max(w)
+    return w, V, keep
 
 
 @lru_cache(maxsize=32)
@@ -319,8 +369,7 @@ def _first_order_pinv(G1: Array) -> Array:
     Returns:
         The pseudo-inverse, shape ``(P, P)``.
     """
-    w, V = jnp.linalg.eigh((G1 + G1.T) / 2)
-    keep = w > jnp.sqrt(jnp.finfo(G1.dtype).eps) * jnp.max(w)
+    w, V, keep = _eigen_cut(G1)
     inv = jnp.where(keep, 1.0 / jnp.where(keep, w, 1.0), 0.0)
     return (V * inv[None, :]) @ V.T
 
@@ -411,7 +460,15 @@ def _joint_pair_solve(
     m_basis = BtB.shape[1]
     lam = _ridge_eye(BtB, ridge, m_basis)  # (n2, m2, m2)
     lam_diag = jnp.diagonal(lam, axis1=-2, axis2=-1)  # (n2, m2)
-    Minv = jnp.linalg.inv(BtB + lam)
+    # A dead pair is dropped as in the direct solves: its preconditioner block
+    # is zero, so it starts at zero and its search direction stays zero, and
+    # its residual is masked out.
+    _, live = _live_pairs(BtB, ridge)
+    eye = jnp.eye(m_basis)
+    Minv = jnp.where(
+        live[:, None, None], jnp.linalg.inv(jnp.where(live[:, None, None], BtB + lam, eye)), 0.0
+    )
+    live_l = live[None, :, None]
 
     def precond(r: Array) -> Array:
         return jnp.einsum("jmn,ljn->ljm", Minv, r)
@@ -424,10 +481,16 @@ def _joint_pair_solve(
         return jnp.where(d == 0, 1.0, d)
 
     solver = _get_gram_higher_solver(m_basis, ridge)
+    rhs = [jnp.where(live_l, rr, 0.0) for rr in rhs]
     # Start from the independent per-term solution, stored as (cs, n2, m2).
-    x = [solver(BtB, r).transpose(0, 2, 1) for r in rhs]
+    # A dead block is swapped for the identity, so no near-singular solve runs.
+    BtB_live = jnp.where(live[:, None, None], BtB, eye)
+    x = [solver(BtB_live, r).transpose(0, 2, 1) for r in rhs]
     Mx = sweep(x)
-    r = [b - (m + lam_diag[None] * xx) for b, m, xx in zip(rhs, Mx, x, strict=True)]
+    r = [
+        jnp.where(live_l, b - (m + lam_diag[None] * xx), 0.0)
+        for b, m, xx in zip(rhs, Mx, x, strict=True)
+    ]
     z = [precond(rr) for rr in r]
     # A zero right-hand side (a constant or padded lane) is already solved.
     bnorm = [safe(jnp.sqrt(d)) for d in dot(rhs, rhs)]
@@ -457,7 +520,10 @@ def _joint_pair_solve(
         active = [jnp.sqrt(d) / b >= tol for d, b in zip(dot(r, r), bnorm, strict=True)]
         alpha = [jnp.where(on, a / safe(d), 0.0) for on, a, d in zip(active, rz, pAp, strict=True)]
         x = [xx + al[:, None, None] * pp for xx, al, pp in zip(x, alpha, p, strict=True)]
-        r = [rr - al[:, None, None] * a for rr, al, a in zip(r, alpha, Ap, strict=True)]
+        r = [
+            jnp.where(live_l, rr - al[:, None, None] * a, 0.0)
+            for rr, al, a in zip(r, alpha, Ap, strict=True)
+        ]
         z = [precond(rr) for rr in r]
         rz_new = dot(r, z)
         beta = [
@@ -479,6 +545,31 @@ def _joint_pair_solve(
     init = (x, r, z, dot(r, z), jnp.array(0), rel_res(r), jnp.array(0))
     x, r, *_ = jax.lax.while_loop(cond, body, init)
     return [xx.transpose(0, 2, 1) for xx in x], rel_res(r), tol
+
+
+def pair_solve_warning(rel: Array | None, max_iter: int) -> str | None:
+    """Return the warning text for a joint pair CG that did not converge.
+
+    Args:
+        rel: Worst relative residual, or ``None`` when no CG ran. A tracer
+            (under jit or vmap) has no value and gives no warning.
+        max_iter: The fit's ``max_iter``.
+
+    Returns:
+        The message, or ``None`` when there is nothing to warn about.
+    """
+    if rel is None or isinstance(rel, jax.core.Tracer):
+        return None
+    tol = _pair_tol(float(jnp.finfo(rel.dtype).eps))
+    if float(rel) < max(tol, _PAIR_WARN_REL):
+        return None
+    return (
+        f"jaxgsa.hdmr: the joint second-order solve stopped at relative "
+        f"residual {float(rel):.1e}, at the cap of "
+        f"{_PAIR_ITER_FACTOR * max_iter} steps (10 x max_iter) or after "
+        f"{_PAIR_STALL} steps without progress (float32). Raise ridge, "
+        "use float64, or raise max_iter."
+    )
 
 
 @lru_cache(maxsize=32)
@@ -565,6 +656,36 @@ def _get_build_bases(m: int, order2: bool, order3: bool):
     return build
 
 
+def _walk_term_blocks(
+    n_t: int,
+    tb: int,
+    init: Any,
+    step: Callable[[Array, Array, Any], Any],
+) -> Any:
+    """Fold ``step`` over the terms in blocks of ``tb``, counting each term once.
+
+    The last block is clamped to end at ``n_t``, so it shares terms with the
+    previous block. ``step`` gets a mask for the terms that are new.
+
+    Args:
+        n_t: Number of terms, at least 1.
+        tb: Block size, at most ``n_t``.
+        init: Initial carry.
+        step: ``(start, valid, carry) -> carry``, where ``start`` is the first
+            term of the block and ``valid`` is a boolean mask of shape
+            ``(tb,)`` for the terms not already seen.
+
+    Returns:
+        The final carry.
+    """
+
+    def body(i: Array, carry: Any) -> Any:
+        start = jnp.minimum(i * tb, n_t - tb)
+        return step(start, start + jnp.arange(tb) >= i * tb, carry)
+
+    return jax.lax.fori_loop(0, -(-n_t // tb), body, init)
+
+
 @jax.jit
 def _acc_gram(B_b: Array, BtB: Array, colsum: Array) -> tuple[Array, Array]:
     """Accumulate one basis' per-term Gram block and column sums.
@@ -587,17 +708,15 @@ def _acc_gram(B_b: Array, BtB: Array, colsum: Array) -> tuple[Array, Array]:
 
     # A single einsum copies B_b twice to bring the term axis to the front. A
     # loop over term blocks copies one small block at a time instead.
-    def body(i: Array, G: Array) -> Array:
-        # The last block is clamped to end at n_t; mask the terms it shares
-        # with the previous block so none counts twice.
-        start = jnp.minimum(i * tb, n_t - tb)
-        valid = (start + jnp.arange(tb) >= i * tb)[:, None, None]
+    def step(start: Array, valid: Array, G: Array) -> Array:
         blk = jax.lax.dynamic_slice_in_dim(B_b, start, tb, axis=2)
         cur = jax.lax.dynamic_slice_in_dim(G, start, tb, axis=0)
-        upd = jnp.where(valid, cur + jnp.einsum("rmj,rnj->jmn", blk, blk).astype(G.dtype), cur)
+        upd = jnp.where(
+            valid[:, None, None], cur + jnp.einsum("rmj,rnj->jmn", blk, blk).astype(G.dtype), cur
+        )
         return jax.lax.dynamic_update_slice_in_dim(G, upd, start, 0)
 
-    return jax.lax.fori_loop(0, -(-n_t // tb), body, BtB), colsum + jnp.sum(B_b, axis=0)
+    return _walk_term_blocks(n_t, tb, BtB, step), colsum + jnp.sum(B_b, axis=0)
 
 
 @jax.jit
@@ -849,16 +968,12 @@ def _dual_pair_solve(
 
     # Orthonormal basis of the first-order span, with the eigenvalue cut of
     # _first_order_pinv; a dropped direction gets a zero column.
-    w, V = jnp.linalg.eigh((G1_flat + G1_flat.T) / 2)
-    keep = w > jnp.sqrt(jnp.finfo(G1_flat.dtype).eps) * jnp.max(w)
+    w, V, keep = _eigen_cut(G1_flat)
     U = B1.reshape(N, -1) @ (V * jnp.where(keep, 1.0 / jnp.sqrt(jnp.where(keep, w, 1.0)), 0.0))
 
-    lam = ridge * jnp.mean(jnp.diagonal(BtB, axis1=-2, axis2=-1), axis=-1)  # (n2,)
-    # A pair whose projected Gram is near zero (an input with almost no
-    # spread) holds nothing beyond the first order. Its 1 / lam would be huge,
-    # and the round-off it leaves after the projection makes the kernel
-    # indefinite, so the Cholesky factor of every lane turns NaN. Drop it.
-    live = lam > jnp.sqrt(jnp.finfo(lam.dtype).eps) * jnp.max(lam)
+    # A dead pair would make 1 / lam huge and the kernel indefinite, so the
+    # Cholesky factor of every lane turns NaN. Drop it (see _live_pairs).
+    lam, live = _live_pairs(BtB, ridge)  # (n2,)
     inv = jnp.where(live, 1.0 / jnp.where(live, lam, 1.0), 0.0)
     inv_lam = jnp.zeros((n1, n1), dtype=B1.dtype).at[c2_idx[:, 0], c2_idx[:, 1]].set(inv)
     itemsize = jnp.dtype(B1.dtype).itemsize
@@ -908,9 +1023,14 @@ def _dense_pair_solve(
     G12_f = G12.transpose(0, 2, 1).reshape(G12.shape[0], K)
     Gt = G22 - G12_f.T @ A_f
     Gt = (Gt + Gt.T) / 2
-    lam = ridge * jnp.mean(jnp.diagonal(BtB, axis1=-2, axis2=-1), axis=-1)  # (n2,)
-    lam_flat = jnp.repeat(lam, m2)
-    sol = jnp.linalg.solve(Gt + jnp.diag(lam_flat), rhs.reshape(n_chunks * cs, K).T)
+    lam, live = _live_pairs(BtB, ridge)  # (n2,)
+    # A dead pair keeps an identity block and a zero right-hand side, so its
+    # coefficients are zero and it cannot reach the live pairs.
+    live_flat = jnp.repeat(live, m2)
+    lam_flat = jnp.repeat(jnp.where(live, lam, 1.0), m2)
+    mask = live_flat[:, None] & live_flat[None, :]
+    rhs_flat = jnp.where(live_flat[:, None], rhs.reshape(n_chunks * cs, K).T, 0.0)
+    sol = jnp.linalg.solve(jnp.where(mask, Gt, 0.0) + jnp.diag(lam_flat), rhs_flat)
     return sol.T.reshape(n_chunks, cs, n2, m2).transpose(0, 1, 3, 2)
 
 
@@ -1120,16 +1240,12 @@ def _block_sum(B: Array, C: Array, b: int, cs: int, dtype: jnp.dtype) -> Array:
         return jnp.zeros((b, cs), dtype=dtype)
     tb = min(n_k, _STATS_TERM_BLOCK)
 
-    def body(i: Array, total: Array) -> Array:
-        # The last block is clamped to end at n_k; mask the terms it shares
-        # with the previous block.
-        start = jnp.minimum(i * tb, n_k - tb)
-        valid = start + jnp.arange(tb) >= i * tb
+    def step(start: Array, valid: Array, total: Array) -> Array:
         B_blk = jax.lax.dynamic_slice_in_dim(B, start, tb, axis=2)
         C_blk = jnp.where(valid, jax.lax.dynamic_slice_in_dim(C, start, tb, axis=2), 0)
         return total + jnp.einsum("rmj,lmj->rl", B_blk, C_blk).astype(dtype)
 
-    return jax.lax.fori_loop(0, -(-n_k // tb), body, jnp.zeros((b, cs), dtype=dtype))
+    return _walk_term_blocks(n_k, tb, jnp.zeros((b, cs), dtype=dtype), step)
 
 
 @lru_cache(maxsize=2)
@@ -1218,23 +1334,18 @@ def _get_stats_step(blocked: bool):
                     lst.append(jnp.zeros((0, cs), dtype=dtype))
                 continue
             tb = min(n_k, _STATS_TERM_BLOCK)
-            n_blocks = -(-n_k // tb)
             r_k = r_null[k][None]
 
             def body(
-                i: Array,
+                start: Array,
+                valid: Array,
                 carry: tuple[Array, ...],
                 B: Array = B,
                 C: Array = C,
                 off: int = off,
-                n_k: int = n_k,
                 tb: int = tb,
                 r_k: Array = r_k,
             ) -> tuple[Array, ...]:
-                # The last block is clamped to end at n_k; the terms it shares
-                # with the previous block are masked out so no term counts twice.
-                start = jnp.minimum(i * tb, n_k - tb)
-                valid = (start + jnp.arange(tb) >= i * tb)[:, None]
                 B_blk = jax.lax.dynamic_slice_in_dim(B, start, tb, axis=2)
                 C_blk = jax.lax.dynamic_slice_in_dim(C, start, tb, axis=2)
                 mf = jax.lax.dynamic_slice_in_dim(mean_f_c, off + start, tb, axis=1)
@@ -1255,13 +1366,16 @@ def _get_stats_step(blocked: bool):
                     cur = jax.lax.dynamic_slice_in_dim(acc_k, start, tb, axis=0)
                     new.append(
                         jax.lax.dynamic_update_slice_in_dim(
-                            acc_k, jnp.where(valid, cur + v.astype(acc_k.dtype), cur), start, 0
+                            acc_k,
+                            jnp.where(valid[:, None], cur + v.astype(acc_k.dtype), cur),
+                            start,
+                            0,
                         )
                     )
                 return tuple(new)
 
             init = tuple(jnp.zeros((n_k, cs), dtype=dtype) for _ in range(5))
-            res = jax.lax.fori_loop(0, n_blocks, body, init)
+            res = _walk_term_blocks(n_k, tb, init, body)
             for lst, r in zip(outs, res, strict=True):
                 lst.append(r)
             off += n_k
@@ -1374,6 +1488,8 @@ class _FitHDMR(NamedTuple):
         f0: Grand mean per slice, shape ``(L,)``.
         streamed: Whether the sample axis was actually split into row
             batches.
+        pair_rel: Worst relative residual of the joint pair CG, or ``None``
+            when a direct solve ran. A tracer under jit or vmap.
     """
 
     Sa: Array
@@ -1387,6 +1503,7 @@ class _FitHDMR(NamedTuple):
     C3: Array | None
     f0: Array
     streamed: bool
+    pair_rel: Array | None = None
 
 
 def _fit_hdmr(
@@ -1474,16 +1591,6 @@ def _fit_hdmr(
     # Pair solver state per lane: rhs, x, r, z, p and the matrix-vector product.
     lane_fixed = 6 * n2 * m2 * itemsize if order2 else 0
     cs = _resolve_slice_chunk_size(slice_chunk_size, L, b, slice_bytes, lane_fixed)
-    if order2:
-        fixed = 2 * m1 * D * m2 * n2 * itemsize  # the projection A and the cross Gram
-        if fixed > get_memory_budget():
-            warnings.warn(
-                f"jaxgsa.hdmr: the order-2 projection needs about {fixed / 2**20:.0f} MiB, "
-                f"above the {get_memory_budget() / 2**20:.0f} MiB memory budget. "
-                "Use fewer inputs or a smaller n_intervals.",
-                category=JaxgsaWarning,
-                stacklevel=3,
-            )
 
     # Pad both axes so each jitted step compiles once. A padded row is masked
     # to zero in every accumulator; a padded lane is an independent constant
@@ -1542,6 +1649,7 @@ def _fit_hdmr(
     coef_chunks = [C1_chunks]  # what the residuals and predict() use
     stat_chunks = [C1_chunks]  # what the per-term statistics use
     proj_A: Array | None = None
+    pair_rel: Array | None = None
     for term_order, (n_terms, m_basis) in enumerate(((n2, m2), (n3, m3)), start=2):
         if not (order2 if term_order == 2 else order3):
             break
@@ -1638,36 +1746,8 @@ def _fit_hdmr(
                 C2_stack, rel = _get_pair_solve(
                     n_intervals, b, n_row_batches, _PAIR_ITER_FACTOR * max_iter, term_ridge
                 )(X_p, w_full, c2_idx, c3_idx, beta2, beta3, A, BtB, jnp.stack(rhs))
+            pair_rel = rel
             C2_chunks = list(C2_stack)
-            # Free coefficients: each 1-D basis sums to one, so an input adds
-            # m1 - 1 functions beyond the constant, and a projected pair adds
-            # (m1 - 1)^2 (its tensor basis minus both 1-D spans).
-            n_coef = n1 * (m1 - 1) + n2 * (m1 - 1) ** 2
-            if n_coef > 0.8 * N:
-                warnings.warn(
-                    f"jaxgsa.hdmr: order 2 has {n_coef} coefficients for "
-                    f"{N} samples. The pair fit can interpolate the data, so pair "
-                    "indices may be too small or too large. Use more samples, "
-                    "fewer inputs or a smaller n_intervals.",
-                    category=JaxgsaWarning,
-                    stacklevel=3,
-                )
-            tol = _pair_tol(float(jnp.finfo(dtype).eps))
-            # The check needs a concrete value; under jit or vmap there is none.
-            if (
-                rel is not None
-                and not isinstance(rel, jax.core.Tracer)
-                and float(rel) >= max(tol, _PAIR_WARN_REL)
-            ):
-                warnings.warn(
-                    f"jaxgsa.hdmr: the joint second-order solve stopped at relative "
-                    f"residual {float(rel):.1e}, at the cap of "
-                    f"{_PAIR_ITER_FACTOR * max_iter} steps (10 x max_iter) or after "
-                    f"{_PAIR_STALL} steps without progress (float32). Raise ridge, "
-                    "use float64, or raise max_iter.",
-                    category=JaxgsaWarning,
-                    stacklevel=3,
-                )
             C1_fold = []
             for j in range(n_chunks):
                 shift_p = jnp.einsum("pmj,lmj->lp", A, C2_chunks[j])  # (cs, P)
@@ -1753,4 +1833,5 @@ def _fit_hdmr(
         C3=C[2] if order3 else None,
         f0=f0[:L],
         streamed=b < N,
+        pair_rel=pair_rel,
     )

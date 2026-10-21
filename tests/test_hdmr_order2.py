@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from jaxgsa import hdmr
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.benchmarks import ishigami
 from jaxgsa.hdmr import HDMRResult
 from jaxgsa.problem import Problem
@@ -239,3 +240,55 @@ def test_float32_never_takes_a_direct_pair_solve():
     from jaxgsa.hdmr import _fit
 
     assert _fit._pair_solver(500, 4, 10, 1000, 4) == "cg"
+
+
+def test_all_pair_solvers_drop_a_dead_pair_alike(x64, monkeypatch):
+    """Dense, dual and CG agree and stay finite when one input has almost no spread.
+
+    This is a consistency check across the three solvers, not a regression
+    test: the old dense and CG paths also stayed finite on every input tried
+    (spreads 1e-4 to 1e-12 and an exactly constant column, which is refused).
+    The dead-pair guard makes the three treat such a pair alike.
+    """
+    from jaxgsa.hdmr import _fit as _fit_module
+
+    problem, X, Y = _small_case(4, spread=1e-9)
+    S = {}
+    for kind in ("dense", "dual", "cg"):
+        monkeypatch.setattr(_fit_module, "_pair_solver", lambda *_, k=kind: k)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            S[kind] = np.asarray(_fit_order2(problem, X, Y, n_intervals=6).S, dtype=float)
+        assert np.all(np.isfinite(S[kind])), kind
+    np.testing.assert_allclose(S["dense"], S["dual"], rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(S["cg"], S["dual"], rtol=1e-3, atol=1e-3)
+
+
+def test_order2_indices_stay_silent():
+    """Only ``analyze`` warns about a large order-2 fit, not ``indices``."""
+    D, N = 15, 1024
+    X_np = np.random.default_rng(0).random((N, D))
+    X, Y = jnp.asarray(X_np), jnp.asarray(_f(X_np))
+    problem = Problem(names=[f"x{i}" for i in range(D)], bounds=[(0.0, 1.0)] * D)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        hdmr.indices(problem, X, Y, order=2)
+    with pytest.warns(JaxgsaWarning, match="coefficients for"):
+        hdmr.analyze(problem, X, Y, order=2)
+
+
+def test_unconverged_pair_cg_warns_in_analyze_only(x64, monkeypatch):
+    """A joint pair CG cut at ten steps warns in ``analyze`` and not in ``indices``."""
+    from jaxgsa.hdmr import _fit
+
+    monkeypatch.setattr(_fit, "_pair_solver", lambda *_: "cg")
+    # Measured: the relative residual after ten steps is 5.6e-3 here.
+    monkeypatch.setattr(_fit, "_PAIR_WARN_REL", 1e-4)
+    problem, X_np, Y_np = _small_case(5, N=700)
+    X, Y = jnp.asarray(X_np), jnp.asarray(Y_np)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        hdmr.indices(problem, X, Y, order=2, n_intervals=9, max_iter=1, ridge=1e-12)
+    with pytest.warns(JaxgsaWarning) as caught:
+        hdmr.analyze(problem, X, Y, order=2, n_intervals=9, max_iter=1, ridge=1e-12, verbose=False)
+    assert len([w for w in caught if "relative residual" in str(w.message)]) == 1

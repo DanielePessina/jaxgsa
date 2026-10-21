@@ -18,6 +18,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
+from jaxgsa._core.batching import get_memory_budget
 from jaxgsa._core.bootstrap import bootstrap_draws, interval
 from jaxgsa._core.entry import (
     _METHOD_ALIAS,
@@ -53,7 +54,7 @@ from jaxgsa.hdmr._engine import (
     _build_B3,
     _compute_f_crits,
 )
-from jaxgsa.hdmr._fit import _fit_hdmr
+from jaxgsa.hdmr._fit import _fit_hdmr, pair_solve_warning
 from jaxgsa.hdmr._result import HDMRResult, _HDMRFit
 from jaxgsa.problem import Problem
 
@@ -341,6 +342,47 @@ def _reshape_emulator_value(value: Array, T: int, K_out: int, layout: YLayout) -
     return layout.squeeze(value, n_trailing=value.ndim - 2)
 
 
+def _warn_large_order2(N: int, itemsize: int, *, n1: int, n2: int, m1: int, m2: int) -> None:
+    """Warn when the order-2 fit is too big for the data or the memory budget.
+
+    This lives in :func:`analyze`, not the fit, so that ``indices`` and every
+    bootstrap replicate stay silent. It reads shapes only.
+
+    Args:
+        N: Number of rows.
+        itemsize: Bytes per element of the working dtype.
+        n1: Number of first-order terms.
+        n2: Number of pair terms.
+        m1: First-order basis size.
+        m2: Pair basis size.
+    """
+    if n2 == 0:
+        return
+    budget = get_memory_budget()
+    fixed = 2 * m1 * n1 * m2 * n2 * itemsize  # the projection A and the cross Gram
+    if fixed > budget:
+        warnings.warn(
+            f"jaxgsa.hdmr: the order-2 projection needs about {fixed / 2**20:.0f} MiB, "
+            f"above the {budget / 2**20:.0f} MiB memory budget. "
+            "Use fewer inputs or a smaller n_intervals.",
+            category=JaxgsaWarning,
+            stacklevel=3,
+        )
+    # Free coefficients: each 1-D basis sums to one, so an input adds
+    # m1 - 1 functions beyond the constant, and a projected pair adds
+    # (m1 - 1)^2 (its tensor basis minus both 1-D spans).
+    n_coef = n1 * (m1 - 1) + n2 * (m1 - 1) ** 2
+    if n_coef > 0.8 * N:
+        warnings.warn(
+            f"jaxgsa.hdmr: order 2 has {n_coef} coefficients for "
+            f"{N} samples. The pair fit can interpolate the data, so pair "
+            "indices may be too small or too large. Use more samples, "
+            "fewer inputs or a smaller n_intervals.",
+            category=JaxgsaWarning,
+            stacklevel=3,
+        )
+
+
 def _warn_correlated_index_reading(problem: Problem) -> None:
     """Warn once that ST and S1 carry the SCSA reading on a correlated problem.
 
@@ -516,6 +558,16 @@ def analyze(
     # in the public wrapper only, so Shapley routing through the core stays
     # quiet.
     _warn_correlated_index_reading(problem)
+    if order >= 2 and problem.n_params >= 2:
+        static = _get_hdmr_static_data(problem.n_params, 2, n_intervals)
+        _warn_large_order2(
+            X.shape[0],
+            jnp.dtype(jnp.result_type(X.dtype, Y.dtype)).itemsize,
+            n1=static.n1,
+            n2=static.n2,
+            m1=static.m1,
+            m2=static.m2,
+        )
     t0 = _verbose.tic()
     result = _analyze_hdmr_core(
         problem,
@@ -609,6 +661,7 @@ class _HDMRCore(NamedTuple):
         c2: Parameter index pairs, in term order.
         c3: Parameter index triples, in term order.
         layout: Which rank the caller's ``Y`` had, for the squeeze back.
+        pair_rel: Worst relative residual of the joint pair CG, or ``None``.
     """
 
     Sa: Array
@@ -627,6 +680,7 @@ class _HDMRCore(NamedTuple):
     c2: tuple[tuple[int, int], ...]
     c3: tuple[tuple[int, int, int], ...]
     layout: YLayout
+    pair_rel: Array | None = None
 
 
 def _hdmr_core(
@@ -783,6 +837,7 @@ def _hdmr_core(
         c2=tuple(c2),
         c3=tuple(c3),
         layout=layout,
+        pair_rel=fit.pair_rel,
     )
 
 
@@ -1117,6 +1172,8 @@ def _analyze_hdmr_core(
             stacklevel=3,
             category=JaxgsaWarning,
         )
+    if (msg := pair_solve_warning(core.pair_rel, max_iter)) is not None:
+        warnings.warn(msg, stacklevel=3, category=JaxgsaWarning)
     layout = core.layout
     T, K_out = core.Sa.shape[:2]
     term_labels = _build_term_labels(problem, tuple(range(problem.n_params)), core.c2, core.c3)
