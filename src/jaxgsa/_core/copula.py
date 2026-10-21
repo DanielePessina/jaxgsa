@@ -135,6 +135,8 @@ class _ConditionalPlan:
         self.std_self = std_self
         self.chol_full = chol_full
         self._rest_cache: tuple[int, np.ndarray] | None = None
+        # Indices whose lift the build-time pass already reported.
+        self._warned_lifts: set[int] = set()
 
     def beta_rest(self, index: int) -> np.ndarray:
         """Return ``R[-i, i]``, the regression of ``Z_-i`` on ``Z_i``."""
@@ -160,7 +162,7 @@ class _ConditionalPlan:
             return self._rest_cache[1]
         lifts: list[float] = []
         factor = self._factor(index, lifts)
-        if lifts:
+        if lifts and index not in self._warned_lifts:
             _warn_degenerate_conditionals(lifts, 0, np.inf)
         self._rest_cache = (index, factor)
         return factor
@@ -684,7 +686,9 @@ def build_conditional_plan(R: np.ndarray, chol_full: np.ndarray | None = None) -
 
     # Z_i | Z_-i from the precision matrix P = R^{-1}: the regression
     # coefficients are -P[i, -i] / P[i, i] and the residual variance is
-    # 1 / P[i, i]. One inverse replaces D solves.
+    # 1 / P[i, i]. One inverse replaces D solves. Measured against exact
+    # rational arithmetic, this is as accurate as D solves against R[-i, -i]
+    # up to cond(R) ~ 1e8 (see test_plan_self_conditionals_*).
     precision = np.linalg.inv(R)
     precision = 0.5 * (precision + precision.T)
     diag = np.diag(precision)
@@ -711,7 +715,10 @@ def build_conditional_plan(R: np.ndarray, chol_full: np.ndarray | None = None) -
     lifts: list[float] = []
     if float(np.linalg.eigvalsh(R).min()) < _MIN_EIGENVALUE:
         for i in range(D):
+            before = len(lifts)
             plan._factor(i, lifts)
+            if len(lifts) > before:
+                plan._warned_lifts.add(i)
     _warn_degenerate_conditionals(lifts, n_floored, min_cond_var)
     return plan
 
