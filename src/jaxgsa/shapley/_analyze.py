@@ -19,7 +19,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.bootstrap import interval
+from jaxgsa._core.bootstrap import bootstrap_draws, interval
 from jaxgsa._core.entry import (
     bootstrap_checks,
     check_scalars,
@@ -308,6 +308,27 @@ def indices(
     return ShapleyIndices(Sh=layout.squeeze(Sh), S1=layout.squeeze(S1), ST=layout.squeeze(ST))
 
 
+def _shapley_replicate(
+    rows: Array,
+    X: Array,
+    Y_3d: Array,
+    *,
+    problem: "Problem",
+    backend: Literal["pce", "hdmr"],
+    include_correlative: bool,
+    backend_kwargs: tuple[tuple[str, Any], ...],
+) -> tuple[Array, Array, Array]:
+    """Refit the backend on the rows ``rows`` and return ``(Sh, S1, ST)``."""
+    return _indices_3d(
+        problem,
+        X[rows],
+        Y_3d[rows],
+        backend=backend,
+        include_correlative=include_correlative,
+        backend_kwargs=dict(backend_kwargs),
+    )
+
+
 def _bootstrap_indices(
     problem: "Problem",
     X: Array,
@@ -341,22 +362,19 @@ def _bootstrap_indices(
         One stacked draw array per index field, each with a leading axis of
         length ``n_bootstrap`` followed by the canonical ``(T, K, D)`` shape.
     """
-    N = X.shape[0]
-    draws: dict[str, list[Array]] = {name: [] for name in _INDEX_FIELDS}
-    for _ in range(n_bootstrap):
-        key, subkey = jax.random.split(key)
-        rows = jax.random.choice(subkey, N, shape=(N,), replace=True)
-        replicate = _indices_3d(
-            problem,
-            X[rows],
-            Y_3d[rows],
-            backend=backend,
-            include_correlative=include_correlative,
-            backend_kwargs=backend_kwargs,
-        )
-        for name, value in zip(_INDEX_FIELDS, replicate, strict=True):
-            draws[name].append(value)
-    return {name: jnp.stack(parts) for name, parts in draws.items()}
+    draws = bootstrap_draws(
+        key,
+        n_bootstrap,
+        _shapley_replicate,
+        (X, Y_3d),
+        static=(
+            ("problem", problem),
+            ("backend", backend),
+            ("include_correlative", include_correlative),
+            ("backend_kwargs", tuple(sorted(backend_kwargs.items()))),
+        ),
+    )
+    return dict(zip(_INDEX_FIELDS, draws, strict=True))
 
 
 def analyze(

@@ -13,6 +13,16 @@ import warnings
 if os.environ.get("PYTEST_XDIST_WORKER"):
     os.environ.setdefault("NPROC", "1")
 
+# Keep compiled XLA programs on disk between runs, so a rerun loads them
+# instead of compiling again. Most of a test's time is compilation, not
+# arithmetic. Set JAX_COMPILATION_CACHE_DIR="" to turn it off.
+os.environ.setdefault(
+    "JAX_COMPILATION_CACHE_DIR",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".pytest_cache", "jax")),
+)
+os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "0")
+os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES", "-1")
+
 import jax  # noqa: E402
 import pytest
 
@@ -27,6 +37,20 @@ pytest_plugins = [
     "_fixtures_givendata",
     "_fixtures_crosscutting",
 ]
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _free_compiled_programs():
+    """Drop JAX's in-memory compiled programs after each test file.
+
+    Every jitted kernel a test compiles stays in JAX's caches for the life
+    of the worker. Over the whole suite this grew to about 10 GB on a CI
+    runner (16 GB) and ran it out of memory with jax 0.11.0. A later file
+    that needs a program again loads it from the disk cache above instead
+    of compiling it.
+    """
+    yield
+    jax.clear_caches()
 
 
 @pytest.fixture(autouse=True)

@@ -26,6 +26,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core.batching import get_memory_budget
 from jaxgsa._core.warning_types import JaxgsaWarning
 
 # The directory this package's own frames live under. A warning raised with it
@@ -64,31 +65,63 @@ OVERFIT_THRESHOLD = 1.3
 # of 0.020.
 CV_RATIO_THRESHOLD = math.sqrt(1.0 - POORFIT_THRESHOLD)
 
-# Limits on the pivot share of a Gram matrix, per dtype.
+# Limits on the pivot share of the design, per dtype.
 #
-# The pivot share of column j is the squared Cholesky pivot ``L[j, j]**2``
-# over the diagonal ``G[j, j]`` of the ridge-regularized Gram matrix: the
-# fraction of the column's variance that is left after the columns before it
-# explain it.
+# The pivot share of column j is the squared QR pivot ``R[j, j]**2`` over the
+# squared norm of the ridge-augmented column: the fraction of the column's
+# variance that is left after the columns before it explain it. It is read off
+# the QR factor of the fit, which never squares the condition number, so it is
+# finite and accurate in float32 down to about 1e-11.
 #
-# The share alone cannot prove that the indices are undefined in float64.
-# Accurate high-order Hermite fits and exactly dependent designs give shares
-# in overlapping ranges, so no fixed limit separates them. The provable cases,
-# a constant input and two identical inputs, are read off the inputs instead
-# (:func:`check_degenerate_inputs`). In float64 the share only warns, below
-# 1e-9. An input that copies another up to 1e-3 noise gives about 3e-10 on
-# 2000 rows, and its copy then gets a total index of 0.08 instead of 0.
-#
-# float32 cannot resolve the same range. Its rounding floor overlaps the
-# shares of singular designs: a three-level input on 2000 rows gives about
-# 1e-5 in float32, and the exact value moves with the jax version. Below 1e-5
-# float32 refuses the fit, and NaN (a failed factorisation) counts as below.
-# From 1e-5 to 1e-4 it warns, because the design may be singular and float32
-# cannot tell. The lowest well-posed float32 share measured is 1.5e-4 (D = 10,
-# order 4, fit_ratio = 1).
-ILL_CONDITIONED_PIVOT_THRESHOLD_F64 = 1e-9
+# In float64 the share alone cannot prove that the indices are undefined.
+# Accurate high-order Hermite fits and exactly dependent designs give
+# shares in overlapping ranges, so no fixed limit separates them. Order 20 on
+# two Gaussian inputs gives 1.7e-9 and exact indices, while a three-level
+# input on 2000 rows gives 1.7e-10 and a two-level input 1e-11. The ridge
+# floors the share of any singular design near ``ridge / |column|**2``. The
+# provable cases, a constant input, two identical inputs and a linear
+# combination of inputs, are read off the inputs instead
+# (:func:`check_degenerate_inputs`). The share only warns. An input that
+# copies another up to 1e-3 noise gives about 3e-10 on 2000 rows, and its
+# copy then gets a total index of 0.08 instead of 0. In float64 the share
+# only warns.
+ILL_CONDITIONED_PIVOT_THRESHOLD = 1e-9
+
+# float32 raises below this share, as in 1.1.2. Rounding in float32 is far
+# larger than in float64, so a share this small cannot be told from a
+# singular design. Measured on Gaussian inputs, N=6000: share 1.3e-8 gives a
+# total index off by 2e-3, and share 1.8e-9 off by 0.05.
 SINGULAR_PIVOT_THRESHOLD_F32 = 1e-5
+
+# float32 needs a higher line for a warning. The leave-one-out error divides
+# a residual by ``1 - h``, where ``h`` is the leverage of the row. A design
+# with a small pivot share gives rows with ``h`` near 1, so ``1 - h`` is
+# mostly rounding noise in float32. Measured on Gaussian inputs, N=6000, the
+# float32 ``cv_rmse`` against float64: share 3.3e-3 agrees to 1%, share 7.7e-4
+# is off by 3%, share 9.8e-5 is off by a factor 45 (0.23 against 0.005), and
+# share 1.6e-6 by a factor 2000. The indices stay exact far longer (to 1e-5 at
+# a share of 1.4e-7), so the warning is about ``cv_rmse`` first. It fires
+# below 1e-4. float64 never reaches the line before it reaches the one above.
 AMBIGUOUS_PIVOT_THRESHOLD_F32 = 1e-4
+
+# Limit on the residual of an input that is a linear combination of others.
+#
+# Regress input j, centred and scaled to unit spread, on the inputs before it.
+# The residual ``rho_j`` is the part of j they cannot explain: 1 for an
+# independent input, 0 for an exact copy. Data that is exactly dependent still
+# shows rounding noise. Measured on uniform inputs with N from 500 to 5000 and
+# D from 3 to 400, ``rho_j`` stays between 0.14 and 0.3 times
+# ``eps * rms_j / std_j`` for float32 data (``c = 1 - a``, ``c = a + b``,
+# ``c = 0.3a + 0.7b + 5``, ``c = 1000 + a``), where ``rms_j / std_j`` is the
+# column's offset-to-spread ratio. For float64 data the QR in the check
+# adds up to 33 eps, so the same ratio reaches 0.33 (``c = 1000 + a``) and
+# 0.01 (``c = 1 - a``). An input that copies another with noise of 1e-5 gives
+# ``rho`` of 3.4e-5 and with noise of 1e-3 gives 3.4e-3. The limit is 100 times
+# ``eps * rms_j / std_j``, capped at 1e-3. That is 4 to 20 times the exact
+# cases, and below the noisy copies for float64 data. Float32 data cannot tell
+# a noise of 1e-5 or less from rounding, and the pivot share covers it.
+LINEAR_DEPENDENCE_FACTOR = 100.0
+LINEAR_DEPENDENCE_CAP = 1e-3
 
 
 @jax.jit
@@ -253,20 +286,40 @@ def warn_cv_overfit(
     )
 
 
-@jax.jit
-def min_pivot_share(gram: Array) -> Array:
-    """The smallest unexplained share of any column of a Gram matrix.
+def warn_gram_rank_replicates(namespace: str, pivot_share: Array, *, advice: str) -> None:
+    """Warn when bootstrap resamples fit near-singular designs.
+
+    :func:`check_gram_rank` judges the one fit on the full sample and can
+    refuse it. A bootstrap replicate is a fit on repeated rows, which can
+    only lose rank, and the replicates run in a loop that cannot stop for one
+    bad draw. This counts the replicates with a share below
+    :data:`ILL_CONDITIONED_PIVOT_THRESHOLD` (or not finite), in both dtypes,
+    and warns once with that count. It does not count the float32 precision
+    band that :func:`check_gram_rank` also warns about.
 
     Args:
-        gram: Symmetric Gram matrix, shape ``(n_terms, n_terms)``, with any
-            ridge already added.
+        namespace: The public function the message speaks for.
+        pivot_share: The pivot share of each replicate, shape
+            ``(n_bootstrap,)``.
+        advice: What to do about it. Appended to the message.
 
-    Returns:
-        ``min_j L[j, j]**2 / G[j, j]``, a scalar in ``[0, 1]``. NaN when the
-        Cholesky factorisation fails or a column is all zeros.
+    Warns:
+        JaxgsaWarning: If any replicate share is not finite or is below
+            :data:`ILL_CONDITIONED_PIVOT_THRESHOLD`.
     """
-    chol = jnp.linalg.cholesky(gram)
-    return jnp.min(jnp.diagonal(chol) ** 2 / jnp.diagonal(gram))
+    shares = np.asarray(pivot_share)
+    limit = ILL_CONDITIONED_PIVOT_THRESHOLD
+    n_bad = int(np.sum(~np.isfinite(shares) | (shares < limit)))
+    if n_bad:
+        warnings.warn(
+            f"{namespace}: {n_bad} of {shares.size} bootstrap replicates fitted a "
+            "near-singular design: one basis column has less than "
+            f"{limit:.0e} of its variance left after the earlier columns explain "
+            "it. The intervals built from these draws may be unreliable. "
+            f"{advice}",
+            skip_file_prefixes=(PACKAGE_DIR,),
+            category=JaxgsaWarning,
+        )
 
 
 @jax.jit
@@ -289,6 +342,64 @@ def _input_fingerprints(X: Array) -> tuple[Array, Array]:
     return spread, jnp.sum(values * weights, axis=0)
 
 
+def _linear_dependence(X: Array, names: Sequence[str]) -> list[tuple[str, list[str]]]:
+    """Find inputs that are linear combinations of the inputs before them.
+
+    Each column is centred and scaled to unit spread, and a QR factorisation
+    in float64 on the host reads off how much of column ``j`` the columns
+    before it leave unexplained. The rows go through in blocks sized by the
+    memory budget, so the cost in memory does not grow with ``N``.
+
+    Args:
+        X: Finite inputs, shape ``(N, D)``, no constant column.
+        names: Input names, length ``D``.
+
+    Returns:
+        ``(name, parents)`` for every input whose residual is below the limit
+        (see :data:`LINEAR_DEPENDENCE_FACTOR`). ``parents`` lists the earlier
+        inputs with a clear weight in the combination.
+    """
+    N, D = X.shape
+    if D < 2 or N <= D:
+        return []
+    dtype = np.dtype(X.dtype)
+    eps = float(np.finfo(dtype).eps) if np.issubdtype(dtype, np.floating) else 2.0**-52
+    # Moments in float64, over blocks of rows.
+    block = int(max(D, min(N, get_memory_budget() // (3 * 8 * D))))
+    total = np.zeros(D)
+    total_sq = np.zeros(D)
+    for start in range(0, N, block):
+        chunk = np.asarray(X[start : start + block], dtype=np.float64)
+        total += chunk.sum(axis=0)
+        total_sq += (chunk**2).sum(axis=0)
+    mean = total / N
+    # A second pass over the centred values: the one-pass variance loses
+    # digits when the offset is large.
+    var = np.zeros(D)
+    for start in range(0, N, block):
+        chunk = np.asarray(X[start : start + block], dtype=np.float64) - mean
+        var += (chunk**2).sum(axis=0)
+    std = np.sqrt(var / N)
+    safe = np.where(std > 0, std, 1.0)
+    ratio = np.sqrt(total_sq / N) / safe
+    # Streamed QR: carry R and fold in one block of rows at a time.
+    R = np.zeros((0, D))
+    for start in range(0, N, block):
+        chunk = (np.asarray(X[start : start + block], dtype=np.float64) - mean) / safe
+        R = np.linalg.qr(np.vstack([R, chunk]), mode="r")
+    residual = np.abs(np.diag(R)) / math.sqrt(N)
+    limit = np.minimum(LINEAR_DEPENDENCE_FACTOR * eps * ratio, LINEAR_DEPENDENCE_CAP)
+    found: list[tuple[str, list[str]]] = []
+    for j in np.flatnonzero(residual[1:] < limit[1:]) + 1:
+        j = int(j)
+        # Weights of the earlier columns in the combination, from R. The
+        # pivot R[j, j] is tiny, so only the leading block is solved.
+        weights = np.linalg.lstsq(R[:j, :j], R[:j, j], rcond=None)[0]
+        parents = [names[i] for i in range(j) if abs(weights[i]) > 1e-4]
+        found.append((names[j], parents))
+    return found
+
+
 def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> None:
     """Refuse constant or duplicated inputs, which a surrogate cannot separate.
 
@@ -299,10 +410,12 @@ def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> N
     exactly singular, but the pivot shares cannot prove that in float64. This
     check reads the inputs directly, so both dtypes refuse the same designs.
 
-    Only columns that are equal value for value count as duplicates. An
-    input that is an affine copy of another (``c = 2 * a``, ``c = 1 - a``)
-    makes the Gram matrix singular too, but passes this check. The pivot
-    share then warns in float64 and refuses in float32.
+    An input that is an affine copy of another (``c = 2 * a``, ``c = 1 - a``),
+    or a linear combination of several (``c = a + b``), makes the Gram matrix
+    singular too. It is refused in the same way when the combination holds
+    to within the rounding error of the data's dtype (see
+    :data:`LINEAR_DEPENDENCE_FACTOR`). A copy with more noise than that is
+    left to the pivot share, which only warns, in both dtypes.
 
     Args:
         namespace: The public function the message speaks for.
@@ -310,8 +423,9 @@ def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> N
         names: Input names, length ``D``.
 
     Raises:
-        ValueError: If an input is constant over all rows, or two inputs are
-            equal in every row.
+        ValueError: If an input is constant over all rows, two inputs are
+            equal in every row, or an input is a linear combination of the
+            inputs before it to within rounding error.
     """
     spread_dev, projection_dev = _input_fingerprints(X)
     spread = np.asarray(spread_dev)
@@ -319,8 +433,8 @@ def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> N
     if constant:
         raise ValueError(
             f"{namespace}: the input(s) {constant} have the same value in every row. "
-            "A constant input has no variance, so the PCE cannot estimate its "
-            "indices from this sample, and the Gram matrix of the design is "
+            "A constant input has no variance, so the fit cannot estimate its "
+            "indices from this sample, and the design is "
             "singular. Remove the input from the problem, or sample it over its "
             "range."
         )
@@ -337,34 +451,44 @@ def check_degenerate_inputs(namespace: str, X: Array, names: Sequence[str]) -> N
     if duplicates:
         raise ValueError(
             f"{namespace}: the inputs {duplicates} are equal in every row. Two "
-            "identical inputs cannot be told apart, so the PCE cannot estimate "
-            "their indices, and the Gram matrix of the design is singular. Remove "
+            "identical inputs cannot be told apart, so the fit cannot estimate "
+            "their indices, and the design is singular. Remove "
             "one input of each pair, or sample them independently."
+        )
+    dependent = _linear_dependence(X, names)
+    if dependent:
+        described = [f"{name} = linear combination of {parents}" for name, parents in dependent]
+        raise ValueError(
+            f"{namespace}: the inputs are linearly dependent to within rounding "
+            f"error: {'; '.join(described)}. A copy such as c = 2 * a, c = 1 - a "
+            "or c = a + b cannot be told apart from its parents, so the fit "
+            "cannot estimate their indices, and the design is "
+            "singular. Remove the dependent input, or sample the inputs "
+            "independently."
         )
 
 
 def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
-    """Refuse or warn on a fit whose Gram matrix is near singular.
+    """Refuse or warn on a fit whose design is near singular.
 
-    :func:`check_fit_finite` sees a singular Gram matrix only when it turns
-    into NaN, which happens in float32. In float64 the factorisation
-    succeeds and every number stays finite. This check reads the
-    conditioning directly. The limits depend on the dtype of
-    ``pivot_share``; see :data:`ILL_CONDITIONED_PIVOT_THRESHOLD_F64`.
+    :func:`check_fit_finite` sees a failed fit only when it turns into NaN.
+    This check reads the conditioning directly, from the pivot share of the
+    QR factor. The limits depend on the dtype of ``pivot_share``; see
+    :data:`ILL_CONDITIONED_PIVOT_THRESHOLD`.
 
     Args:
         namespace: The public function the message speaks for.
-        pivot_share: The output of :func:`min_pivot_share`.
+        pivot_share: The output of :func:`jaxgsa.pce._engine.r_pivot_share`.
         advice: What to do about it. Appended to the message.
 
     Raises:
-        ValueError: If ``pivot_share`` is not finite, or is below
-            :data:`SINGULAR_PIVOT_THRESHOLD_F32` in float32.
+        ValueError: If ``pivot_share`` is not finite, or in float32 is below
+            :data:`SINGULAR_PIVOT_THRESHOLD_F32`.
 
     Warns:
-        JaxgsaWarning: If ``pivot_share`` is not refused but is below
-            :data:`ILL_CONDITIONED_PIVOT_THRESHOLD_F64` in float64 or
-            :data:`AMBIGUOUS_PIVOT_THRESHOLD_F32` in float32.
+        JaxgsaWarning: If ``pivot_share`` is below
+            :data:`ILL_CONDITIONED_PIVOT_THRESHOLD`, or in float32 below
+            :data:`AMBIGUOUS_PIVOT_THRESHOLD_F32`.
     """
     is_f64 = jnp.asarray(pivot_share).dtype == jnp.float64
     share = float(pivot_share)
@@ -376,36 +500,36 @@ def check_gram_rank(namespace: str, pivot_share: Array, *, advice: str) -> None:
     )
     if not math.isfinite(share):
         raise ValueError(
-            f"{namespace}: the Gram matrix of the design is numerically singular: "
-            "its Cholesky factorisation failed. The coefficients are not "
-            f"identified, so the indices are undefined.{precision} {advice}"
+            f"{namespace}: the design is numerically singular: a column of its QR "
+            "factor is not finite. The coefficients are not identified, so the "
+            f"indices are undefined.{precision} {advice}"
         )
     if not is_f64 and share < SINGULAR_PIVOT_THRESHOLD_F32:
         raise ValueError(
-            f"{namespace}: the Gram matrix of the design is numerically singular: "
-            f"one basis column has only {share:.1e} of its variance left after the "
-            f"earlier columns explain it, below {SINGULAR_PIVOT_THRESHOLD_F32:.0e}. "
-            f"The coefficients are not identified, so the indices are undefined."
-            f"{precision} {advice}"
+            f"{namespace}: the design is numerically singular in float32: one basis "
+            f"column has only {share:.1e} of its variance left after the earlier "
+            "columns explain it, below "
+            f"{SINGULAR_PIVOT_THRESHOLD_F32:.0e}. The coefficients are not identified, "
+            f"so the indices are undefined.{precision} {advice}"
         )
-    if is_f64 and share < ILL_CONDITIONED_PIVOT_THRESHOLD_F64:
+    if share < ILL_CONDITIONED_PIVOT_THRESHOLD:
         warnings.warn(
-            f"{namespace}: the Gram matrix of the design is near singular: one "
-            f"basis column has only {share:.1e} of its variance left after the "
-            "earlier columns explain it. Near-singular or dependent inputs make "
-            "the indices unreliable. A very high order on Gaussian inputs can "
-            f"also cause this, and its indices can still be accurate. {advice}",
+            f"{namespace}: the design is near singular: one basis column has only "
+            f"{share:.1e} of its variance left after the earlier columns explain "
+            "it. Near-singular or dependent inputs make the indices unreliable. A "
+            f"very high order on Gaussian inputs can also cause this, and its "
+            f"indices can still be accurate.{precision} {advice}",
             skip_file_prefixes=(PACKAGE_DIR,),
             category=JaxgsaWarning,
         )
     elif not is_f64 and share < AMBIGUOUS_PIVOT_THRESHOLD_F32:
         warnings.warn(
-            f"{namespace}: the Gram matrix of the design may be numerically "
-            f"singular: one basis column has only {share:.1e} of its variance left "
-            "after the earlier columns explain it. In float32 this cannot be told "
-            "apart from a singular design, so the indices may be undefined. Enable "
-            "jax x64 (jax.config.update('jax_enable_x64', True)) to resolve it. "
-            f"{advice}",
+            f"{namespace}: one basis column has only {share:.1e} of its variance "
+            "left after the earlier columns explain it. float32 carries about 7 "
+            "digits, and this conditioning costs it several of them. The "
+            "leave-one-out error cv_rmse can be wrong by a large factor, and "
+            "the indices may be off in the third digit or worse. Enable jax x64 "
+            f"(jax.config.update('jax_enable_x64', True)) to fit in float64. {advice}",
             skip_file_prefixes=(PACKAGE_DIR,),
             category=JaxgsaWarning,
         )

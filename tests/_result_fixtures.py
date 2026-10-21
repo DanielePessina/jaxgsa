@@ -188,11 +188,6 @@ def _hdmr(shape: str) -> Any:
     return hdmr.analyze(PROBLEM, X, Y, order=2, max_iter=3)
 
 
-def _hdmr_third_order(shape: str) -> Any:
-    X, Y = _given_data(shape, n=300)
-    return hdmr.analyze(PROBLEM, X, Y, order=3, max_iter=3)
-
-
 def _shapley(shape: str) -> Any:
     X, Y = _given_data(shape)
     return shapley.analyze(PROBLEM, X, Y, backend="pce", order=2)
@@ -218,7 +213,6 @@ BUILDERS: dict[str, Callable[[str], Any]] = {
     "dgsm": _dgsm,
     "efast": _efast,
     "hdmr": _hdmr,
-    "hdmr_third_order": _hdmr_third_order,
     "hsic": _hsic,
     "kucherenko": _kucherenko,
     "morris": _morris,

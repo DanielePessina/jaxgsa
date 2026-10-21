@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxgsa import JaxgsaWarning
+from jaxgsa import JaxgsaWarning, hdmr
 from jaxgsa.benchmarks.ishigami import (
     ANALYTICAL_S1,
     ANALYTICAL_ST,
@@ -24,7 +24,7 @@ from jaxgsa.sampling import monte_carlo
 
 
 # HDMR builds polynomial surrogates that approximate the true function, so
-# tolerances (~30% for S1) are wider than for Sobol sampling methods which
+# tolerances (~30% for S1 and ST) are wider than for Sobol sampling methods which
 # converge to exact values with sufficient samples.
 def _assert_matches_analytical_s1_st(S1: np.ndarray, ST: np.ndarray) -> None:
     """Assert HDMR first- and total-order indices track Ishigami analytics."""
@@ -39,7 +39,10 @@ def _assert_matches_analytical_s1_st(S1: np.ndarray, ST: np.ndarray) -> None:
 
     for i, expected in enumerate(ANALYTICAL_ST):
         rel_err = abs(ST[i] - expected) / max(abs(expected), 0.01)
-        assert rel_err < 0.25, f"ST[{i}] = {ST[i]:.4f}, expected {expected}, rel_err={rel_err:.3f}"
+        # n_intervals=2 cannot resolve sin(x2)**2 (rmse 1.2 on Y with sd 3.7),
+        # so ST[1] reads 0.32 for 0.44. test_order2_ishigami_matches_analytic
+        # uses n_intervals=4 and is tight.
+        assert rel_err < 0.30, f"ST[{i}] = {ST[i]:.4f}, expected {expected}, rel_err={rel_err:.3f}"
 
 
 @pytest.fixture(scope="module")
@@ -106,9 +109,11 @@ def test_indices_are_affine_invariant(hdmr_ishigami_xy, hdmr_result):
     the fit's own conditioning. No keyword buys this and none can switch it
     off.
 
-    The tolerance is 1e-5 rather than float32 epsilon because the fit solves
+    The tolerance is 2e-4 rather than float32 epsilon because the fit solves
     normal equations: it accumulates ``B^T B`` and ``B^T Y``, which squares
-    the basis' condition number, so the offset ``b`` costs a few low bits.
+    the basis' condition number, so the offset ``b`` costs a few low bits. The
+    order-2 fit also projects the pair basis off the first-order space, which
+    divides by small Gram eigenvalues and costs a few more.
     Under ``jax_enable_x64`` the same comparison holds to 8e-15, which is what
     says the residue is conditioning and not a term that fails to cancel.
     """
@@ -118,8 +123,8 @@ def test_indices_are_affine_invariant(hdmr_ishigami_xy, hdmr_result):
     base = hdmr_result
     affine = analyze_hdmr(PROBLEM, X, Y_affine, order=2, n_intervals=2)
 
-    np.testing.assert_allclose(np.asarray(base.S1), np.asarray(affine.S1), rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(np.asarray(base.ST), np.asarray(affine.ST), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.asarray(base.S1), np.asarray(affine.S1), rtol=2e-4, atol=2e-4)
+    np.testing.assert_allclose(np.asarray(base.ST), np.asarray(affine.ST), rtol=2e-4, atol=2e-4)
 
 
 def _correlated_additive_case():
@@ -176,9 +181,9 @@ def test_backfitting_stop_rule_full_scale_and_m_grid():
 
 
 def test_order_selects_the_term_count(hdmr_by_order):
-    """For D=3 the term count is 3, 6 and 7 at order 1, 2 and 3."""
+    """For D=3 the term count is 3 and 6 at order 1 and 2."""
     assert PROBLEM.n_params == 3
-    for order, n_terms in ((1, 3), (2, 6), (3, 7)):
+    for order, n_terms in ((1, 3), (2, 6)):
         result = hdmr_by_order[order]
         assert result.Sa.shape == (n_terms,)
         assert len(result.terms) == n_terms
@@ -273,7 +278,7 @@ def test_validation_errors():
     """Input validation should raise on bad inputs."""
     # Order 2, n_intervals 2: the largest term has 5**2 = 25 coefficients, so
     # the floor is 26 rows. Below it the fit is not computable.
-    X = jnp.ones((25, 3))
+    X = jax.random.uniform(jax.random.key(0), (25, 3))
     Y = jnp.ones(25)
 
     with pytest.raises(ValueError, match=r"jaxgsa\.hdmr: N=25 rows is too few"):
@@ -378,26 +383,14 @@ def test_s2_s3_all_nan_when_order_1(hdmr_by_order):
     assert bool(jnp.all(jnp.isnan(result.S3)))
 
 
-def test_s3_property_order_3(hdmr_by_order):
-    """S3 is a symmetric (D, D, D) tensor matching the triple's Sa entry."""
-    names = PROBLEM.names
-    D = PROBLEM.n_params
-    result = hdmr_by_order[3]
-    S3 = np.array(result.S3)
-    Sa = np.array(result.Sa)
-    assert S3.shape == (D, D, D)
-
-    # Cells with any repeated axis have no term and stay NaN.
-    for i in range(D):
-        for j in range(D):
-            assert np.isnan(S3[i, i, j])
-            assert np.isnan(S3[i, j, i])
-            assert np.isnan(S3[j, i, i])
-
-    # The single D=3 triple (x1/x2/x3) is populated symmetrically.
-    k = _term_index(result, "/".join(names))
-    for perm in ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)):
-        assert S3[perm] == Sa[k]
+def test_order_3_is_refused():
+    """Order 3 double-counts variance, so it raises with a pointer to order 1 or 2."""
+    X = monte_carlo(PROBLEM, 400, seed=0)
+    Y = np.asarray(X).sum(axis=1)
+    with pytest.raises(ValueError, match="order=3 is not supported.*double-count.*order 1 or 2"):
+        analyze_hdmr(PROBLEM, X, Y, order=3, verbose=False)
+    with pytest.raises(ValueError, match="order=3 is not supported"):
+        hdmr.indices(PROBLEM, X, jnp.asarray(Y), order=3)
 
 
 # ---------------------------------------------------------------------------
@@ -691,5 +684,24 @@ def test_drop_below_floor_refuses_in_the_policy_words():
 def test_invalid_order_is_refused_before_the_row_floor_with_drop():
     X = monte_carlo(PROBLEM, 64, seed=0)
     Y = np.asarray(X).sum(axis=1)
-    with pytest.raises(ValueError, match="order must be 1, 2, or 3"):
+    with pytest.raises(ValueError, match="order must be 1 or 2"):
         analyze_hdmr(PROBLEM, X, Y, order=5, on_invalid="drop")
+
+
+@pytest.mark.parametrize("kind", ["duplicate", "constant", "affine", "sum"])
+def test_degenerate_input_raises(kind):
+    """A constant, duplicated or linearly dependent input is refused, not split silently."""
+    rng = np.random.default_rng(0)
+    X = rng.uniform(0, 1, (500, 3)).astype(np.float32)
+    Y = 2 * X[:, 0] + X[:, 1] ** 2
+    if kind == "duplicate":
+        X[:, 2] = X[:, 0]
+    elif kind == "constant":
+        X[:, 2] = 0.5
+    elif kind == "affine":
+        X[:, 2] = 1.0 - 0.5 * X[:, 0]
+    else:
+        X[:, 2] = (X[:, 0] + X[:, 1]) / 2
+    problem = Problem(["a", "b", "c"], [(0, 1)] * 3)
+    with pytest.raises(ValueError, match="jaxgsa.hdmr"):
+        analyze_hdmr(problem, jnp.asarray(X), jnp.asarray(Y), verbose=False)

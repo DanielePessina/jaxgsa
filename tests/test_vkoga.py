@@ -21,8 +21,10 @@ warns about single precision.
 from __future__ import annotations
 
 import warnings
+from typing import Any
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import single_precision_warning
@@ -30,6 +32,7 @@ from conftest import single_precision_warning
 import jaxgsa
 from jaxgsa import JaxgsaWarning
 from jaxgsa.problem import Problem
+from jaxgsa.vkoga import VKOGAResult
 
 # Closed-form linear-Gaussian reference, shared with test_kucherenko.py and the
 # custom-sampler tests. The correlated x64 fit is cached for the session.
@@ -51,7 +54,7 @@ UNIFORM_PROBLEM = Problem(names=("u1", "u2"), bounds=((0.0, 1.0),) * 2)
 # Explicit gamma/ridge skip the 10x10 cross-validation grid; small greedy and
 # estimator budgets keep each fit well under a second. All sample sizes are
 # powers of two so the Sobol' engines stay balanced (and silent).
-SMALL_KWARGS = dict(
+SMALL_KWARGS: dict[str, Any] = dict(
     gamma=3.0,
     ridge=1e-6,
     max_centers=64,
@@ -261,7 +264,7 @@ def test_parameter_permutation_equivariance():
 
 # --- the additive-projection limit --------------------------------------------
 
-# A correlated model with a genuine interaction, where the degree-6 additive
+# A correlated model with a genuine interaction, where the low-degree additive
 # component functions cannot represent what X_i explains alone. The raw S_U
 # then exceeds S_TU and S_IU would go negative; the clip stops that.
 R_INTERACTION = np.array(
@@ -689,14 +692,14 @@ def test_s_tu_sampling_error_shrinks_with_n_outer():
     def s_tu_over_seeds(n_outer, n_seeds=6):
         vals = []
         for seed in range(n_seeds):
-            component_dummy = np.zeros((6, 1))
             queue = _PredictQueue(predict, 1 << 20)
             finish = _total_uncorrelated_and_conditional(
                 draws=draws,
                 index=2,
                 queue=queue,
-                component=component_dummy,
+                component=None,
                 basis_kind="legendre",
+                degree=0,
                 n_outer=n_outer,
                 n_inner=128,
                 n_slices=1,
@@ -1128,3 +1131,67 @@ def test_constant_slice_has_nan_explained_variance():
     ev = np.asarray(result.explained_variance)
     assert np.isnan(ev[1])
     assert np.isfinite(ev[0])
+
+
+def test_degenerate_training_inputs_raise():
+    """Constant, duplicated and linearly dependent columns are refused."""
+    problem = Problem(names=("a", "b", "c"), bounds=((0.0, 1.0),) * 3)
+    X = np.asarray(jaxgsa.sampling.monte_carlo(problem, 128, seed=3))
+    y = X[:, 0] + X[:, 1] ** 2
+    cases = {
+        "same value in every row": np.column_stack([X[:, 0], X[:, 1], np.full(128, 0.5)]),
+        "equal in every row": np.column_stack([X[:, 0], X[:, 1], X[:, 0]]),
+        "linearly dependent": np.column_stack([X[:, 0], X[:, 1], X[:, 0] + X[:, 1]]),
+    }
+    for message, Xd in cases.items():
+        with pytest.raises(ValueError, match=message):
+            jaxgsa.vkoga.analyze(
+                problem,
+                jnp.asarray(Xd),
+                jnp.asarray(y),
+                gamma=3.0,
+                ridge=1e-6,
+                max_centers=64,
+                n_outer=64,
+                n_inner=16,
+                n_variance=512,
+                key=jax.random.key(0),
+            )
+
+
+def test_duplicate_rows_are_still_accepted():
+    """Duplicate rows are not a degenerate design; the dedup path handles them."""
+    X = np.asarray(jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 128, seed=4))
+    X = np.concatenate([X, X[:8]])
+    with single_precision_warning():
+        result = jaxgsa.vkoga.analyze(
+            UNIFORM_PROBLEM, jnp.asarray(X), jnp.asarray(_uniform_scalar(X)), **SMALL_KWARGS
+        )
+    assert isinstance(result, VKOGAResult)
+    assert np.all(np.isfinite(np.asarray(result.S_TC)))
+
+
+def test_independent_inputs_have_exactly_zero_correlated_part():
+    """With independent inputs S_U equals S_TC, so S_C is exactly 0 and S_IU = S_TU - S_TC."""
+    X = jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 256, seed=5)
+    with single_precision_warning():
+        result = jaxgsa.vkoga.analyze(
+            UNIFORM_PROBLEM, jnp.asarray(X), jnp.asarray(_uniform_scalar(X)), **SMALL_KWARGS
+        )
+    assert isinstance(result, VKOGAResult)
+    np.testing.assert_array_equal(np.asarray(result.S_C), 0.0)
+    # Rounding-level agreement: 2e-8 in float32 was measured on Linux CI.
+    np.testing.assert_allclose(
+        np.asarray(result.S_IU), np.asarray(result.S_TU) - np.asarray(result.S_TC), atol=1e-6
+    )
+
+
+def test_component_degree_falls_back_when_the_sample_is_small():
+    """Degree 10 needs two rows per coefficient; below that Legendre uses degree 6."""
+    from jaxgsa.vkoga._indices import _component_degrees
+
+    kinds = ("legendre", "hermite", "legendre")
+    assert _component_degrees(4096, kinds) == (10, 6, 10)
+    assert _component_degrees(40, kinds) == (6, 6, 6)
+    with pytest.warns(JaxgsaWarning, match="under-determined"):
+        _component_degrees(20, kinds)

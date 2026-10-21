@@ -16,6 +16,7 @@ from jaxgsa.benchmarks import ishigami, linear, sobol_g
 from jaxgsa.hsic import analyze, indices
 from jaxgsa.hsic._analyze import (
     _build_one_kernel,
+    _collapsed_median_labels,
     _hsic_v,
     _median_bandwidth_sq,
     _pairwise_quantile_by_selection,
@@ -1173,3 +1174,37 @@ def test_no_dtype_truncation_warning_in_single_precision():
         analyze(problem, X, Y, n_perms=3, key=0, verbose=False)
     user = [w for w in caught if issubclass(w.category, UserWarning) and "dtype" in str(w.message)]
     assert user == []
+
+
+def _reference_collapsed_labels(values: np.ndarray) -> list[int]:
+    """Old full-matrix implementation of the collapse check, for comparison."""
+    bad = []
+    for c in range(values.shape[1]):
+        col = values[:, c].astype(np.float64)
+        col = col[np.isfinite(col)]
+        var = float(np.var(col)) if col.size else 0.0
+        if var == 0.0:
+            continue
+        d2 = (col[:, None] - col[None, :]) ** 2
+        nonzero = d2[np.triu_indices(col.size, k=1)]
+        nonzero = nonzero[nonzero > 0]
+        if nonzero.size and float(np.median(nonzero)) < 1e-6 * var:
+            bad.append(c)
+    return bad
+
+
+def test_collapsed_median_labels_matches_reference():
+    rng = np.random.default_rng(0)
+    n = 300
+    smooth = rng.normal(size=n)
+    spike = np.where(rng.random(n) < 0.9, 0.0, 1.0) + 1e-7 * rng.normal(size=n)
+    ties = rng.integers(0, 3, size=n).astype(float)
+    const = np.full(n, 2.0)
+    with_nan = smooth.copy()
+    with_nan[::17] = np.nan
+    values = np.column_stack([smooth, spike, ties, const, with_nan])
+    got = _collapsed_median_labels(values)
+    assert got == _reference_collapsed_labels(values)
+    assert 1 in got
+    assert 0 not in got
+    assert 3 not in got

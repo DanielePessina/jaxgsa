@@ -117,17 +117,19 @@ def _effective_support(
 ) -> tuple[float, float]:
     """Return the interval the spectral solve runs on.
 
-    Ordinarily each side is its declared bound, or ``mean +/- 8 std`` if the
-    side is open. That is exact for any bound near the mean, and it keeps a
-    truncation and its mirror image equal.
+    Ordinarily each side is its declared bound. An open side is the wider of
+    ``mean +/- 8 std`` and the ``1e-15`` tail quantile of the truncated
+    distribution. That is exact for any bound near the mean, and it keeps a
+    truncation and its mirror image equal. With both sides open, or both
+    closed, the bounds are used as they are.
 
     The declared bounds can instead sit far from the mass, where the Gaussian
     weight underflows (a bound past 8 std from the mean). Or one bound can
-    exclude the mean by more than 5 std. Then the mass piles against the bound nearest the mean,
-    and a fixed stand-in such as ``mean +/- 8 std`` can lie on the wrong side
-    of the declared bound on the other side. Only in that case are the bounds
-    cut to the quantiles of the truncated distribution itself that leave
-    ``1e-15`` of the mass in each tail. Those come from
+    exclude the mean by more than 5 std. Then the mass piles against the bound
+    nearest the mean, and a fixed stand-in such as ``mean +/- 8 std`` can lie
+    on the wrong side of the declared bound on the other side. In that case
+    both bounds are cut to the quantiles of the truncated distribution itself
+    that leave ``1e-15`` of the mass in each tail. Those come from
     :class:`scipy.stats.truncnorm`, which works in log space and stays
     accurate in the far tail.
 
@@ -142,18 +144,30 @@ def _effective_support(
     """
     lo = mean - _OPEN_SIDE_SD * std if low is None else low
     hi = mean + _OPEN_SIDE_SD * std if high is None else high
-    if not _is_far(mean, std, low, high):
+    far = _is_far(mean, std, low, high)
+    if not far and (low is None) == (high is None):
         return lo, hi
     a_std = -np.inf if low is None else (low - mean) / std
     b_std = np.inf if high is None else (high - mean) / std
-    lo_std = float(truncnorm.ppf(_TAIL_MASS, a_std, b_std))
+    # Mirror image, so the lower cut is as accurate as the upper one.
+    lo_std = -float(truncnorm.isf(_TAIL_MASS, -b_std, -a_std))
     hi_std = float(truncnorm.isf(_TAIL_MASS, a_std, b_std))
-    lo = mean + std * lo_std
-    hi = mean + std * hi_std
-    if low is not None:
-        lo = max(lo, low)
-    if high is not None:
-        hi = min(hi, high)
+    q_lo = mean + std * lo_std
+    q_hi = mean + std * hi_std
+    if far:
+        lo, hi = q_lo, q_hi
+        if low is not None:
+            lo = max(lo, low)
+        if high is not None:
+            hi = min(hi, high)
+        return lo, hi
+    # Ordinary one-sided truncation: the open side reaches the wider of
+    # mean +/- 8 std and the tail quantile. This matches the far path at the
+    # switch, so the constant is continuous in the bound.
+    if high is None:
+        hi = max(hi, q_hi)
+    if low is None:
+        lo = min(lo, q_lo)
     return lo, hi
 
 

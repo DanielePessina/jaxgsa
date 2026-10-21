@@ -838,3 +838,16 @@ def test_morris_load_rejects_other_samples_file(tmp_path):
     sobol.sample(ishigami.PROBLEM, base_n=8, seed=0).save(path)
     with pytest.raises(ValueError, match="holds a SobolSamples; load it with jaxgsa.sobol"):
         type(sample(ishigami.PROBLEM, 4, seed=0)).load(path)
+
+
+def test_resample_stats_temp_memory_matches_estimate():
+    """The compiled bootstrap kernel stays within 1.1x of the library estimate."""
+    import jax
+
+    from jaxgsa.morris._analyze import _resample_stats, _resample_temp_bytes
+
+    r, D, T, K, chunk = 200, 8, 3, 5, 6
+    ee = jax.ShapeDtypeStruct((r, D, T, K), jnp.float32)
+    idx = jax.ShapeDtypeStruct((chunk, r), jnp.int32)
+    temp = _resample_stats.lower(idx, ee).compile().memory_analysis().temp_size_in_bytes
+    assert temp <= 1.1 * _resample_temp_bytes((r, D, T, K), 4, chunk)

@@ -136,3 +136,29 @@ def test_get_memory_budget_defaults_to_megabytes_like_the_setter(_restore_memory
     jaxgsa.config.set_memory_budget(1536, unit="mb")
     assert jaxgsa.config.get_memory_budget(unit="mb") == 1536.0
     assert jaxgsa.config.get_memory_budget(unit="gb") == 1.5
+
+
+def test_set_memory_budget_warns_when_bytes_read_as_mb():
+    """Bytes passed with the default unit land above 1 TiB and must warn."""
+    from jaxgsa import JaxgsaWarning
+
+    old = _batching.get_memory_budget()
+    try:
+        with pytest.warns(JaxgsaWarning, match=r"read in 'mb'|read in mb|unit=\"b\""):
+            jaxgsa.config.set_memory_budget(2 * 2**30)
+        with pytest.warns(JaxgsaWarning, match="gib"):
+            jaxgsa.config.set_memory_budget(2 * 2**30)
+    finally:
+        _batching._set_memory_budget(old)
+
+
+def test_set_memory_budget_sane_values_do_not_warn(recwarn):
+    """Ordinary budgets, in any unit, stay silent."""
+    old = _batching.get_memory_budget()
+    try:
+        jaxgsa.config.set_memory_budget(512)
+        jaxgsa.config.set_memory_budget(2 * 2**30, unit="b")
+        jaxgsa.config.set_memory_budget(2, unit="gib")
+    finally:
+        _batching._set_memory_budget(old)
+    assert not [w for w in recwarn if "set_memory_budget" in str(w.message)]

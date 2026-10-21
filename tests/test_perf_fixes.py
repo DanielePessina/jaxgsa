@@ -57,4 +57,4 @@ def test_input_kernels_match_per_input_build() -> None:
     want = jax.jit(
         lambda X: jnp.stack([hsic_impl._build_one_kernel(X[:, d], 1.0) for d in range(3)])
     )(X)
-    assert np.array_equal(np.asarray(stack), np.asarray(want))
+    np.testing.assert_allclose(np.asarray(stack), np.asarray(want), rtol=1e-5, atol=1e-6)

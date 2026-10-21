@@ -57,10 +57,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
+from jax.typing import DTypeLike
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.batching import resolve_batch_size
-from jaxgsa._core.bootstrap import interval
+from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
+from jaxgsa._core.bootstrap import draw_row_matrix, interval
 from jaxgsa._core.entry import (
     _user_stacklevel,
     at_least,
@@ -80,10 +81,13 @@ from jaxgsa._core.irregular import (
 )
 from jaxgsa._core.partition import (
     PartitionGroup,
+    _bucket_width,
     _build_class_indices,
     _class_layout,
     _mask_from_counts,
     build_partition_groups,
+    plan_partition,
+    replicate_blocks,
 )
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
@@ -174,7 +178,9 @@ def _aggregate_normalized(per_class: Array, weights: Array, V: Array) -> Array:
     return jnp.where(jnp.isnan(V), jnp.nan, normalized)
 
 
-def _quantile_rank_split(counts: Array, N: int) -> tuple[Array, Array, Array]:
+def _quantile_rank_split(
+    counts: Array, N: int, dtype: DTypeLike | None = None
+) -> tuple[Array, Array, Array]:
     """Exact conditional-quantile coupling for every full-sample mass point.
 
     Both empirical quantile functions are piecewise constant: the
@@ -191,6 +197,16 @@ def _quantile_rank_split(counts: Array, N: int) -> tuple[Array, Array, Array]:
     approximation, in particular when ``c`` does not divide ``N``, unlike
     the single nearest-rank lookup this replaced (which is exact only when
     it does).
+
+    Args:
+        counts: Integer class sizes, shape ``(..., M)``.
+        N: Full sample size.
+        dtype: Float dtype of ``frac_left``. Defaults to the promotion of
+            ``counts.dtype`` with float32, which is float32 even for int64
+            counts. Pass the kernel's working dtype to keep float64 under x64.
+
+    Returns:
+        ``(j_left, j_right, frac_left)``, each of shape ``(..., M, N)``.
 
     The function runs on device, per replicate, from the class counts. A
     precomputed ``(R, Dc, M, N)`` lookup table would be gigabytes for one
@@ -246,7 +262,8 @@ def _quantile_rank_split(counts: Array, N: int) -> tuple[Array, Array, Array]:
     j_left = jnp.minimum(q, jnp.maximum(c - 1, 0)).astype(jnp.int32)
     j_right = jnp.minimum(q + 1, jnp.maximum(c - 1, 0)).astype(jnp.int32)
     width_left = jnp.minimum(N - r, c)  # in units of 1/(N * c), 0 for an empty class
-    float_dtype = jnp.result_type(counts.dtype, jnp.float32)
+    # Without a dtype, int64 counts would promote to float32 under x64.
+    float_dtype = dtype if dtype is not None else jnp.result_type(counts.dtype, jnp.float32)
     frac_left = width_left.astype(float_dtype) / jnp.maximum(c, 1).astype(float_dtype)
     return j_left, j_right, frac_left
 
@@ -347,7 +364,7 @@ def _ot_1d_kernel(
 
     ``groups`` is a tuple of canonical ``(cls_idx, counts)``
     partition-group layouts from
-    :func:`jaxgsa._core.partition.build_partition_groups`. The kernel
+    :func:`jaxgsa._core.partition.replicate_blocks`. The kernel
     processes every group in one call and concatenates the results on the
     parameter axis in group order. It computes the per-replicate column
     statistics (resample gather, sort, mean, variance) once and shares
@@ -527,7 +544,7 @@ def _ot_1d_kernel(
         for cls_r, counts_g, j_shared in zip(cls_parts, counts_list, shared_j):
             counts_r = counts_g[i]  # (G, M) int
             mask_r = _mask_from_counts(counts_r, cls_r.shape[-1])
-            j_r = _quantile_rank_split(counts_r, N) if j_shared is None else j_shared
+            j_r = _quantile_rank_split(counts_r, N, dtype) if j_shared is None else j_shared
             layouts.append((cls_r, mask_r, counts_r.astype(dtype), j_r))
         out = jax.vmap(lambda t: _col_stats(t[0], t[1], t[2], r, layouts))(
             (Y_cols.T, Y_sorted.T, pos2rank.T)
@@ -561,7 +578,7 @@ def _joint_kernel(
 
     ``groups`` is a tuple of canonical ``(cls_idx, counts)``
     partition-group layouts from
-    :func:`jaxgsa._core.partition.build_partition_groups`. Results
+    :func:`jaxgsa._core.partition.replicate_blocks`. Results
     concatenate on the parameter axis in group order, and the shared
     per-replicate cloud statistics are computed once. ``dm_grids`` gives,
     per group, the flat ``d * Mg + m`` class slots to solve. A categorical
@@ -905,6 +922,56 @@ def _run_joint(
     )
 
 
+# Live (N, P) blocks in one Sinkhorn solve: the log-kernel, the logsumexp
+# temporaries and the plan. Measured at 3.9 blocks by compile-only analysis of
+# _joint_kernel; priced at 4.
+_JOINT_BLOCKS = 4
+
+
+def _joint_peak_bytes(N: int, P: int, dtype: DTypeLike) -> int:
+    """Estimate the peak transient bytes of one joint (Sinkhorn) solve.
+
+    The joint kernel solves one class at a time (``lax.map``), so the peak is
+    a few ``(N, P)`` blocks, with ``P`` the padded class width. It grows as
+    ``N**2 / M`` and no per-class chunking lowers it.
+
+    Args:
+        N: Number of samples.
+        P: Padded class width.
+        dtype: Compute dtype.
+
+    Returns:
+        Estimated peak bytes.
+    """
+    return _JOINT_BLOCKS * N * P * jnp.dtype(dtype).itemsize
+
+
+def _warn_joint_memory(N: int, P: int, dtype: DTypeLike, M: int, stacklevel: int) -> None:
+    """Warn when one joint Sinkhorn solve is expected to exceed the memory budget.
+
+    Args:
+        N: Number of samples.
+        P: Padded class width.
+        dtype: Compute dtype.
+        M: Number of classes.
+        stacklevel: Passed to :func:`warnings.warn`.
+    """
+    need = _joint_peak_bytes(N, P, dtype)
+    budget = get_memory_budget()
+    if need <= budget:
+        return
+    warnings.warn(
+        f"jaxgsa.optimal_transport: one Sinkhorn solve is expected to need about "
+        f"{need / 2**30:.2f} GiB (about {_JOINT_BLOCKS} blocks of N={N} by "
+        f"class width {P}), above the {budget / 2**30:.2f} GiB memory budget. "
+        f"The size grows as N**2 / n_classes and cannot be batched. Raise n_classes "
+        f"(now {M}) to shrink the class width, lower N, or raise the budget with "
+        "jaxgsa.config.set_memory_budget if the device has room.",
+        stacklevel=stacklevel,
+        category=JaxgsaWarning,
+    )
+
+
 def _resolve_tol(tol: float | None, dtype: jnp.dtype) -> float:
     """Default the Sinkhorn stopping tolerance to what the dtype can resolve."""
     if tol is not None:
@@ -1021,11 +1088,30 @@ def _matched_dummy_group(key: Array, N: int, sizes: np.ndarray) -> PartitionGrou
         ``cls_idx (1, 1, M, P)``, ``counts (1, 1, M)``.
     """
     edges = np.concatenate([[0], np.cumsum(sizes)]).astype(np.int64)
-    P = int(sizes.max())
-    perm = jax.random.permutation(key, N)
-    take = jnp.minimum(jnp.asarray(edges[:-1])[:, None] + jnp.arange(P)[None, :], N - 1)  # (M, P)
-    cls_idx = perm[take][None, None]  # (1, 1, M, P)
+    # Bucket the width so the kernels compile once per bucket, not once per
+    # dataset. The padding is masked through the counts.
+    P = _bucket_width(int(sizes.max()), N)
+    cls_idx = _dummy_class_indices(key, jnp.asarray(edges[:-1]), N, P)
     return cls_idx, jnp.asarray(sizes)[None, None, :]
+
+
+@functools.partial(jax.jit, static_argnames=("N", "P"))
+def _dummy_class_indices(key: Array, starts: Array, N: int, P: int) -> Array:
+    """Gather a random permutation into padded classes, in one compiled call.
+
+    Args:
+        key: PRNG key for the random assignment.
+        starts: First position of every class in the permutation, ``(M,)``.
+        N: Number of samples.
+        P: Padded class width.
+
+    Returns:
+        Class indices ``(1, 1, M, P)``; entries past a class's size are
+        clamped duplicates.
+    """
+    perm = jax.random.permutation(key, N)
+    take = jnp.minimum(starts[:, None] + jnp.arange(P)[None, :], N - 1)  # (M, P)
+    return perm[take][None, None]
 
 
 @jax.jit
@@ -1213,6 +1299,24 @@ def analyze(
             rounded terms. The cost itself is converged there, so raising
             ``max_iter`` does not clear the warning. Raise ``tol`` or
             enable float64 if you need it silent.
+
+            Cost: the time is spent in Sinkhorn iterations. One solve
+            costs about 1 to 3 ns times ``N * P`` per iteration, where
+            ``P`` is the size of one conditioning class (about
+            ``N / n_classes``, or, for a categorical input, the sample
+            count of the largest level, about ``N`` times its
+            probability). The figure was measured on an Apple M1 Pro. One
+            analysis runs about ``R * D * M`` solves: ``R`` replicates,
+            ``D`` parameters and ``M`` classes per parameter, plus the
+            synthetic parameters when ``dummy=True``. A default solve
+            needs a few hundred iterations in float32 and up to
+            about 1000 in float64. ``"trajectory"`` mode runs one cloud
+            per output, so its cost is ``K`` times the cost of one cloud.
+            The loop over ``K`` adds no overhead, and a ``vmap`` over it
+            is slower. The float64 default ``1e-9`` is about twice as
+            slow as ``1e-5``, which gives the same indices to about
+            five decimals in the cases we measured. Pass ``tol=1e-5``
+            for a faster float64 run.
         dummy: Also push one synthetic parameter through the identical
             pipeline per parameter and report the result as ``ot_dummy``.
             Every synthetic parameter is independent of the output by
@@ -1413,7 +1517,7 @@ def analyze(
     identity = jnp.arange(N, dtype=jnp.int32)[None, :]
     if n_bootstrap > 0:
         assert key_boot is not None  # a missing key was refused above
-        boot = jax.random.randint(key_boot, (n_bootstrap, N), 0, N, dtype=jnp.int32)
+        boot = draw_row_matrix(key_boot, n_bootstrap, N)
         all_idx = jnp.concatenate([identity, boot], axis=0)
     else:
         all_idx = identity
@@ -1426,13 +1530,17 @@ def analyze(
     # tensors rectangular without padding continuous classes up to a
     # categorical level size, or the other way round. Each group is
     # (cls_idx, counts); masks and quantile lookups are derived in-kernel
-    # from the counts. build_partition_groups also returns group_levels,
+    # from the counts. plan_partition also returns plan.group_levels,
     # the declared level count per group in the same order, so a caller
     # never needs to rebuild it from cont_dims/cat_dims.
     t0 = _verbose.tic()
-    groups, group_levels, col_order = build_partition_groups(
+    # The class tensors are built per block of replicates (inside the memory
+    # budget); blocking changes no value.
+    plan = plan_partition(
         problem, X, all_idx, M, dims_levels, method="jaxgsa.optimal_transport.analyze"
     )
+    group_levels = plan.group_levels
+    col_order = plan.col_order
 
     # `_run` maps replicate indices and partition-layout groups to
     # (ot, advective, diffusive, degenerate) arrays with the parameter axis
@@ -1447,6 +1555,11 @@ def analyze(
         max_iter_s = jnp.asarray(max_iter, jnp.int32)
         tol_s = jnp.asarray(tol, dtype)
         clouds = _build_clouds(Y_3d, mode, standardize_outputs)
+        P_est = max(
+            [-(-N // M)] * bool(cont_dims) + [plan._cat_pad] * bool(cat_dims),
+            default=1,
+        )
+        _warn_joint_memory(N, P_est, dtype, M, stacklevel=2)
 
     def _run(
         idx: Array,
@@ -1466,11 +1579,19 @@ def analyze(
 
     n_bad_parts: list[Array] = []
     n_solves_parts: list[int] = []
-    ot_all, adv_all, diff_all, degen_all, n_bad0, solves0 = _run(
-        all_idx, groups, group_levels, col_order
+    block_outs: list[tuple[Array, Array, Array, Array]] = []
+    for idx_block, groups_block in replicate_blocks(plan):
+        ot_b, adv_b, diff_b, degen_b, n_bad_b, solves_b = _run(
+            idx_block, groups_block, group_levels, col_order
+        )
+        block_outs.append((ot_b, adv_b, diff_b, degen_b))
+        n_bad_parts.append(n_bad_b)
+        n_solves_parts.append(solves_b)
+        del groups_block  # free this block's class tensors before the next
+    ot_all, adv_all, diff_all, degen_all = (
+        jnp.concatenate(parts, axis=0) if len(parts) > 1 else parts[0]
+        for parts in zip(*block_outs)
     )
-    n_bad_parts.append(n_bad0)
-    n_solves_parts.append(solves0)
 
     ot_dummy: Array | None = None
     if dummy:
@@ -1511,10 +1632,13 @@ def analyze(
             cont_dummy = _dummy_value(cont_group, None)
             dummy_vals.extend([cont_dummy] * len(cont_dims))
         if cat_dims:
-            # The categorical group is always last (build_partition_groups'
-            # order); its counts at replicate 0 give each real column's
+            # The plan keeps the level counts of replicate 0, which give each real column's
             # own observed, non-empty level sizes to match.
-            cat_counts0 = np.asarray(groups[-1][1][0])  # (Dc, M)
+            if plan.cat_counts0 is None:
+                raise RuntimeError(
+                    "jaxgsa.optimal_transport: categorical level counts are missing."
+                )
+            cat_counts0 = plan.cat_counts0  # (Dc, M)
             for j, key_j in enumerate(dummy_keys[1:]):
                 sizes_j = cat_counts0[j]
                 sizes_j = sizes_j[sizes_j > 0]

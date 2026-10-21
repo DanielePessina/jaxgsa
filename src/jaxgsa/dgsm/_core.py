@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 
 import jax
 import jax.numpy as jnp
@@ -27,6 +27,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.batching import resolve_batch_size
+from jaxgsa._core.bootstrap import draw_rows, resample_keys
 from jaxgsa._core.invalid import _row_finite
 from jaxgsa.dgsm._poincare import axis_constants
 from jaxgsa.problem import Problem
@@ -549,9 +550,21 @@ def draw_counts(key: Array, n_bootstrap: int, n_rows: int) -> Array:
         Integer array of shape ``(n_bootstrap, n_rows)``: how often each
         replicate drew each row.
     """
-    idx = jax.random.randint(key, shape=(n_bootstrap, n_rows), minval=0, maxval=n_rows)
-    rows = jnp.arange(n_bootstrap)[:, None]
-    return jnp.zeros((n_bootstrap, n_rows), dtype=jnp.int32).at[rows, idx].add(1)
+    return _draw_counts(key, n_bootstrap, n_rows)
+
+
+@partial(jax.jit, static_argnames=("n_bootstrap", "n_rows"))
+def _draw_counts(key: Array, n_bootstrap: int, n_rows: int) -> Array:
+    """Count each replicate's draws one replicate at a time, with ``lax.map``.
+
+    Replicate ``r`` uses its own key, so no draw depends on the batch width,
+    and the random-bit transient is one row, not the whole matrix.
+    """
+
+    def one(k: Array) -> Array:
+        return jnp.bincount(draw_rows(k, n_rows), length=n_rows).astype(jnp.int32)
+
+    return jax.lax.map(one, resample_keys(key, n_bootstrap))
 
 
 def _output_shift(Y_chunk: Array) -> Array:

@@ -5,14 +5,14 @@ helpers, so one convention holds across the package: two-tailed, ``alpha/2``
 per tail, a choice between the empirical-quantile and normal-approximation
 endpoint rules, and tolerance of NaN draws.
 
-There are two entry points. pce and hdmr use both. The other bootstrapping
+There are two entry points. pce, hdmr and shapley use both. The other bootstrapping
 ``analyze()`` functions draw their own resamples and use :func:`interval` or
 the lower-level ``_bootstrap_ci_endpoints``:
 
 * :func:`bootstrap_draws` runs the row-resample loop: split the key, draw
   row indices, call the caller's fit, collect the result. pce and hdmr call
-  it. pawn and shapley keep their own loops, which draw the same rows from
-  the same key. The other methods use their own resamplers.
+  it. pawn keeps its own loop, which draws the same rows from the same key.
+  The other methods use their own resamplers.
 * :func:`interval` turns the point estimate(s) and the draws
   :func:`bootstrap_draws` produced into ``*_conf`` endpoint arrays and the
   one :class:`~jaxgsa._core.result.CIInfo` record a result carries, so the
@@ -27,59 +27,182 @@ returns.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import Literal, TypeVar
+from functools import partial
+from typing import Any, Literal, TypeVar
 
 import jax
 import jax.numpy as jnp
 from jax import Array
 
+from jaxgsa._core.batching import get_memory_budget
 from jaxgsa._core.result import CIInfo
 
 _T = TypeVar("_T")
 
 
+def resample_keys(key: Array, n_bootstrap: int) -> Array:
+    """Return one PRNG key per bootstrap draw.
+
+    Draw ``r`` depends only on ``keys[r]``. Changing the chunk width or the
+    memory budget therefore changes no draw. The array of keys costs almost
+    nothing, unlike a pre-generated ``(R, N)`` index matrix.
+
+    Args:
+        key: The caller's PRNG key.
+        n_bootstrap: Number of draws, ``R``.
+
+    Returns:
+        A key array of shape ``(R,)``.
+    """
+    return jax.random.split(key, n_bootstrap)
+
+
+def draw_rows(key: Array, n: int) -> Array:
+    """Draw ``n`` row indices in ``[0, n)`` with replacement, from one draw key.
+
+    The dtype is ``int32`` on purpose. The default is ``int64`` under x64,
+    which doubles the memory of the draw.
+
+    Args:
+        key: One key from :func:`resample_keys`.
+        n: Number of rows, ``N``.
+
+    Returns:
+        An ``int32`` array of shape ``(n,)``.
+    """
+    return jax.random.randint(key, (n,), 0, n, dtype=jnp.int32)
+
+
+@partial(jax.jit, static_argnames=("n_bootstrap", "n"))
+def draw_row_matrix(key: Array, n_bootstrap: int, n: int) -> Array:
+    """Draw all bootstrap resamples as an ``(R, n)`` ``int32`` index matrix.
+
+    Row ``r`` is :func:`draw_rows` of ``resample_keys(key, R)[r]``. The rows
+    are drawn one at a time with ``lax.map``, so the transient of the random
+    bit generator is one row, not the whole matrix (measured 6x the matrix
+    for a single batched ``randint``). Use this where the method needs the
+    full index matrix. Methods that can chunk should call
+    :func:`resample_keys` and :func:`draw_rows` per chunk.
+
+    Args:
+        key: The caller's PRNG key.
+        n_bootstrap: Number of resamples, ``R``.
+        n: Number of rows to draw from, which is also the resample size.
+
+    Returns:
+        An ``int32`` array of shape ``(R, n)``.
+    """
+    return jax.lax.map(lambda k: draw_rows(k, n), resample_keys(key, n_bootstrap))
+
+
+@partial(jax.jit, static_argnames=("replicate_fn", "static", "n_bootstrap", "budget"))
+def _mapped_draws(
+    key: Array,
+    operands: tuple[Array, ...],
+    *,
+    replicate_fn: Callable[..., _T],
+    static: tuple[tuple[str, Any], ...],
+    n_bootstrap: int,
+    budget: int | float,
+) -> _T:
+    """Run the replicates under one cached ``jit`` with a sequential ``lax.map``.
+
+    Args:
+        key: PRNG key the split chain starts from.
+        operands: Arrays passed to ``replicate_fn``. The first one sets the
+            row count.
+        replicate_fn: Module-level per-replicate fit.
+        static: Hashable keyword arguments for ``replicate_fn``.
+        n_bootstrap: Number of replicates.
+        budget: Memory budget in bytes at call time. The fits read it while
+            tracing (streamed-versus-single-pass, batch widths), so it is part
+            of the cache key and a budget change rebuilds the program. The
+            body does not use it.
+
+    Returns:
+        The stacked replicate pytree.
+    """
+    del budget
+    N = operands[0].shape[0]
+    kwargs = dict(static)
+
+    def _next(k: Array, _: None) -> tuple[Array, Array]:
+        k, sub = jax.random.split(k)
+        return k, sub
+
+    _, subkeys = jax.lax.scan(_next, key, None, length=n_bootstrap)
+
+    def _one(sub: Array) -> _T:
+        rows = jax.random.choice(sub, N, shape=(N,), replace=True)
+        return replicate_fn(rows, *operands, **kwargs)
+
+    return jax.lax.map(_one, subkeys)
+
+
 def bootstrap_draws(
     key: Array,
-    N: int,
     n_bootstrap: int,
-    replicate_fn: Callable[[Array], _T],
+    replicate_fn: Callable[..., _T],
+    operands: tuple[Array, ...],
+    *,
+    static: tuple[tuple[str, Any], ...] = (),
 ) -> _T:
     """Run ``replicate_fn`` on ``n_bootstrap`` row-resamples and stack the results.
 
-    pce and hdmr use this loop: split the key, draw ``N`` row indices with
-    replacement, call the per-replicate fit, append the result, and
-    ``jnp.stack`` every collected list at the end. ``replicate_fn`` returns
-    whatever pytree the per-replicate fit already returns — a single array, a
-    tuple, or a ``dict`` of named arrays — and this function stacks every
-    leaf of it the same way, so the caller keeps writing its fit function
-    exactly as it did with the hand-rolled loop; only the loop itself moves
-    here.
+    pce, hdmr and shapley use this loop. One cached ``jax.jit`` holds a
+    sequential ``lax.map`` over the replicates, so the program compiles once
+    and a repeat call compiles nothing. Each replicate draws ``N`` row
+    indices with replacement from its own key, split from ``key`` in order.
+    Only one replicate runs at a time. Peak memory is still higher than in a
+    Python loop, because the streamed fit's row batches unroll under one jit.
 
     Args:
-        key: PRNG key. Not otherwise used by the caller: an internal
-            ``n_bootstrap``-long split sequence draws the row resamples, so
-            passing the same key twice reproduces the same draws.
-        N: Row count of the pool ``replicate_fn`` resamples from.
-        n_bootstrap: Number of bootstrap replicates to draw. Must be at
-            least 1. Every caller already guards its bootstrap branch with
-            ``if n_bootstrap > 0``, so this function does not repeat the
-            check; there is no empty pytree to return for 0.
-        replicate_fn: Called once per replicate with that replicate's row
-            indices, shape ``(N,)`` (drawn with replacement). Must return the
-            same pytree structure every call — the same set of dict keys, the
-            same tuple length — because the leaves are stacked position by
-            position.
+        key: PRNG key. The same key gives the same row draws.
+        n_bootstrap: Number of replicates. Must be at least 1.
+        replicate_fn: Called as ``replicate_fn(rows, *operands, **static)``
+            with the row indices, shape ``(N,)``. It must be a module-level
+            function, so the jit cache hits, and it must return the same
+            pytree every call.
+        operands: Arrays the replicate fit reads. The first one has ``N``
+            rows.
+        static: Hashable keyword arguments for ``replicate_fn``, as a tuple
+            of ``(name, value)`` pairs, for example ``tuple(sorted(d.items()))``.
 
     Returns:
-        The same pytree ``replicate_fn`` returns, with every leaf array
-        gaining a new leading axis of length ``n_bootstrap``.
+        The pytree ``replicate_fn`` returns, with every leaf array gaining a
+        new leading axis of length ``n_bootstrap``.
     """
-    parts = []
-    for _ in range(n_bootstrap):
-        key, subkey = jax.random.split(key)
-        rows = jax.random.choice(subkey, N, shape=(N,), replace=True)
-        parts.append(replicate_fn(rows))
-    return jax.tree_util.tree_map(lambda *leaves: jnp.stack(leaves), *parts)
+    return _mapped_draws(
+        key,
+        tuple(operands),
+        replicate_fn=replicate_fn,
+        static=_hashable_static(static),
+        n_bootstrap=n_bootstrap,
+        budget=get_memory_budget(),
+    )
+
+
+def _hashable_static(static: tuple[tuple[str, Any], ...]) -> tuple[tuple[str, Any], ...]:
+    """Turn scalar arrays in a static tuple into Python scalars.
+
+    A jit static argument must be hashable. A 0-d JAX or NumPy array, for
+    example ``ridge=jnp.asarray(1e-6)``, is not, so it becomes a Python scalar.
+
+    Args:
+        static: ``(name, value)`` pairs, possibly nested in tuples.
+
+    Returns:
+        The same pairs with every 0-d array replaced by its Python value.
+    """
+
+    def fix(value: Any) -> Any:
+        if isinstance(value, tuple):
+            return tuple(fix(v) for v in value)
+        if hasattr(value, "ndim") and hasattr(value, "item") and value.ndim == 0:
+            return value.item()
+        return value
+
+    return fix(static)
 
 
 def _bootstrap_ci_endpoints(

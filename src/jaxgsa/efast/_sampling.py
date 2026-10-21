@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from jaxgsa._core.samples import (
 )
 from jaxgsa._core.sampling import _transform_samples, check_seed
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
 
 
@@ -264,6 +266,22 @@ def _min_n_per_curve(D: int, M: int) -> int:
     return 4 * M**2 * max(D - 1, 1) + 1
 
 
+def _resonance_free_n_per_curve(D: int, M: int) -> int:
+    """Smallest ``n_per_curve`` that keeps frequency 1 and 2 off the curve.
+
+    Below this value the two lowest complementary frequencies are 1 and 2.
+    Equivalent to ``omega_compl[1] > 2``, that is ``4*M^2*(2*D-3) + 1``.
+
+    Args:
+        D: Number of parameters (at least 3).
+        M: Interference factor.
+
+    Returns:
+        The recommended minimum ``n_per_curve``.
+    """
+    return 4 * M**2 * (2 * D - 3) + 1
+
+
 def _frequency_plan(D: int, n_per_curve: int, M: int) -> _FrequencyPlan:
     """Compute the frequency layout of an eFAST design, once, for both sides.
 
@@ -387,6 +405,11 @@ def sample(
         ``i*n_per_curve:(i+1)*n_per_curve`` form the search curve for
         parameter ``i``.
 
+    Warns:
+        JaxgsaWarning: If ``D >= 3`` and ``n_per_curve < 4*M^2*(2*D-3) + 1``.
+            The two lowest complementary frequencies are then 1 and 2.
+            Interacting inputs on that pair can bias S1 and ST by 0.1 or more.
+
     Raises:
         ValueError: In any of these cases. ``M < 1``.
             ``n_per_curve < 4*M^2*(D-1) + 1``. ``problem.correlation`` declares
@@ -407,6 +430,18 @@ def sample(
     plan = _frequency_plan(D, n_per_curve, M)
     omega_0 = plan.omega_0
     omega_compl = plan.omega_compl
+
+    if D >= 3 and int(omega_compl[1]) == 2:
+        n_rec = _resonance_free_n_per_curve(D, M)
+        warnings.warn(
+            f"jaxgsa.efast.sample: n_per_curve={n_per_curve} puts the two lowest "
+            "complementary frequencies at 1 and 2. Two inputs that interact and "
+            "fall on a 1:2 pair are under-sampled on that curve, and S1 and ST "
+            f"can be biased by 0.1 or more. Use n_per_curve >= {n_rec} "
+            f"({n_rec * D} model runs) to separate them.",
+            JaxgsaWarning,
+            stacklevel=2,
+        )
 
     rng = np.random.default_rng(seed)
 

@@ -8,12 +8,14 @@ behavior only when you call the helper yourself.
 """
 
 import math as _math
+import warnings as _warnings
 from pathlib import Path as _Path
 
 import jax as _jax
 import numpy as _np
 
 from jaxgsa._core import batching as _batching
+from jaxgsa._core.warning_types import JaxgsaWarning as _JaxgsaWarning
 
 __all__ = ["enable_compilation_cache", "get_memory_budget", "set_memory_budget"]
 
@@ -25,6 +27,9 @@ __all__ = ["enable_compilation_cache", "get_memory_budget", "set_memory_budget"]
 # ``512 * 1024**2`` bytes. The explicit binary spellings (``kib``, ``mib`` and
 # so on) are exact synonyms of their short forms; they are accepted so callers
 # who prefer to be unambiguous can be.
+# A budget above this is almost surely bytes read as megabytes.
+_SUSPECT_BUDGET_BYTES = 2**40
+
 _UNIT_BYTES: dict[str, int] = {
     "b": 1,
     "bytes": 1,
@@ -151,6 +156,10 @@ def set_memory_budget(budget: int | float, *, unit: str | None = None) -> None:
             ``"kib"``, ``"mb"``, ``"mib"``, ``"gb"``, ``"gib"``, ``"tb"`` or
             ``"tib"``. Defaults to megabytes.
 
+    Warns:
+        JaxgsaWarning: If the resulting budget exceeds 1 TiB. This usually
+            means bytes were passed with the default megabyte unit.
+
     Raises:
         ValueError: If ``budget`` is not a positive, finite number, if it is a
             ``bool``, if it rounds to less than one byte, if ``unit`` is not an
@@ -168,6 +177,16 @@ def set_memory_budget(budget: int | float, *, unit: str | None = None) -> None:
     if budget_bytes < 1:
         raise ValueError(
             f"memory budget rounds to {budget_bytes} bytes; it must be at least 1 byte"
+        )
+    if budget_bytes > _SUSPECT_BUDGET_BYTES:
+        _warnings.warn(
+            f"jaxgsa.config.set_memory_budget: {budget_bytes / 2**40:,.0f} TiB requested. "
+            f"The number {budget!r} is read in "
+            f"{'mb' if unit is None else unit!r}, which is almost certainly not what you "
+            'meant, and it turns automatic batching off. If you passed bytes, use unit="b"; '
+            'for GiB, use unit="gib".',
+            stacklevel=2,
+            category=_JaxgsaWarning,
         )
     _batching._set_memory_budget(budget_bytes)
 

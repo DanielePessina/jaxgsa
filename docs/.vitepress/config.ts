@@ -125,6 +125,7 @@ export default defineConfig({
             { text: 'Method comparison', link: '/examples/method-comparison' },
             { text: 'Bootstrap intervals', link: '/examples/bootstrap' },
             { text: 'Fit input ranges', link: '/examples/inverse-sobol-bounds' },
+            { text: 'Population PK (NLME)', link: '/examples/nlme' },
             { text: 'Save and reload', link: '/examples/save-load' },
           ],
         },

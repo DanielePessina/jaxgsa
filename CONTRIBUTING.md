@@ -22,8 +22,14 @@ Run the same checks CI runs, and make sure they all pass:
 uv run ruff format .          # format
 uv run ruff check .           # lint
 uv run ty check src/jaxgsa      # type-check
-uv run pytest                 # tests
+uv run pytest -n auto         # tests, one worker per core
 ```
+
+The test suite takes about 3 minutes on a 10-core Apple M1 Pro with `-n auto`, and
+about 1.5 minutes on a rerun. `tests/conftest.py` keeps compiled XLA programs
+in `.pytest_cache/jax`, so a rerun loads them instead of compiling again. Set
+`JAX_COMPILATION_CACHE_DIR=""` to turn the cache off. CI runs the suite twice,
+once with `JAX_ENABLE_X64=1`. Tests marked `slow` run only with `-m slow`.
 
 Please also:
 

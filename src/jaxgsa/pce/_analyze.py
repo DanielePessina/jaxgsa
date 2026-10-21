@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
+from jax.scipy.linalg import solve_triangular
 
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import get_memory_budget, pad_rows, resolve_batch_size
@@ -29,8 +30,8 @@ from jaxgsa._core.fit_quality import (
     check_degenerate_inputs,
     check_fit_finite,
     check_gram_rank,
-    min_pivot_share,
     warn_cv_overfit,
+    warn_gram_rank_replicates,
     warn_variance_fit,
 )
 from jaxgsa._core.invalid import OnInvalid
@@ -41,26 +42,27 @@ from jaxgsa._core.irregular import (
     _is_irregular_y,
     analyze_irregular,
 )
-from jaxgsa._core.precision import unit_clip_bounds
 from jaxgsa._core.result import CIInfo
-from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa._core.surrogate import _PredictPlan
-from jaxgsa._core.transforms import GROUPED_MIN_D, _in_column_order, _truncnorm_cdf
+from jaxgsa._core.transforms import GROUPED_MIN_D, _in_column_order
 from jaxgsa._core.validation import (
-    _is_constant_slice,
     _prepare_Y,
     as_key,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.pce._engine import (
+    TruncatedFamily,
     build_design_matrix,
     build_multi_index,
     hat_diagonal,
     loo_error,
+    r_pivot_share,
+    ridge_qr,
     sobol_from_coefficients,
+    truncated_gaussian_family,
 )
 from jaxgsa.pce._result import PCEResult
-from jaxgsa.problem import CategoricalSpec, Problem, UniformSpec
+from jaxgsa.problem import CategoricalSpec, GaussianSpec, Problem, UniformSpec
 
 # Keyword-only parameters the irregular engine forwards unchanged to the
 # per-channel recursive analyze() calls. verbose is excluded:
@@ -78,28 +80,6 @@ _IRREGULAR_KWARGS = (
     "keep_replicates",
 )
 
-# A truncated Gaussian is treated as effectively unbounded, and so kept on the
-# Hermite basis, when both of its bounds sit at least this many standard
-# deviations from the mean. Below the threshold the truncated measure differs
-# enough from the standard normal that Hermite polynomials are no longer
-# orthogonal against it.
-#
-# M12: this gate and the order cap below must be calibrated at the same
-# width. Measured max |G - I| for orthonormalised He_0..He_P under a
-# truncated N(0, 1) at |z| = 5.0: 1.5e-3 (P=3), 3.1e-2 (P=5), 2.0e-1 (P=7) --
-# large enough that a response with its variance concentrated in a degree-7
-# mode returned S1 that missed the true split by 0.05 with no warning. At
-# |z| = 7.03, the width used below, the same defects are 4.0e-8 (P=3),
-# 2.8e-5 (P=6), 9.5e-3 (P=10): negligible up to the order cap this module
-# enforces.
-_WIDE_TRUNCATION_Z = 7.0
-
-# Above this polynomial degree the Hermite Gram defect against even a very wide
-# truncated normal stops being negligible, so Legendre is the safer basis.
-# Measured max |G - I| for orthonormalised He_0..He_P against the truncated
-# normal at |z| = 7.03: 4.0e-8 (P=3), 2.8e-5 (P=6), 9.5e-3 (P=10).
-_MAX_HERMITE_ORDER_UNDER_TRUNCATION = 7
-
 # Fewest rows the fit can still run on after ``on_invalid="drop"`` removed
 # some. Two is the floor of the arithmetic itself: a sample variance, which
 # every index divides by, is undefined below it. `_auto_order` never drops
@@ -109,78 +89,23 @@ _MAX_HERMITE_ORDER_UNDER_TRUNCATION = 7
 _MIN_ROWS = 2
 
 
-def _truncated_gaussian_is_wide(
-    lo: float | None, hi: float | None, mean: float, std: float
-) -> bool:
-    """Decide whether a truncated Gaussian is wide enough to stay on Hermite.
-
-    The test uses the standardized bound ``|z| = |bound - mean| / std``. Both
-    declared sides must sit at least ``_WIDE_TRUNCATION_Z`` standard deviations
-    out. A one-sided truncation is judged by its bounded side alone.
-
-    Args:
-        lo: Lower truncation bound, or ``None`` when the side is open.
-        hi: Upper truncation bound, or ``None`` when the side is open.
-        mean: Marginal mean.
-        std: Marginal standard deviation.
-
-    Returns:
-        ``True`` when every declared bound is at least ``_WIDE_TRUNCATION_Z``
-        standardized units from the mean.
-    """
-    z = [abs(bound - mean) / std for bound in (lo, hi) if bound is not None]
-    return bool(z) and min(z) >= _WIDE_TRUNCATION_Z
-
-
-def _order_forced_legendre(problem: Problem, order: int) -> list[str]:
-    """Name the inputs that a high order moves from Hermite to Legendre.
-
-    A wide truncated Gaussian stays on Hermite while the order is at most
-    ``_MAX_HERMITE_ORDER_UNDER_TRUNCATION``. Above that cap it goes through
-    its CDF onto Legendre, which has to approximate the steep inverse normal
-    CDF and fits worse. Only the order causes this switch, which is why it
-    deserves a warning. A narrow truncation moves to Legendre at any order
-    and is not reported.
-
-    Args:
-        problem: Problem whose ``input_specs`` decide the per-dimension map.
-        order: Effective maximum polynomial degree of the expansion.
-
-    Returns:
-        Names of the inputs that the order alone moved to Legendre.
-    """
-    if order <= _MAX_HERMITE_ORDER_UNDER_TRUNCATION:
-        return []
-    names = []
-    for name, spec in zip(problem.names, problem.input_specs, strict=True):
-        if isinstance(spec, CategoricalSpec | UniformSpec):
-            continue
-        if spec.low is None and spec.high is None:
-            continue
-        std = math.sqrt(float(spec.variance))
-        if _truncated_gaussian_is_wide(spec.low, spec.high, spec.mean, std):
-            names.append(name)
-    return names
-
-
-def _map_to_reference(X: Array, problem: Problem, order: int) -> tuple[Array, tuple[str, ...]]:
+def _map_to_reference(
+    X: Array, problem: Problem, order: int
+) -> tuple[Array, tuple[str | TruncatedFamily, ...]]:
     """Map physical inputs to the orthogonal polynomial reference domain.
 
     This is the Wiener-Askey rule. Uniform inputs use Legendre, mapped to
     [-1, 1]. Untruncated Gaussian inputs use Hermite, standardized to
     N(0, 1).
 
-    A truncated Gaussian picks its basis from how tight the truncation is.
-    A narrow truncation is a genuinely different measure, so the input goes
-    through its truncated CDF and onto Legendre. A wide truncation keeps
-    Hermite. Wide means every declared bound sits at least
-    ``_WIDE_TRUNCATION_Z`` standard deviations from the mean, which is almost
-    the standard normal. Hermite is both cheaper and far more accurate there,
-    because the Legendre route has to approximate the steep inverse normal
-    CDF with low-order polynomials, and that measurably degrades the fit.
-    Requesting an order above ``_MAX_HERMITE_ORDER_UNDER_TRUNCATION`` forces
-    Legendre again, because the Hermite Gram defect against the truncated
-    measure grows with degree.
+    A truncated Gaussian has no classical family, so it gets the orthonormal
+    polynomials of its own measure. The input is standardised by the mean and
+    standard deviation of the truncated distribution, and the recurrence comes
+    from :func:`jaxgsa.pce._engine.truncated_gaussian_family`. The basis is
+    exactly orthonormal for every truncation width and every order. The two
+    older routes were not. Raw Hermite polynomials lose orthogonality against a
+    truncated normal as the degree grows, and the Legendre route through the
+    truncated CDF has to approximate the steep inverse normal CDF.
 
     Args:
         X: Inputs in physical units, shape ``(N, D)``.
@@ -189,16 +114,48 @@ def _map_to_reference(X: Array, problem: Problem, order: int) -> tuple[Array, tu
 
     Returns:
         Tuple of the reference-domain inputs, shape ``(N, D)``, and a
-        length-``D`` tuple of ``"uniform"`` / ``"gaussian"`` tags telling
-        ``build_design_matrix`` which 1-D polynomial family each dimension
-        needs.
+        length-``D`` tuple of tags telling ``build_design_matrix`` which 1-D
+        polynomial family each dimension needs: ``"uniform"``,
+        ``"gaussian"``, or a :class:`~jaxgsa.pce._engine.TruncatedFamily`.
     """
     if problem.n_params < GROUPED_MIN_D:
         return _map_by_column(X, problem, order)
     return _map_by_group(X, problem, order)
 
 
-def _map_by_column(X: Array, problem: Problem, order: int) -> tuple[Array, tuple[str, ...]]:
+def _gaussian_standardisation(
+    spec: GaussianSpec, order: int
+) -> tuple[float, float, str | TruncatedFamily]:
+    """Find the centre, scale and polynomial family of a Gaussian input.
+
+    The values are host floats computed in double precision, so a column is
+    mapped by ``(x - centre) / scale`` in whatever dtype ``x`` has.
+
+    Args:
+        spec: A Gaussian input spec, truncated or not.
+        order: Effective maximum polynomial degree of the expansion.
+
+    Returns:
+        ``(centre, scale, family)``. An untruncated input gives its mean, its
+        standard deviation and ``"gaussian"``.
+    """
+    mean = spec.mean
+    # math, not jnp: the standard deviation is a property of the declared
+    # marginal, so it must stay a host float. Under `jit` a `jnp` call on
+    # it returns a tracer, and `float()` on a tracer raises -- which is
+    # what made the reference map untraceable for a Gaussian input.
+    std = math.sqrt(float(spec.variance))
+    if spec.low is None and spec.high is None:
+        return mean, std, "gaussian"
+    a = -math.inf if spec.low is None else (spec.low - mean) / std
+    b = math.inf if spec.high is None else (spec.high - mean) / std
+    mean_t, std_t, family = truncated_gaussian_family(a, b, order)
+    return mean + std * mean_t, std * std_t, family
+
+
+def _map_by_column(
+    X: Array, problem: Problem, order: int
+) -> tuple[Array, tuple[str | TruncatedFamily, ...]]:
     """Map physical inputs to the reference domain, one column at a time.
 
     See :func:`_map_to_reference` for the rule and why this loop is kept for
@@ -214,8 +171,7 @@ def _map_by_column(X: Array, problem: Problem, order: int) -> tuple[Array, tuple
     """
     D = problem.n_params
     cols = []
-    input_types: list[str] = []
-    hermite_safe_order = order <= _MAX_HERMITE_ORDER_UNDER_TRUNCATION
+    input_types: list[str | TruncatedFamily] = []
     for d in range(D):
         spec = problem.input_specs[d]
         if isinstance(spec, CategoricalSpec):
@@ -229,38 +185,16 @@ def _map_by_column(X: Array, problem: Problem, order: int) -> tuple[Array, tuple
             input_types.append("uniform")
             continue
 
-        mean, lo, hi = spec.mean, spec.low, spec.high
-        # math, not jnp: the standard deviation is a property of the declared
-        # marginal, so it must stay a host float. Under `jit` a `jnp` call on
-        # it returns a tracer, and `float()` on a tracer raises -- which is
-        # what made the reference map untraceable for a Gaussian input.
-        std = math.sqrt(float(spec.variance))
-        truncated = lo is not None or hi is not None
-        if truncated and not (
-            hermite_safe_order and _truncated_gaussian_is_wide(lo, hi, mean, std)
-        ):
-            a = -np.inf if lo is None else (lo - mean) / std
-            b = np.inf if hi is None else (hi - mean) / std
-            u = _truncnorm_cdf((X[:, d] - mean) / std, a, b)
-            # The clip keeps u strictly inside (0, 1), so a sample at or
-            # beyond a truncation bound stays distinguishable from the bound
-            # itself. In float32 its upper half did nothing at all --
-            # ``1 - UNIT_CLIP`` is exactly 1.0 there -- so the bound is
-            # brought inside u's own dtype instead. The lower bound stays at
-            # UNIT_CLIP, which float32 represents exactly; widening it for
-            # symmetry would discard information and move numbers for
-            # nothing. See unit_clip_bounds.
-            u = jnp.clip(u, *unit_clip_bounds(UNIT_CLIP, u.dtype))
-            cols.append(2.0 * u - 1.0)
-            input_types.append("uniform")
-        else:
-            cols.append((X[:, d] - mean) / std)
-            input_types.append("gaussian")
+        centre, scale, family = _gaussian_standardisation(spec, order)
+        cols.append((X[:, d] - centre) / scale)
+        input_types.append(family)
 
     return jnp.column_stack(cols), tuple(input_types)
 
 
-def _map_by_group(X: Array, problem: Problem, order: int) -> tuple[Array, tuple[str, ...]]:
+def _map_by_group(
+    X: Array, problem: Problem, order: int
+) -> tuple[Array, tuple[str | TruncatedFamily, ...]]:
     """Map physical inputs to the reference domain, one op per map family.
 
     Args:
@@ -275,19 +209,16 @@ def _map_by_group(X: Array, problem: Problem, order: int) -> tuple[Array, tuple[
     X = jnp.asarray(X)
     dtype = X.dtype if jnp.issubdtype(X.dtype, jnp.floating) else jnp.result_type(X.dtype, float)
     X = X.astype(dtype)
-    hermite_safe_order = order <= _MAX_HERMITE_ORDER_UNDER_TRUNCATION
 
     # Columns are grouped by map and each group goes through one broadcast op,
     # so the number of eager dispatches does not grow with D. Per-column
     # constants are computed on the host in double precision and cast to the
     # column dtype, which is what a Python-float operand becomes inside a
     # single-column op, so, run eagerly, the result is bit-identical to a column loop.
-    input_types: list[str] = ["gaussian"] * D
+    input_types: list[str | TruncatedFamily] = ["gaussian"] * D
     uniform: list[int] = []
-    standard: list[int] = []  # Hermite: (x - mean) / std
-    lower: list[int] = []  # truncated CDF -> Legendre, interval not in the upper tail
-    upper: list[int] = []  # truncated CDF -> Legendre, interval in the upper tail
-    consts: dict[int, tuple[float, ...]] = {}
+    standard: list[int] = []  # Gaussian, truncated or not: (x - centre) / scale
+    consts: dict[int, tuple[float, float]] = {}
     for d in range(D):
         spec = problem.input_specs[d]
         if isinstance(spec, CategoricalSpec):
@@ -302,52 +233,22 @@ def _map_by_group(X: Array, problem: Problem, order: int) -> tuple[Array, tuple[
             consts[d] = (spec.low, spec.high - spec.low)
             continue
 
-        mean, lo, hi = spec.mean, spec.low, spec.high
-        # math, not jnp: the standard deviation is a property of the declared
-        # marginal, so it must stay a host float. Under `jit` a `jnp` call on
-        # it returns a tracer, and `float()` on a tracer raises -- which is
-        # what made the reference map untraceable for a Gaussian input.
-        std = math.sqrt(float(spec.variance))
-        truncated = lo is not None or hi is not None
-        if truncated and not (
-            hermite_safe_order and _truncated_gaussian_is_wide(lo, hi, mean, std)
-        ):
-            a = -np.inf if lo is None else (lo - mean) / std
-            b = np.inf if hi is None else (hi - mean) / std
-            (upper if a > 0.0 else lower).append(d)
-            input_types[d] = "uniform"
-            consts[d] = (mean, std, a, b)
-        else:
-            standard.append(d)
-            consts[d] = (mean, std)
+        centre, scale, family = _gaussian_standardisation(spec, order)
+        standard.append(d)
+        input_types[d] = family
+        consts[d] = (centre, scale)
 
-    def column_consts(group: list[int], n: int) -> list[Array]:
-        values = np.asarray([consts[d][:n] for d in group], dtype=np.float64)
-        return [jnp.asarray(values[:, j], dtype=dtype) for j in range(n)]
+    def column_consts(group: list[int]) -> list[Array]:
+        values = np.asarray([consts[d] for d in group], dtype=np.float64)
+        return [jnp.asarray(values[:, j], dtype=dtype) for j in range(2)]
 
     parts: list[tuple[list[int], Array]] = []
     if uniform:
-        low, width = column_consts(uniform, 2)
+        low, width = column_consts(uniform)
         parts.append((uniform, 2.0 * (X[:, uniform] - low) / width - 1.0))
     if standard:
-        mean, std = column_consts(standard, 2)
-        parts.append((standard, (X[:, standard] - mean) / std))
-    for group in (lower, upper):
-        if group:
-            mean, std = column_consts(group, 2)
-            a_host = np.asarray([consts[d][2] for d in group], dtype=np.float64)
-            b_host = np.asarray([consts[d][3] for d in group], dtype=np.float64)
-            u = _truncnorm_cdf((X[:, group] - mean) / std, a_host, b_host)
-            # The clip keeps u strictly inside (0, 1), so a sample at or
-            # beyond a truncation bound stays distinguishable from the bound
-            # itself. In float32 its upper half did nothing at all --
-            # ``1 - UNIT_CLIP`` is exactly 1.0 there -- so the bound is
-            # brought inside u's own dtype instead. The lower bound stays at
-            # UNIT_CLIP, which float32 represents exactly; widening it for
-            # symmetry would discard information and move numbers for
-            # nothing. See unit_clip_bounds.
-            u = jnp.clip(u, *unit_clip_bounds(UNIT_CLIP, u.dtype))
-            parts.append((group, 2.0 * u - 1.0))
+        centre, scale = column_consts(standard)
+        parts.append((standard, (X[:, standard] - centre) / scale))
 
     return _in_column_order(parts, D), tuple(input_types)
 
@@ -420,10 +321,10 @@ class _PCEFit(NamedTuple):
 
     PCE analysis derives Sobol indices and the leave-one-out (LOO) diagnostic
     from this state. :meth:`PCEResult.shapley` reuses its coefficients and
-    multi-index. The design matrix and Gram factorization are deliberately
+    multi-index. The design matrix and the QR factor are deliberately
     NOT carried: the streamed path never materializes them at full ``N``, so
     both fit paths reduce to the same coefficient, LOO and fitted-variance
-    summary.
+    summary. The small QR factor is reduced to ``pivot_share`` and dropped.
     """
 
     coefficients: Array  # (T, K, n_terms), terms-last
@@ -432,13 +333,13 @@ class _PCEFit(NamedTuple):
     loo_flat: Array | None  # (T*K,) per-slice LOO RMSE, or None (diagnostics=False)
     rmse_flat: Array | None  # (T*K,) per-slice in-sample RMSE, or None (diagnostics=False)
     streamed: bool  # True when the row-streamed fit path ran
-    # Smallest unexplained column share of the regularized Gram matrix, from
-    # jaxgsa._core.fit_quality.min_pivot_share, or None (diagnostics=False).
+    # Smallest unexplained column share of the ridge-augmented design, read off
+    # the QR factor (see r_pivot_share).
     pivot_share: Array | None = None
 
 
 @lru_cache(maxsize=32)
-def _get_streamed_steps(input_types: tuple[str, ...], order: int):
+def _get_streamed_steps(input_types: tuple[str | TruncatedFamily, ...], order: int):
     """Build and cache the two jitted per-batch steps of the streamed fit.
 
     The streamed fit used to rebuild the design block and run its
@@ -452,10 +353,10 @@ def _get_streamed_steps(input_types: tuple[str, ...], order: int):
     Masking. A padded row of ``X_ref`` is all zeros, and the constant basis
     term evaluates to 1 there, so the raw design block is NOT zero on padded
     rows. Both steps therefore multiply the design block by the 0/1 row mask
-    ``w``. A zeroed design row contributes a hard zero to ``G = Phi^T Phi``
-    and to ``B = Phi^T Y``, and in the LOO pass it makes the padded row's
-    leverage 0 and its residual ``Y_pad - 0 = 0`` (``Y`` is zero-padded), so
-    the accumulated sum of squares gains exactly nothing.
+    ``w``. A zeroed design row adds nothing to the QR update, and in the LOO
+    pass it makes the padded row's leverage 0 and its residual ``Y_pad - 0 =
+    0`` (``Y`` is zero-padded), so the accumulated sum of squares gains
+    exactly nothing.
 
     The multi-index is rebuilt from ``(D, order)`` inside the cache rather
     than passed in: :func:`build_multi_index` is deterministic in those two
@@ -467,17 +368,23 @@ def _get_streamed_steps(input_types: tuple[str, ...], order: int):
         order: Effective (post-``_auto_order``) polynomial order.
 
     Returns:
-        ``(acc_normal, acc_loo)``. ``acc_normal(X_b, Y_b, w, G, B)`` folds
-        one batch into the running normal equations; ``acc_loo(X_b, Y_b, w,
-        coeffs_flat, gram_chol, sse)`` folds one batch into the running
-        ``(LOO, in-sample)`` sums of squares.
+        ``(acc_qr, acc_loo)``. ``acc_qr(X_b, Y_b, w, R, z)`` folds one batch
+        into the running triangular factor ``R`` and the rotated right-hand
+        side ``z = Q^T Y``; ``acc_loo(X_b, Y_b, w, coeffs_flat, R, sse)``
+        folds one batch into the running ``(LOO, in-sample)`` sums of
+        squares.
     """
     multi_index = build_multi_index(len(input_types), order)
 
     @jax.jit
-    def acc_normal(X_b: Array, Y_b: Array, w: Array, G: Array, B: Array) -> tuple[Array, Array]:
+    def acc_qr(X_b: Array, Y_b: Array, w: Array, R: Array, z: Array) -> tuple[Array, Array]:
         Phi_b = build_design_matrix(X_b, multi_index, input_types, order) * w[:, None]
-        return G + Phi_b.T @ Phi_b, B + Phi_b.T @ Y_b
+        # Tall-skinny QR: factor the old R stacked on the new rows. The
+        # product of the two orthogonal factors is the orthogonal factor of
+        # all the rows so far, so Q^T Y carries over as z.
+        Q, R_new = jnp.linalg.qr(jnp.concatenate([R, Phi_b], axis=0), mode="reduced")
+        z_new = Q.T @ jnp.concatenate([z, Y_b], axis=0)
+        return R_new, z_new
 
     @jax.jit
     def acc_loo(
@@ -485,23 +392,23 @@ def _get_streamed_steps(input_types: tuple[str, ...], order: int):
         Y_b: Array,
         w: Array,
         coeffs_flat: Array,
-        gram_chol: Array,
+        R: Array,
         sse: tuple[Array, Array],
     ) -> tuple[Array, Array]:
         Phi_b = build_design_matrix(X_b, multi_index, input_types, order) * w[:, None]
         residuals = Y_b - Phi_b @ coeffs_flat  # (b, M); zero on padded rows
-        loo_residuals = residuals / (1.0 - hat_diagonal(Phi_b, gram_chol))[:, None]
+        loo_residuals = residuals / (1.0 - hat_diagonal(Phi_b, R.T))[:, None]
         sse_loo, sse_fit = sse
         return sse_loo + jnp.sum(loo_residuals**2, axis=0), sse_fit + jnp.sum(residuals**2, axis=0)
 
-    return acc_normal, acc_loo
+    return acc_qr, acc_loo
 
 
 def _fit_pce_streamed(
     X_ref: Array,
     Y_flat: Array,
     multi_index: np.ndarray,
-    input_types: tuple[str, ...],
+    input_types: tuple[str | TruncatedFamily, ...],
     order: int,
     ridge: float,
     batch_size: int | None,
@@ -509,17 +416,18 @@ def _fit_pce_streamed(
 ) -> tuple[Array, Array | None, Array | None, Array]:
     """Fit the PCE by streaming row batches.
 
-    The normal-equation pass always runs. A second pass computes LOO and the
-    in-sample RMSE (from the same residuals) only when ``diagnostics`` is true.
-    Neither pass holds more than one
-    ``(batch, n_terms)`` design block:
+    The QR pass always runs. A second pass computes LOO and the in-sample
+    RMSE (from the same residuals) only when ``diagnostics`` is true. Neither
+    pass holds more than one ``(batch, n_terms)`` design block:
 
-    1. Accumulate ``G = Phi^T Phi`` (n_terms, n_terms) and ``B = Phi^T Y``
-       (n_terms, T*K), then solve ``(G + ridge*I) c = B`` once. This is
-       mathematically identical to the single-pass normal equations. Only
-       the float32 summation order differs.
-    2. When diagnostics are enabled, with the Cholesky factor of ``G + ridge*I``
-       known, rebuild each design block, get its hat-matrix diagonal from
+    1. Fold each batch into a running QR factorisation of the ridge-augmented
+       design (tall-skinny QR). The carry is the ``(n_terms, n_terms)``
+       factor ``R`` and ``z = Q^T Y``, which starts at ``sqrt(ridge)*I`` and
+       zero. The coefficients solve ``R c = z`` once. This is the same
+       Tikhonov problem as the single pass, and only the float32 rounding
+       differs.
+    2. When diagnostics are enabled, with ``R`` known, rebuild each design
+       block, get its hat-matrix diagonal from
        :func:`jaxgsa.pce._engine.hat_diagonal` and its per-row residuals, and
        accumulate the exact LOO sum of squares as defined by
        :func:`jaxgsa.pce._engine.loo_error`. Both paths call the same leverage
@@ -537,7 +445,7 @@ def _fit_pce_streamed(
         multi_index: Multi-index array, shape ``(n_terms, D)``.
         input_types: Per-dimension ``"uniform"`` / ``"gaussian"`` tags.
         order: Effective (post-``_auto_order``) polynomial order.
-        ridge: Tikhonov parameter added to the Gram matrix.
+        ridge: Tikhonov parameter of the ridge-augmented design.
         batch_size: Rows per batch, or ``None`` to derive one from the
             active memory budget.
         diagnostics: Whether to run the streamed LOO pass.
@@ -545,7 +453,7 @@ def _fit_pce_streamed(
     Returns:
         Tuple of ``coeffs_flat``, shape ``(n_terms, T*K)``, the per-slice LOO
         RMSE, shape ``(T*K,)``, the per-slice in-sample RMSE, same shape, and
-        the regularized Gram matrix, shape ``(n_terms, n_terms)``. The two
+        the triangular factor ``R``, shape ``(n_terms, n_terms)``. The two
         RMSEs are ``None`` when diagnostics are disabled.
     """
     N = X_ref.shape[0]
@@ -553,65 +461,95 @@ def _fit_pce_streamed(
     M = Y_flat.shape[1]
     dtype = jnp.result_type(X_ref.dtype, Y_flat.dtype)
 
-    # Per-row transient cost of one batch: 3*n_terms floats for the
-    # design-block running product plus 2*M for the residual arrays.
-    bytes_per_row = jnp.dtype(dtype).itemsize * (3 * n_terms + 2 * M)
-    b = resolve_batch_size(bytes_per_row, N, batch_size)
+    # Per-row transient cost of one batch. The design block peaks at 3*n_terms
+    # floats (the running product). The QR step then holds the stacked block,
+    # its orthogonal factor and the factorisation workspace, about 4*n_terms
+    # floats per row, plus 2*M for the residual and right-hand-side arrays.
+    # The LOO step is dearer: the design block, the leverage solve against R
+    # and the residuals measured about 5.4*n_terms floats per row, so it is
+    # priced at 6*n_terms. Both passes share one batch width, so the dearer
+    # pass sets it when diagnostics run.
+    floats_per_term = 6 if diagnostics else 4
+    bytes_per_row = jnp.dtype(dtype).itemsize * (floats_per_term * n_terms + 2 * M)
+    # The batch width and the batch count come from the row count's bucket, so
+    # every N in a bucket reuses the compiled steps (see _bucket).
+    n_bucket = _bucket(N)
+    b = resolve_batch_size(bytes_per_row, n_bucket, batch_size)
 
     # Pad the sample axis so every batch traces at the same shape. The padded
     # rows are masked to zero inside the jitted steps, so they contribute
     # nothing to either pass.
-    n_batches = math.ceil(N / b)
+    n_batches = math.ceil(n_bucket / b)
     n_pad = n_batches * b - N
     X_p = pad_rows(X_ref, n_pad)
     Y_p = pad_rows(Y_flat, n_pad)
     w = jnp.concatenate([jnp.ones((N,), dtype=dtype), jnp.zeros((n_pad,), dtype=dtype)])
-    rows = [(i * b, i * b + b) for i in range(n_batches)]
+    # Equal-width batches stacked on a leading axis, so ``lax.scan`` can fold
+    # them. A scan traces under ``jit``, ``grad`` and ``lax.map``, which a
+    # Python loop over the batches does not do without unrolling.
+    X_batches = X_p.reshape(n_batches, b, *X_p.shape[1:])
+    Y_batches = Y_p.reshape(n_batches, b, *Y_p.shape[1:])
+    w_batches = w.reshape(n_batches, b)
 
-    acc_normal, acc_loo = _get_streamed_steps(input_types, order)
+    acc_qr, acc_loo = _get_streamed_steps(input_types, order)
 
-    # Pass 1: accumulate the Gram matrix and cross-moments batch by batch.
-    G = jnp.zeros((n_terms, n_terms), dtype=dtype)
-    B = jnp.zeros((n_terms, M), dtype=dtype)
-    for lo, hi in rows:
-        G, B = acc_normal(X_p[lo:hi], Y_p[lo:hi], w[lo:hi], G, B)
-    gram = G + ridge * jnp.eye(n_terms, dtype=dtype)
-    coeffs_flat = jnp.linalg.solve(gram, B)  # (n_terms, M)
+    # Pass 1: fold the batches into the QR factor, starting from the ridge rows.
+    # The step may promote (float32 data with the float64 multi-index under
+    # x64), and a scan carry keeps one type, so the carry starts at the type
+    # the step returns.
+    R0 = jnp.sqrt(jnp.asarray(ridge, dtype=dtype)) * jnp.eye(n_terms, dtype=dtype)
+    z0 = jnp.zeros((n_terms, M), dtype=dtype)
+    R_type, z_type = jax.eval_shape(acc_qr, X_batches[0], Y_batches[0], w_batches[0], R0, z0)
+    R = R0.astype(R_type.dtype)
+    z = z0.astype(z_type.dtype)
+
+    def qr_step(carry: tuple[Array, Array], batch: tuple[Array, Array, Array]):
+        return acc_qr(*batch, *carry), None
+
+    (R, z), _ = jax.lax.scan(qr_step, (R, z), (X_batches, Y_batches, w_batches))
+    coeffs_flat = solve_triangular(R, z, lower=False)  # (n_terms, M)
 
     if diagnostics:
         # Pass 2: exact LOO from the hat-matrix diagonal, streamed. The
         # leverage comes from the shared hat_diagonal helper, which only needs
-        # the small (n_terms, n_terms) Cholesky factor, so this path holds
-        # nothing that scales with N and applies the same clip as the
-        # single-pass path.
-        gram_chol = jnp.linalg.cholesky(gram)
-        sse = (jnp.zeros((M,), dtype=dtype), jnp.zeros((M,), dtype=dtype))
-        for lo, hi in rows:
-            sse = acc_loo(X_p[lo:hi], Y_p[lo:hi], w[lo:hi], coeffs_flat, gram_chol, sse)
+        # the small (n_terms, n_terms) factor, so this path holds nothing that
+        # scales with N and applies the same clip as the single-pass path.
+        sse0 = (jnp.zeros((M,), dtype=dtype), jnp.zeros((M,), dtype=dtype))
+        sse_type = jax.eval_shape(
+            acc_loo, X_batches[0], Y_batches[0], w_batches[0], coeffs_flat, R, sse0
+        )
+        sse = (sse0[0].astype(sse_type[0].dtype), sse0[1].astype(sse_type[1].dtype))
+
+        def loo_step(carry: tuple[Array, Array], batch: tuple[Array, Array, Array]):
+            return acc_loo(*batch, coeffs_flat, R, carry), None
+
+        sse, _ = jax.lax.scan(loo_step, sse, (X_batches, Y_batches, w_batches))
         loo_flat = jnp.sqrt(sse[0] / N)  # == sqrt(mean(loo_residuals^2, axis=0))
         rmse_flat = jnp.sqrt(sse[1] / N)  # in-sample, from the same residuals
     else:
         loo_flat = None
         rmse_flat = None
 
-    return coeffs_flat, loo_flat, rmse_flat, gram
+    return coeffs_flat, loo_flat, rmse_flat, R
 
 
 def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
     """Estimate the resident bytes of the single-pass PCE fit path.
 
     Derived from the arrays the single-pass code actually materializes. At the
-    peak, which is inside the leave-one-out step, two (N, n_terms) arrays are
-    resident at once:
+    peak, inside the QR solve, these are resident at once:
 
-    - ``Phi``, the design matrix.
-    - the triangular-solve result inside
-      :func:`jaxgsa.pce._engine.hat_diagonal`.
+    - ``Phi``, the design matrix, kept for the leave-one-out step.
+    - the ridge-augmented copy ``[Phi; sqrt(ridge)*I]``, shape
+      ``(N + n_terms, n_terms)``.
+    - its orthogonal factor ``Q``, the same shape.
+    - the factorisation workspace, about one more array of that size.
 
-    The coefficient solve reads ``Phi.T @ Y_flat`` (an ``(n_terms, M)``
-    product, not an ``(n_terms, N)`` one) straight into ``jnp.linalg.solve``,
-    matching the streamed path: there is no third ``(n_terms, N)`` array held
-    across the leave-one-out step.
+    The coefficient solve reads ``Q^T Y`` (an ``(n_terms, M)`` product), so no
+    ``(n_terms, N)`` array is held across the leave-one-out step. Inside that
+    step, ``Phi`` and the triangular-solve result of
+    :func:`jaxgsa.pce._engine.hat_diagonal` are the two ``(N, n_terms)``
+    arrays, which is fewer than the fit step holds.
 
     Plus the (N, M) prediction and residual arrays ``loo_error`` materializes,
     for ``2 * N * M``.
@@ -620,9 +558,9 @@ def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
     earlier phase, but that phase ends before ``Y`` is touched, so it does not
     add to this one.
 
-    ``Y`` itself and the (n_terms, n_terms) Gram matrix are excluded: the
-    caller holds Y either way, and the Gram factors are negligible next to
-    the N-sized arrays.
+    ``Y`` itself and the (n_terms, n_terms) factor are excluded: the caller
+    holds Y either way, and the factor is negligible next to the N-sized
+    arrays.
 
     Args:
         N: Number of sample rows.
@@ -633,12 +571,78 @@ def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
     Returns:
         Estimated peak resident bytes of the single-pass fit + LOO.
     """
-    return itemsize * N * (2 * n_terms + 2 * M)
+    return itemsize * N * (4 * n_terms + 2 * M)
+
+
+def _bucket(n: int) -> int:
+    """Round a row count up to its bucket, eight buckets per octave.
+
+    A jitted fit compiles once per input shape. Rounding ``N`` up to a bucket
+    lets every ``N`` in the bucket reuse one compiled program, at the price of
+    at most 12.5% extra rows, which a 0/1 row mask removes from every sum.
+
+    Args:
+        n: Number of real rows.
+
+    Returns:
+        The smallest ``2**k * (1 + j/8)`` that is at least ``n``, as an
+        integer. Counts below 16 are their own bucket.
+    """
+    if n < 16:
+        return n
+    base = 1 << (n.bit_length() - 1)
+    step = base // 8
+    return base + -(-(n - base) // step) * step
+
+
+def _pad_x(X: Array) -> Array:
+    """Pad ``X`` with extra rows up to the bucket of its row count.
+
+    The extra rows repeat the first row, so the basis evaluates to finite
+    numbers there however the inputs are scaled. The fit multiplies the design
+    rows by a 0/1 mask, so none of them changes a sum.
+
+    Args:
+        X: Inputs in physical units, shape ``(N, D)``.
+
+    Returns:
+        ``X`` with the extra rows appended.
+    """
+    n_pad = _bucket(X.shape[0]) - X.shape[0]
+    if n_pad == 0:
+        return X
+    return jnp.concatenate([X, jnp.broadcast_to(X[:1], (n_pad, X.shape[1]))], axis=0)
+
+
+def _pad_y(Y_3d: Array) -> tuple[Array, int]:
+    """Pad ``Y`` with zero rows up to the bucket of its row count.
+
+    Args:
+        Y_3d: Outputs in canonical layout, shape ``(N, T, K)``.
+
+    Returns:
+        ``(Y_padded, N)``.
+    """
+    return pad_rows(Y_3d, _bucket(Y_3d.shape[0]) - Y_3d.shape[0]), Y_3d.shape[0]
+
+
+def _row_mask(n_total: int, n_rows: Array | int, dtype: jnp.dtype) -> Array:
+    """The 0/1 weight of each row of a padded array: 1 for a real row.
+
+    Args:
+        n_total: Rows in the padded array.
+        n_rows: Number of real rows. May be a traced scalar.
+        dtype: Dtype of the mask.
+
+    Returns:
+        Array of shape ``(n_total,)``.
+    """
+    return (jnp.arange(n_total) < n_rows).astype(dtype)
 
 
 @partial(jax.jit, static_argnames=("problem", "order"))
 def _single_pass_coefficients(
-    problem: Problem, X: Array, Y_3d: Array, ridge: float, *, order: int
+    problem: Problem, X: Array, Y_3d: Array, n_rows: Array | int, ridge: float, *, order: int
 ) -> tuple[Array, Array, Array]:
     """Fit the expansion in one pass, as a single compiled computation.
 
@@ -651,17 +655,24 @@ def _single_pass_coefficients(
     wants diagnostics, so :func:`analyze` and :func:`indices` fit bit for bit
     the same expansion. The diagnostics run in :func:`_single_pass_loo`.
 
+    ``X`` and ``Y_3d`` may carry extra rows after the first ``n_rows`` (see
+    :func:`_pad_x` and :func:`_pad_y`). The design rows of those are zeroed, so a zero
+    row adds nothing to the QR factor or to ``Q^T Y``. ``n_rows`` is traced,
+    so every row count in a bucket shares one compiled program.
+
     Args:
         problem: Parameter names and distributions (static).
-        X: Inputs in physical units, shape ``(N, D)``.
-        Y_3d: Outputs in canonical layout, shape ``(N, T, K)``.
-        ridge: Tikhonov parameter added to the Gram matrix.
+        X: Inputs in physical units, shape ``(N_pad, D)``.
+        Y_3d: Outputs in canonical layout, shape ``(N_pad, T, K)``.
+        n_rows: Number of real rows, at most ``N_pad``.
+        ridge: Tikhonov parameter of the ridge-augmented design.
         order: Effective (post-``_auto_order``) polynomial order.
 
     Returns:
-        ``(coefficients, Phi, gram)``: coefficients in terms-last layout, shape
-        ``(T, K, n_terms)``, the design matrix and the regularized Gram
-        matrix. A caller that skips the diagnostics drops the last two.
+        ``(coefficients, Phi, R)``: coefficients in terms-last layout, shape
+        ``(T, K, n_terms)``, the masked design matrix and the triangular QR
+        factor of the ridge-augmented design. A caller that skips the
+        diagnostics drops the design matrix.
     """
     N = X.shape[0]
     _, T, K = Y_3d.shape
@@ -669,29 +680,29 @@ def _single_pass_coefficients(
     X_ref, input_types = _map_to_reference(X, problem, order)
     Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
     Phi = build_design_matrix(X_ref, mi, input_types, order)
-    gram = Phi.T @ Phi + ridge * jnp.eye(Phi.shape[1])
+    Phi = Phi * _row_mask(N, n_rows, Phi.dtype)[:, None]
     # The basis is identical for every output slice (the effective order
-    # depends only on N and D), so fitting all T*K slices is ONE shared
-    # solve with multiple right-hand sides. Solving against
-    # ``Phi.T @ Y_flat`` (an (n_terms, M) product) rather than building
-    # ``solve(gram, Phi.T)`` (an (n_terms, N) product held across the LOO
-    # step) matches the streamed path and drops a third N-sized array.
-    coeffs_flat = jnp.linalg.solve(gram, Phi.T @ Y_flat)  # (n_terms, T*K)
+    # depends only on N and D), so fitting all T*K slices is ONE QR with
+    # multiple right-hand sides.
+    coeffs_flat, R = ridge_qr(Phi, Y_flat, ridge)  # (n_terms, T*K)
     # Terms-last layout, matching HDMR's Sa convention (slices lead).
-    return coeffs_flat.T.reshape(T, K, mi.shape[0]), Phi, gram
+    return coeffs_flat.T.reshape(T, K, mi.shape[0]), Phi, R
 
 
 @jax.jit
 def _single_pass_loo(
-    Phi: Array, gram: Array, Y_3d: Array, coefficients: Array
+    Phi: Array, R: Array, Y_3d: Array, coefficients: Array, n_rows: Array | int
 ) -> tuple[Array, Array]:
     """Per-slice LOO and in-sample RMSE of a single-pass fit.
 
     Args:
-        Phi: Design matrix, shape ``(N, n_terms)``.
-        gram: Regularized Gram matrix, shape ``(n_terms, n_terms)``.
-        Y_3d: Outputs in canonical layout, shape ``(N, T, K)``.
+        Phi: Masked design matrix, shape ``(N_pad, n_terms)``.
+        R: Triangular QR factor of the ridge-augmented design, shape
+            ``(n_terms, n_terms)``.
+        Y_3d: Outputs in canonical layout, shape ``(N_pad, T, K)``, zero after
+            the first ``n_rows`` rows.
         coefficients: Fitted coefficients, shape ``(T, K, n_terms)``.
+        n_rows: Number of real rows.
 
     Returns:
         ``(loo_flat, rmse_flat)``, each of shape ``(T*K,)``.
@@ -699,16 +710,34 @@ def _single_pass_loo(
     N = Phi.shape[0]
     Y_flat = Y_3d.reshape(N, -1)
     coeffs_flat = coefficients.reshape(-1, coefficients.shape[-1]).T  # (n_terms, T*K)
-    # Pass the small Cholesky factor of the Gram matrix, so loo_error reuses
-    # the factorization without carrying anything that scales with N.
-    loo_flat = loo_error(Phi, Y_flat, coeffs_flat, gram_chol=jnp.linalg.cholesky(gram))
-    rmse_flat = jnp.sqrt(jnp.mean((Y_flat - Phi @ coeffs_flat) ** 2, axis=0))
+    # R^T R = Phi^T Phi + ridge*I, so R.T is the Cholesky factor hat_diagonal
+    # wants, and loo_error reuses it without carrying anything that scales
+    # with N. A zero row has leverage 0 and residual 0, so only the divisor
+    # needs the real count.
+    loo_flat = loo_error(Phi, Y_flat, coeffs_flat, gram_chol=R.T, n_rows=n_rows)
+    rmse_flat = jnp.sqrt(jnp.sum((Y_flat - Phi @ coeffs_flat) ** 2, axis=0) / n_rows)
     return loo_flat, rmse_flat
+
+
+def _masked_extremes(flat: Array, n_rows: Array | int) -> tuple[Array, Array]:
+    """The smallest and largest value per column over the real rows only.
+
+    Args:
+        flat: Array of shape ``(N_pad, S)``.
+        n_rows: Number of real rows.
+
+    Returns:
+        ``(lowest, highest)``, each of shape ``(S,)``.
+    """
+    real = _row_mask(flat.shape[0], n_rows, jnp.bool_)[:, None]
+    return jnp.min(jnp.where(real, flat, jnp.inf), axis=0), jnp.max(
+        jnp.where(real, flat, -jnp.inf), axis=0
+    )
 
 
 @partial(jax.jit, static_argnames=("D", "order", "budget"))
 def _sobol_from_fit(
-    coefficients: Array, Y_3d: Array, *, D: int, order: int, budget: int
+    coefficients: Array, Y_3d: Array, n_rows: Array | int, *, D: int, order: int, budget: int
 ) -> tuple[Array, Array, Array]:
     """Read the Sobol indices off a fitted expansion, as one compiled call.
 
@@ -718,7 +747,9 @@ def _sobol_from_fit(
 
     Args:
         coefficients: Fitted coefficients, shape ``(T, K, n_terms)``.
-        Y_3d: Outputs in canonical layout, shape ``(N, T, K)``.
+        Y_3d: Outputs in canonical layout, shape ``(N_pad, T, K)``, zero after
+            the first ``n_rows`` rows.
+        n_rows: Number of real rows.
         D: Number of parameters.
         order: Effective polynomial order that built the multi-index.
         budget: Active memory budget in bytes.
@@ -727,33 +758,39 @@ def _sobol_from_fit(
         ``(S1, ST, S2)`` in canonical ``(T, K, ...)`` layout.
     """
     _ = budget
-    N = Y_3d.shape[0]
     # is_constant reads the raw Y column, not the fit: a constant slice's
     # fitted non-constant coefficients are rarely bit-exact zero in float32
     # (M1), so the fit-only guard inside sobol_from_coefficients would miss
-    # most of them.
-    is_constant = _is_constant_slice(Y_3d.reshape(N, -1)).reshape(Y_3d.shape[1:])
+    # most of them. The extremes run over the real rows only.
+    lowest, highest = _masked_extremes(Y_3d.reshape(Y_3d.shape[0], -1), n_rows)
+    is_constant = (highest == lowest).reshape(Y_3d.shape[1:])
     return sobol_from_coefficients(coefficients, build_multi_index(D, order), is_constant)
 
 
 @jax.jit
 def _fit_summary(
-    loo_flat: Array, rmse_flat: Array, Y_3d: Array
+    loo_flat: Array, rmse_flat: Array, Y_3d: Array, n_rows: Array | int
 ) -> tuple[Array, Array, Array, Array]:
     """Shape the fit diagnostics and derive the explained variance.
 
     Args:
         loo_flat: Per-slice LOO RMSE, shape ``(T*K,)``.
         rmse_flat: Per-slice in-sample RMSE, shape ``(T*K,)``.
-        Y_3d: Outputs in canonical layout, shape ``(N, T, K)``.
+        Y_3d: Outputs in canonical layout, shape ``(N_pad, T, K)``, zero after
+            the first ``n_rows`` rows.
+        n_rows: Number of real rows.
 
     Returns:
         ``(loo, rmse, explained_variance, std)``, each of shape ``(T, K)``,
-        where ``std`` is ``sqrt(Var(Y))`` per slice.
+        where ``std`` is ``sqrt(Var(Y))`` per slice over the real rows.
     """
     T, K = Y_3d.shape[1:]
-    total_var = jnp.var(Y_3d, axis=0)  # (T, K)
-    is_constant = _is_constant_slice(Y_3d.reshape(Y_3d.shape[0], -1)).reshape(T, K)
+    flat = Y_3d.reshape(Y_3d.shape[0], -1)
+    real = _row_mask(flat.shape[0], n_rows, flat.dtype)[:, None]
+    centred = (flat - jnp.sum(flat * real, axis=0) / n_rows) * real
+    total_var = (jnp.sum(centred**2, axis=0) / n_rows).reshape(T, K)  # (T, K)
+    lowest, highest = _masked_extremes(flat, n_rows)
+    is_constant = (highest == lowest).reshape(T, K)
     loo = loo_flat.reshape(T, K)
     rmse = rmse_flat.reshape(T, K)
     # 1 - in-sample MSE / sample variance of Y, on the same rows. The residual
@@ -781,17 +818,17 @@ def _fit_pce_core(
 
     Operates on an already-canonical Y (no validation, no zero-variance
     warning, no index extraction). The basis is identical across slices, so
-    fitting all ``T*K`` right-hand sides is a single Gram solve.
+    fitting all ``T*K`` right-hand sides is a single QR solve.
 
     The fit streams over row batches instead (see :func:`_fit_pce_streamed`)
     in two cases: when an explicit ``batch_size`` is smaller than ``N``, so
     it actually splits the sample, or when ``batch_size`` is ``None`` and
-    the single-pass residents (design matrix, Gram factorization, LOO
+    the single-pass residents (design matrix, QR factorization, LOO
     residual arrays) would exceed the active memory budget. An explicit
     width always wins over the budget: ``batch_size >= N`` degenerates to
     the single-pass path, as one full row block, even when the single pass
     is over budget. The streamed fit solves the
-    same normal equations and computes the same exact LOO. It differs only
+    same ridge least squares and computes the same exact LOO. It differs only
     in float32 summation order.
 
     Nothing here warns. The order it actually fitted at comes back on
@@ -803,8 +840,8 @@ def _fit_pce_core(
     Args:
         diagnostics: Compute ``loo_flat`` and ``rmse_flat``. Off for
             :func:`indices` and every bootstrap replicate, neither of which
-            reads them: on the single-pass path this skips a Cholesky
-            factor, an ``(n_terms, N)`` triangular solve and an ``(N, T*K)``
+            reads them: on the single-pass path this skips an
+            ``(n_terms, N)`` triangular solve and an ``(N, T*K)``
             residual array that the Sobol-index extraction never touches.
             ``rmse_flat`` is then ``None``. So is ``loo_flat`` on either fit
             path.
@@ -825,28 +862,37 @@ def _fit_pce_core(
     # problem — the library-wide semantics: ``batch_size`` sizes row blocks,
     # clamped to N, and never selects a different algorithm.
     itemsize = jnp.dtype(jnp.result_type(X.dtype, float)).itemsize
-    single_pass_bytes = _single_pass_fit_bytes(N, n_terms, T * K, itemsize)
+    # The single pass runs on rows padded to their bucket, and ``_pad_x`` and
+    # ``_pad_y`` hold second copies of ``X`` and ``Y``, so price all of them
+    # at the padded row count.
+    n_padded = _bucket(N)
+    single_pass_bytes = _single_pass_fit_bytes(n_padded, n_terms, T * K, itemsize)
+    if n_padded != N:
+        single_pass_bytes += itemsize * n_padded * (D + T * K)
     if batch_size is not None:
         streamed = batch_size < N
     else:
         streamed = single_pass_bytes > get_memory_budget()
     if not streamed:
         # Single-pass path: one jitted call maps the inputs, builds the design
-        # matrix, solves the normal equations and (optionally) the exact LOO.
-        coeffs, Phi, gram = _single_pass_coefficients(
-            problem, X, Y_3d, ridge, order=effective_order
+        # matrix, solves the ridge least squares by QR and (optionally) the exact LOO.
+        # The rows are padded to their bucket first, so every N in a bucket
+        # shares one compiled program (see _bucket).
+        Y_p, n_rows = _pad_y(Y_3d)
+        coeffs, Phi, R = _single_pass_coefficients(
+            problem, _pad_x(X), Y_p, n_rows, ridge, order=effective_order
         )
         loo_flat = None
         rmse_flat = None
         if diagnostics:
-            loo_flat, rmse_flat = _single_pass_loo(Phi, gram, Y_3d, coeffs)
+            loo_flat, rmse_flat = _single_pass_loo(Phi, R, Y_p, coeffs, n_rows)
     else:
-        # Streamed path: same normal equations and exact LOO, accumulated
+        # Streamed path: same least squares and exact LOO, accumulated
         # over row batches so peak memory stays within the budget.
         # Map inputs to reference domain; (N, D) is small next to (N, n_terms).
         X_ref, input_types = _map_to_reference(X, problem, effective_order)
         Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
-        coeffs_flat, loo_flat, rmse_flat, gram = _fit_pce_streamed(
+        coeffs_flat, loo_flat, rmse_flat, R = _fit_pce_streamed(
             X_ref, Y_flat, mi, input_types, effective_order, ridge, batch_size, diagnostics
         )
         # Terms-last layout, matching HDMR's Sa convention (slices lead).
@@ -859,8 +905,55 @@ def _fit_pce_core(
         loo_flat=loo_flat,
         rmse_flat=rmse_flat,
         streamed=streamed,
-        pivot_share=min_pivot_share(gram) if diagnostics else None,
+        pivot_share=r_pivot_share(R),
     )
+
+
+def _indices_and_share(
+    problem: Problem,
+    X: Array,
+    Y_3d: Array,
+    *,
+    order: int,
+    ridge: float,
+    fit_ratio: float,
+    batch_size: int | None,
+) -> tuple[Array, Array, Array, Array]:
+    """Fit the expansion and read the indices and the rank share off it.
+
+    The shared body of :func:`indices` and of one bootstrap replicate. It
+    takes ``Y`` already promoted to ``(N, T, K)`` and returns ``(T, K, ...)``
+    arrays, so neither caller squeezes twice. Neither caller reads
+    ``loo_flat`` or ``rmse_flat``, so the fit skips them
+    (``diagnostics=False``); a bootstrap run is ``n_bootstrap`` of these.
+
+    Returns:
+        ``(S1, ST, S2, pivot_share)``. The share is the rank diagnostic of
+        :func:`jaxgsa.pce._engine.r_pivot_share`. A bootstrap replicate
+        returns it so :func:`analyze` can count the resamples that fitted a
+        near-singular design.
+    """
+    fit = _fit_pce_core(
+        problem,
+        X,
+        Y_3d,
+        order=order,
+        ridge=ridge,
+        fit_ratio=fit_ratio,
+        batch_size=batch_size,
+        diagnostics=False,
+    )
+    assert fit.pivot_share is not None
+    Y_p, n_rows = _pad_y(Y_3d)
+    S1, ST, S2 = _sobol_from_fit(
+        fit.coefficients,
+        Y_p,
+        n_rows,
+        D=problem.n_params,
+        order=fit.order,
+        budget=get_memory_budget(),
+    )
+    return S1, ST, S2, fit.pivot_share
 
 
 def _indices_3d(
@@ -875,13 +968,10 @@ def _indices_3d(
 ) -> tuple[Array, Array, Array]:
     """Fit the expansion and read the indices off it, in canonical layout.
 
-    The shared body of :func:`indices` and of one bootstrap replicate. It
-    takes ``Y`` already promoted to ``(N, T, K)`` and returns ``(T, K, ...)``
-    arrays, so neither caller squeezes twice. Neither caller reads
-    ``loo_flat`` or ``rmse_flat``, so the fit skips them
-    (``diagnostics=False``); a bootstrap run is ``n_bootstrap`` of these.
+    See :func:`_indices_and_share`. This drops the rank share, which
+    :func:`indices` cannot act on: it traces, so it cannot raise.
     """
-    fit = _fit_pce_core(
+    S1, ST, S2, _ = _indices_and_share(
         problem,
         X,
         Y_3d,
@@ -889,14 +979,30 @@ def _indices_3d(
         ridge=ridge,
         fit_ratio=fit_ratio,
         batch_size=batch_size,
-        diagnostics=False,
     )
-    return _sobol_from_fit(
-        fit.coefficients,
-        Y_3d,
-        D=problem.n_params,
-        order=fit.order,
-        budget=get_memory_budget(),
+    return S1, ST, S2
+
+
+def _pce_replicate(
+    rows: Array,
+    X: Array,
+    Y_3d: Array,
+    *,
+    problem: Problem,
+    order: int,
+    ridge: float,
+    fit_ratio: float,
+    batch_size: int | None,
+) -> tuple[Array, Array, Array, Array]:
+    """Refit the expansion on the rows ``rows`` and return indices and share."""
+    return _indices_and_share(
+        problem,
+        X[rows],
+        Y_3d[rows],
+        order=order,
+        ridge=ridge,
+        fit_ratio=fit_ratio,
+        batch_size=batch_size,
     )
 
 
@@ -911,15 +1017,15 @@ def _bootstrap_indices(
     ridge: float,
     fit_ratio: float,
     batch_size: int | None,
-) -> tuple[Array, Array, Array]:
+) -> tuple[Array, Array, Array, Array]:
     """Refit the expansion on ``n_bootstrap`` row resamples.
 
     One replicate is a full refit: the rows are drawn with replacement, the
-    design matrix is rebuilt on them and the normal equations are solved
+    design matrix is rebuilt on them and the least squares is solved
     again. Nothing about a PCE index survives a resample without that — the
     indices are functions of the coefficients, not of any per-row statistic
-    the point estimate already computed. So the replicates run as a Python
-    loop over independent fits rather than as a vmapped reduction, and the
+    the point estimate already computed. So the replicates run as a sequential
+    ``lax.map`` over independent fits rather than as a vmapped reduction, and the
     cost is ``n_bootstrap`` fits.
 
     The row draw is shared by every output slice, exactly as the point
@@ -937,22 +1043,24 @@ def _bootstrap_indices(
         batch_size: Rows per fit batch, or ``None``.
 
     Returns:
-        ``(S1, ST, S2)`` draws, each with a leading axis of length
-        ``n_bootstrap`` followed by the canonical ``(T, K, ...)`` shape.
+        ``(S1, ST, S2, pivot_share)`` draws, each with a leading axis of
+        length ``n_bootstrap``. The indices follow with the canonical
+        ``(T, K, ...)`` shape, and the share is a scalar per replicate.
     """
 
-    def _replicate(rows: Array) -> tuple[Array, Array, Array]:
-        return _indices_3d(
-            problem,
-            X[rows],
-            Y_3d[rows],
-            order=order,
-            ridge=ridge,
-            fit_ratio=fit_ratio,
-            batch_size=batch_size,
-        )
-
-    return bootstrap_draws(key, X.shape[0], n_bootstrap, _replicate)
+    return bootstrap_draws(
+        key,
+        n_bootstrap,
+        _pce_replicate,
+        (X, Y_3d),
+        static=(
+            ("problem", problem),
+            ("order", order),
+            ("ridge", ridge),
+            ("fit_ratio", fit_ratio),
+            ("batch_size", batch_size),
+        ),
+    )
 
 
 def indices(
@@ -977,7 +1085,7 @@ def indices(
     needs a concrete value and a tracer has none.
 
     Use :func:`analyze` for ordinary analysis. Nothing here checks the
-    inputs, so a single NaN reaches the normal equations and turns every
+    inputs, so a single NaN reaches the QR factorisation and turns every
     index into NaN without a word. Nothing here reports the fit quality
     either: ``cv_rmse`` and ``explained_variance`` are what tell you whether
     a PCE index means anything, and only :func:`analyze` computes them.
@@ -1101,8 +1209,13 @@ def analyze(
             to fit. Automatically reduced (with a warning) if the term
             count would exceed ``fit_ratio * N``.
         ridge: Tikhonov regularization for the least-squares fit. The tiny
-            default only guards against a singular normal matrix. Increase
+            default only guards against a singular design. Increase
             it if coefficients look unstable (noisy Y, near-duplicate rows).
+            A large ridge (about 1e-3 or more) also hides a singular design
+            from the rank check, because it keeps the pivot share up. The
+            indices of such a design can be wrong with no warning, apart from
+            the constant, duplicated and linearly dependent inputs, which
+            raise whatever the ridge.
         fit_ratio: Maximum ratio of terms to samples before ``order`` is
             reduced. Lower values demand more samples per term (a more
             conservative, less overfit-prone fit). Must be at most 1, and
@@ -1112,13 +1225,13 @@ def analyze(
             (the package-wide ``batch_size`` convention): it sizes row
             blocks, clamped to ``N``. ``None`` (default) keeps the
             single-shot fit unless its estimated resident memory (design
-            matrix, Gram factorization, LOO residuals) exceeds the active
+            matrix, QR factorization, LOO residuals) exceeds the active
             memory budget (~512 MiB, see
             ``jaxgsa.config.set_memory_budget``), in which case the fit
             streams over auto-sized row batches. An explicit
             ``batch_size < N`` streams over row blocks of that many rows;
             ``batch_size >= N`` is one full block, which is the single-pass
-            fit. Both fit paths solve the same normal equations and compute
+            fit. Both fit paths solve the same least squares by QR and compute
             the same exact leave-one-out error; results differ only at the
             level of float32 summation order.
         n_bootstrap: Number of bootstrap resamples for confidence intervals.
@@ -1126,7 +1239,7 @@ def analyze(
             ``(X, Y)``.
 
             This is the expensive kind of bootstrap. Every replicate refits
-            the whole expansion — a fresh design matrix, a fresh Gram solve —
+            the whole expansion — a fresh design matrix, a fresh QR solve —
             so the cost is an order of magnitude above the row resample of a
             method such as ``jaxgsa.pawn``, which only re-reduces numbers it
             already has. Twenty replicates cost about twenty fits. That is
@@ -1152,7 +1265,7 @@ def analyze(
             One row is one unit here, so ``"drop"`` removes the affected
             ``(X, Y)`` pairs and fits on the rest. See
             :mod:`jaxgsa._core.invalid`. The check matters for PCE: a single
-            NaN reaches the normal equations and poisons every coefficient,
+            NaN reaches the QR factorisation and poisons every coefficient,
             every leave-one-out RMSE and every index.
         verbose: If ``True`` (default), print a short summary to stdout: the
             problem and the data, the wall-clock timing, and the top
@@ -1183,10 +1296,11 @@ def analyze(
             ``fit_ratio`` is above 1, or too few rows survive
             ``on_invalid`` for even the order-1 expansion
             (``D + 1 > int(fit_ratio * N)``, which would make the fit
-            underdetermined). Also raised when an input is constant or two
-            inputs are equal in every row, when the Gram matrix of the
-            design is numerically singular in float32, or when the fitted
-            coefficients are not finite: the indices are then undefined.
+            underdetermined). Also raised when an input is constant, two
+            inputs are equal in every row, or an input is a linear
+            combination of other inputs to within rounding error, or when
+            the fitted coefficients are not finite: the indices are then
+            undefined. A near-singular design only warns.
     """
     key = as_key(key, "pce")
     if _is_irregular_y(Y):
@@ -1246,6 +1360,9 @@ def analyze(
         problem, X, Y, order=order, ridge=ridge, fit_ratio=fit_ratio, batch_size=batch_size
     )
     T, K = fit.coefficients.shape[:2]
+    # Messages name the public entry point the caller used: jaxgsa.shapley
+    # runs this function under its own alias.
+    namespace = _METHOD_ALIAS.get() or "jaxgsa.pce"
     if fit.order < order:
         # The fit is coarser than requested; surface it so callers do not
         # mistake a truncated expansion for the order they asked for. The
@@ -1253,27 +1370,11 @@ def analyze(
         # free of host-side side effects. `effective_order` answers the same
         # question without a fit.
         warnings.warn(
-            f"jaxgsa.pce: PCE order reduced from {order} to {fit.order} to keep the "
+            f"{namespace}: PCE order reduced from {order} to {fit.order} to keep the "
             f"term count within the sample budget (fit_ratio={fit_ratio}, N={X.shape[0]})",
-            stacklevel=2,
-            category=JaxgsaWarning,
-        )
-
-    # Messages name the public entry point the caller used: jaxgsa.shapley
-    # runs this function under its own alias.
-    namespace = _METHOD_ALIAS.get() or "jaxgsa.pce"
-    switched = _order_forced_legendre(problem, fit.order)
-    if switched:
-        warnings.warn(
-            f"{namespace}: order {fit.order} is above {_MAX_HERMITE_ORDER_UNDER_TRUNCATION}, "
-            f"so the truncated Gaussian input(s) {switched} use a Legendre basis "
-            "through the truncated CDF instead of Hermite. That basis fits a "
-            "Gaussian-shaped input less accurately and can degrade the indices. "
-            f"Use order <= {_MAX_HERMITE_ORDER_UNDER_TRUNCATION} to keep Hermite.",
             skip_file_prefixes=(PACKAGE_DIR,),
             category=JaxgsaWarning,
         )
-
     # Sobol indices are extracted analytically from the coefficients
     # (Sudret 2008), batched over all slices: no extra sampling, no loops.
     # Per-slice LOO RMSE (cv_rmse) and in-sample RMSE are goodness-of-fit
@@ -1284,23 +1385,26 @@ def analyze(
     # below then read their outputs on the host.
     assert fit.loo_flat is not None
     assert fit.rmse_flat is not None
+    Y_p, n_rows = _pad_y(ctx.Y3)
     S1, ST, S2 = _sobol_from_fit(
         fit.coefficients,
-        ctx.Y3,
+        Y_p,
+        n_rows,
         D=problem.n_params,
         order=fit.order,
         budget=get_memory_budget(),
     )  # S1/ST (T,K,D), S2 (T,K,D,D)
-    loo, rmse, explained_variance, y_std = _fit_summary(fit.loo_flat, fit.rmse_flat, ctx.Y3)
+    loo, rmse, explained_variance, y_std = _fit_summary(fit.loo_flat, fit.rmse_flat, Y_p, n_rows)
 
     # Non-finite numbers come first: the two checks below skip them, so a
-    # failed Cholesky would otherwise pass as a clean fit.
+    # failed fit would otherwise pass as a clean one.
     # Skipped when non-finite rows were let through (`on_invalid="propagate"`):
     # NaN coefficients are then the documented outcome, already warned about,
-    # and not a sign of a singular Gram matrix.
-    if bool(jnp.all(jnp.isfinite(X)) & jnp.all(jnp.isfinite(ctx.Y3))):
-        # The rank checks come first. A singular Gram matrix turns into NaN
-        # only in float32; in float64 every number stays finite and wrong.
+    # and not a sign of a singular design.
+    finite_data = bool(jnp.all(jnp.isfinite(X)) & jnp.all(jnp.isfinite(ctx.Y3)))
+    if finite_data:
+        # The rank checks come first. A singular design leaves every number
+        # finite and wrong, so they read the inputs and the QR factor.
         # Constant and duplicated inputs are the provable cases, so they are
         # read off the inputs; the pivot share covers the rest.
         check_degenerate_inputs(namespace, X, problem.names)
@@ -1329,7 +1433,7 @@ def analyze(
     # resolve a strong nonlinearity, and the indices of a cubic that is not
     # this model look exactly like the indices of this model.
     warn_variance_fit(
-        "jaxgsa.pce",
+        namespace,
         explained_variance,
         quantity="explained_variance",
         advice_low=(
@@ -1341,7 +1445,7 @@ def analyze(
         advice_high="Check the output for a near-constant slice.",
     )
     warn_cv_overfit(
-        "jaxgsa.pce",
+        namespace,
         loo,
         y_std,
         explained_variance,
@@ -1357,7 +1461,7 @@ def analyze(
     ci: CIInfo | None = None
     if n_bootstrap > 0:
         assert key is not None  # checked above, before the fit ran
-        S1_draws, ST_draws, S2_draws = _bootstrap_indices(
+        S1_draws, ST_draws, S2_draws, share_draws = _bootstrap_indices(
             problem,
             X,
             ctx.Y3,
@@ -1368,6 +1472,14 @@ def analyze(
             fit_ratio=fit_ratio,
             batch_size=batch_size,
         )
+        # Every resample is its own fit, and its rank is not the point
+        # estimate's. Resampling repeats rows, which can only lose rank.
+        if finite_data:
+            warn_gram_rank_replicates(
+                namespace,
+                share_draws,
+                advice="Remove duplicated or constant inputs, lower order, or add rows.",
+            )
         # Squeeze before calling interval(): it reads no shape of its own, so
         # points and draws must already be at the layout the result reports
         # (the leading replicate axis on the draws survives the squeeze,

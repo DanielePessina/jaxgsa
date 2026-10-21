@@ -172,6 +172,27 @@ def _get_efast_kernel(N: int, M: int, omega_0: int, analysis_max: int):
     return jax.jit(jax.vmap(kernel))
 
 
+def _curve_chunk(Y_curves: Array, start: int, end: int, n_slices: int) -> Array:
+    """Gather rows ``start:end`` of the flattened ``(D * T * K, N)`` batch.
+
+    Row ``f`` is curve ``f // (T * K)`` and output slice ``f % (T * K)``.
+    Gathering only the requested rows avoids a full transposed copy of ``Y``.
+
+    Args:
+        Y_curves: Outputs split into curves, shape ``(D, N, T, K)``.
+        start: First flattened row of the chunk.
+        end: One past the last flattened row.
+        n_slices: ``T * K``.
+
+    Returns:
+        Array of shape ``(end - start, N)``.
+    """
+    D, N = Y_curves.shape[:2]
+    flat = Y_curves.reshape(D, N, n_slices)
+    rows = np.arange(start, end)
+    return flat[rows // n_slices, :, rows % n_slices]
+
+
 def _indices_from_3d(
     Y3: Array,
     layout: YLayout,
@@ -217,12 +238,11 @@ def _indices_from_3d(
         return kernel(Y_curves)  # each (D,)
 
     # Batched path: flatten (D, T, K) into a single vmap axis.
-    Y_batched = Y_reshaped.transpose(0, 2, 3, 1).reshape(D * T * K, N)
-
+    # Transposed one chunk at a time below, so no full-size copy of Y exists.
     total = D * T * K
     # One vmapped slice costs a handful of length-N arrays, so the chunk
     # follows the transient-memory budget when the caller gives no size.
-    itemsize = jnp.dtype(jnp.result_type(Y_batched.dtype, jnp.float32)).itemsize
+    itemsize = jnp.dtype(jnp.result_type(Y3.dtype, jnp.float32)).itemsize
     cs = resolve_batch_size(_EFAST_LIVE_ARRAYS * N * itemsize, total, slice_chunk_size)
     batched = _get_efast_kernel(N, M, omega_0, analysis_max)
 
@@ -231,12 +251,12 @@ def _indices_from_3d(
     for start in range(0, total, cs):
         end = min(start + cs, total)
         actual = end - start
-        batch = Y_batched[start:end]
+        batch = _curve_chunk(Y_reshaped, start, end, T * K)
         if actual < cs:
             # dtype= keeps the pad in the batch's own dtype: an unannotated
             # jnp.zeros is float64 under x64, which would promote the whole
             # trailing chunk and re-trace the kernel at a second dtype.
-            pad = jnp.zeros((cs - actual, N), dtype=Y_batched.dtype)
+            pad = jnp.zeros((cs - actual, N), dtype=batch.dtype)
             batch = jnp.concatenate([batch, pad], axis=0)
         s1_chunk, st_chunk = batched(batch)
         s1_parts.append(s1_chunk[:actual])

@@ -58,6 +58,7 @@ from jax import Array
 from jax.typing import DTypeLike
 
 from jaxgsa._core import verbose as _verbose
+from jaxgsa._core.batching import get_memory_budget
 from jaxgsa._core.entry import _user_stacklevel, at_least, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.irregular import (
@@ -215,7 +216,7 @@ def _pair_boundaries(y: Array, t: Array) -> tuple[Array, Array]:
     return right_lo, left_lo
 
 
-def _pairwise_quantile_by_selection(x: Array, q: float) -> Array:
+def _pairwise_quantile_by_selection(x: Array, q: float, *, skip_zero: bool = False) -> Array:
     """Take a linear quantile of all ``N^2`` squared distances without forming them.
 
     This returns bit for bit what ``jnp.quantile`` returns on
@@ -235,6 +236,11 @@ def _pairwise_quantile_by_selection(x: Array, q: float) -> Array:
     Args:
         x: Values, shape ``(N,)``.
         q: Quantile in [0, 1], as a Python float.
+        skip_zero: If true, ignore the zero-distance pairs (the diagonal and
+            tied values) and return the median of the non-zero pairs. ``q``
+            is then not used for columns with tied values. For a column with
+            no ties the result equals the ``q`` quantile, bit for bit. If
+            every pair is zero, the result is 0.
 
     Returns:
         Scalar quantile, in the dtype of ``x``.
@@ -263,7 +269,7 @@ def _pairwise_quantile_by_selection(x: Array, q: float) -> Array:
         right, left = _pair_boundaries(y, t)
         return jnp.sum((right - left).astype(count_dtype)), right, left
 
-    def select(rank: int) -> Array:
+    def select(rank: int | Array) -> Array:
         """Return the bit pattern of the entry at 0-based ``rank``."""
         r = jnp.asarray(rank, dtype=count_dtype)
 
@@ -276,7 +282,23 @@ def _pairwise_quantile_by_selection(x: Array, q: float) -> Array:
         return jax.lax.fori_loop(0, n_bits - 1, step, jnp.zeros((), dtype=uint))
 
     low_rank, high_rank, high_weight = _linear_quantile_plan(q, n * n)
-    lo_bits = select(low_rank)
+    low_r: int | Array = low_rank
+    high_r: int | Array = high_rank
+    n_zero: Array | None = None
+    if skip_zero:
+        # Zero distances: the N diagonal entries plus every tied pair.
+        n_zero = count_at_or_below(jnp.zeros((), dtype=uint))[0]
+        n_nonzero_pairs = (jnp.asarray(n * n, dtype=count_dtype) - n_zero) // 2
+        is_tie_free = n_zero == n
+        # The non-zero entries fill the top of the sorted array, each twice.
+        # Positions Z + M - 1 and Z + M, weight 1/2, give their median.
+        dyn_low = n_zero + n_nonzero_pairs - 1
+        low_r = jnp.where(is_tie_free, jnp.asarray(low_rank, dtype=count_dtype), dyn_low)
+        high_r = jnp.where(is_tie_free, jnp.asarray(high_rank, dtype=count_dtype), dyn_low + 1)
+        high_weight = jnp.where(
+            is_tie_free, high_weight, jnp.asarray(0.5, dtype=high_weight.dtype)
+        )
+    lo_bits = select(low_r)
     low_value = jax.lax.bitcast_convert_type(lo_bits, x.dtype)
 
     # The next distinct value above ``low_value`` sits at a row boundary:
@@ -287,8 +309,13 @@ def _pairwise_quantile_by_selection(x: Array, q: float) -> Array:
     left_next = jnp.where(left > 0, (y[jnp.maximum(left - 1, 0)] - y) ** 2, top)
     next_value = jnp.minimum(jnp.min(right_next), jnp.min(left_next))
     high_value = jnp.where(
-        n_at_or_below >= jnp.asarray(high_rank + 1, dtype=count_dtype), low_value, next_value
+        n_at_or_below >= jnp.asarray(high_r, dtype=count_dtype) + 1, low_value, next_value
     )
+    if n_zero is not None:
+        # Every pair is zero: no non-zero distance exists. Return 0.
+        all_zero = n_zero == jnp.asarray(n * n, dtype=count_dtype)
+        low_value = jnp.where(all_zero, 0.0, low_value)
+        high_value = jnp.where(all_zero, 0.0, high_value)
 
     blended = jnp.quantile(jnp.stack([low_value, high_value]), high_weight)
     return jnp.where(finite, blended, jnp.nan)
@@ -297,9 +324,14 @@ def _pairwise_quantile_by_selection(x: Array, q: float) -> Array:
 def _median_bandwidth_sq(x: Array) -> Array:
     """Compute the median-heuristic squared bandwidth for one variable.
 
-    The median heuristic takes the median of the ``M = (N^2 - N) / 2``
-    off-diagonal pairwise squared distances. The N diagonal zeros are excluded
-    because they carry no information about the spread of the sample.
+    The median heuristic takes the median of the non-zero pairwise squared
+    distances. For a column with no tied values these are the
+    ``M = (N^2 - N) / 2`` off-diagonal pairs. Zero distances (the diagonal and
+    tied values) carry no information about the spread of the sample, and an
+    atom holding more than half of the pairs would otherwise pull the median
+    to 0 and collapse the kernel to an equality test. A column with
+    near-ties (not exact ones) can still collapse; :func:`_warn_collapsed_median`
+    warns about it.
 
     Building the strict upper triangle to do that costs two index arrays and a
     gathered copy. It is not needed: the diagonal zeros are the *smallest*
@@ -333,11 +365,11 @@ def _median_bandwidth_sq(x: Array) -> Array:
         x: Values for one variable, shape ``(N,)``.
 
     Returns:
-        Scalar median of the off-diagonal squared distances, floored at 1e-20.
+        Scalar median of the non-zero squared distances, floored at 1e-20.
     """
     N = x.shape[0]
     q = (N**2 + N - 1) / (2 * (N**2 - 1))
-    return jnp.maximum(_pairwise_quantile_by_selection(x, q), 1e-20)
+    return jnp.maximum(_pairwise_quantile_by_selection(x, q, skip_zero=True), 1e-20)
 
 
 def _center_kernel(K: Array) -> Array:
@@ -420,62 +452,164 @@ def _kernel_from_median(x: Array, median_sq: Array, bandwidth: float) -> Array:
     return jnp.exp(-((x[:, None] - x[None, :]) ** 2) / (2.0 * sigma_sq))
 
 
-def _augmented_kernels(Ks_stack: Array) -> Array:
-    """Build augmented kernels: K*_d = 1 + center(K_d).
+def _augment(K: Array) -> Array:
+    """Return the augmented kernel ``1 + center(K)`` of one input kernel.
 
-    The augmented kernel carries a constant term. The product of augmented
-    kernels therefore captures all interaction orders, not just the highest.
-    Correct total HSIC indices need this.
+    Args:
+        K: Raw kernel matrix, shape ``(N, N)``.
 
-    Takes and returns a stacked array, not a list. Building each input
-    kernel as a Python list element and stacking it, alongside a second list
-    for its augmented form, doubled the resident kernel memory for no
-    reason: this and :func:`_complement_kernels` both work on the stack the
-    caller already holds, so :func:`indices` never has to keep more than the
-    two stacks it actually reads plus the full product -- ``(2D + 1) * N^2``
-    floats, not ``5D + 1``.
+    Returns:
+        Augmented kernel matrix, shape ``(N, N)``.
+    """
+    return jnp.ones_like(K) + _center_kernel(K)
+
+
+def _complement_kernels_inplace(Ks_stack: Array) -> tuple[Array, Array]:
+    """Build the full augmented product kernel and every complement product.
+
+    The augmented kernel is ``K*_d = 1 + center(K_d)``: it carries a constant
+    term, so the product over inputs captures all interaction orders, not
+    just the highest. Correct total HSIC indices need this.
+
+    A prefix-suffix pass gives all D complements in linear time, and it runs
+    in place inside the output buffer. A backward loop writes the suffix
+    products into the output; a forward loop multiplies a running prefix into
+    each slot. Each step recomputes ``K*_d`` from the raw kernel rather than
+    holding a stack of augmented kernels, and nothing is kept as a Python
+    list, so the transient memory is a few ``(N, N)`` matrices, not
+    ``O(D N^2)``. The products are formed in the same order as the list
+    version, so the result agrees with it to rounding error (about 3e-6 in
+    float32 and 5e-15 in float64), not bit for bit.
 
     Args:
         Ks_stack: Stacked raw kernel matrices, shape ``(D, N, N)``.
 
     Returns:
-        Stacked augmented kernel matrices, shape ``(D, N, N)``.
-    """
-    return jax.vmap(lambda K: jnp.ones_like(K) + _center_kernel(K))(Ks_stack)
-
-
-def _complement_kernels(Ks_stack: Array) -> tuple[Array, Array]:
-    """Build the full product kernel and every complement product kernel.
-
-    A prefix-suffix pass gives all D complements in linear time. The pass
-    itself still walks a Python list -- each step depends on the last, so
-    there is no batched primitive for it -- but that list is local to this
-    function and is freed on return; only the stacked complements go back
-    to the caller. See :func:`_augmented_kernels` for why the stack-in,
-    stack-out shape matters here.
-
-    Args:
-        Ks_stack: Stacked kernel matrices, shape ``(D, N, N)``.
-
-    Returns:
         ``(K_full, complements)``. ``K_full`` is the Hadamard product of all
-        of ``Ks_stack``, shape ``(N, N)``. ``complements[d]`` is the product
-        of every entry of ``Ks_stack`` except ``d``, stacked to ``(D, N, N)``.
+        augmented kernels, shape ``(N, N)``. ``complements[d]`` is the
+        product of every augmented kernel except ``d``, stacked to
+        ``(D, N, N)``.
     """
     D = Ks_stack.shape[0]
     if D == 1:
-        return Ks_stack[0], jnp.ones_like(Ks_stack)
+        return _augment(Ks_stack[0]), jnp.ones_like(Ks_stack)
 
-    prefix = [jnp.ones_like(Ks_stack[0])] * D
+    def _back(i: int, out: Array) -> Array:
+        """Write suffix[d] = suffix[d + 1] * K*_{d + 1} with d = D - 2 - i."""
+        d = D - 2 - i
+        return out.at[d].set(out[d + 1] * _augment(Ks_stack[d + 1]))
+
+    out0 = jnp.zeros_like(Ks_stack).at[D - 1].set(jnp.ones_like(Ks_stack[0]))
+    out = jax.lax.fori_loop(0, D - 1, _back, out0)
+
+    def _fwd(d: int, carry: tuple[Array, Array]) -> tuple[Array, Array]:
+        """Multiply the running prefix into slot d, then extend the prefix."""
+        out, prefix = carry
+        out = out.at[d].set(prefix * out[d])
+        return out, prefix * _augment(Ks_stack[d])
+
+    out, K_full = jax.lax.fori_loop(0, D, _fwd, (out, jnp.ones_like(Ks_stack[0])))
+    return K_full, out
+
+
+def _complement_kernels_listed(Ks_stack: Array) -> tuple[Array, Array]:
+    """Build the same products with Python lists, for the backward pass.
+
+    Autodiff through the in-place loops stores a ``(D, N, N)`` carry per step
+    and roughly doubles the gradient's memory. This list form differentiates
+    cheaply, so :func:`_complement_kernels` uses it inside its custom VJP.
+
+    Args:
+        Ks_stack: Stacked raw kernel matrices, shape ``(D, N, N)``.
+
+    Returns:
+        Same as :func:`_complement_kernels`.
+    """
+    D = Ks_stack.shape[0]
+    aug = [_augment(Ks_stack[d]) for d in range(D)]
+    prefix = [jnp.ones_like(aug[0])] * D
     for i in range(1, D):
-        prefix[i] = prefix[i - 1] * Ks_stack[i - 1]
-
-    suffix = [jnp.ones_like(Ks_stack[0])] * D
+        prefix[i] = prefix[i - 1] * aug[i - 1]
+    suffix = [jnp.ones_like(aug[0])] * D
     for i in range(D - 2, -1, -1):
-        suffix[i] = suffix[i + 1] * Ks_stack[i + 1]
+        suffix[i] = suffix[i + 1] * aug[i + 1]
+    return prefix[-1] * aug[-1], jnp.stack([prefix[d] * suffix[d] for d in range(D)])
 
-    K_full = prefix[-1] * Ks_stack[-1]
-    return K_full, jnp.stack([prefix[d] * suffix[d] for d in range(D)])
+
+@jax.custom_vjp
+def _complement_kernels(Ks_stack: Array) -> tuple[Array, Array]:
+    """Build the full augmented product and every complement product.
+
+    The forward value comes from the in-place loops of
+    :func:`_complement_kernels_inplace`, which keep transient memory at a few
+    ``(N, N)`` matrices. The gradient uses the list form
+    (:func:`_complement_kernels_listed`), recomputed in the backward pass.
+
+    Args:
+        Ks_stack: Stacked raw kernel matrices, shape ``(D, N, N)``.
+
+    Returns:
+        ``(K_full, complements)``, shapes ``(N, N)`` and ``(D, N, N)``.
+    """
+    return _complement_kernels_inplace(Ks_stack)
+
+
+def _complement_fwd(Ks_stack: Array):
+    """Forward rule: keep only the input as the residual."""
+    return _complement_kernels_inplace(Ks_stack), Ks_stack
+
+
+def _complement_bwd(Ks_stack: Array, cotangents: tuple[Array, Array]):
+    """Backward rule: differentiate the list form."""
+    _, vjp = jax.vjp(_complement_kernels_listed, Ks_stack)
+    return vjp(cotangents)
+
+
+_complement_kernels.defvjp(_complement_fwd, _complement_bwd)
+
+
+# Transient (N, N) matrices one kernel costs inside _hsic_v when vectorised.
+_VMAP_TRANSIENT_MATRICES = 4
+
+
+def _fits_vectorised(d: int, n: int, itemsize: int) -> bool:
+    """Say whether a vmap over ``d`` kernels fits the transient-memory budget.
+
+    HSIC has no batch parameter. A vmap over D kernels materialises about
+    ``D`` extra ``(N, N)`` matrices (XLA broadcasts the output kernel to
+    ``(D, N, N)``), so the global budget decides: small problems stay
+    vectorised, large ones go through a sequential ``lax.map``. A partial
+    ``batch_size`` is not offered: it reshapes the stack, and XLA then
+    copies the whole stack.
+
+    Args:
+        d: Number of stacked kernels.
+        n: Number of samples ``N``.
+        itemsize: Bytes per float.
+
+    Returns:
+        True when the vectorised form is within budget.
+    """
+    return d * _VMAP_TRANSIENT_MATRICES * n * n * itemsize <= get_memory_budget()
+
+
+def _hsic_against(Ks: Array, L: Array, vectorised: bool) -> Array:
+    """Compute ``HSIC(K, L)`` for every kernel in a stack.
+
+    Args:
+        Ks: Stacked kernels, shape ``(D, N, N)``.
+        L: Kernel matrix, shape ``(N, N)``.
+        vectorised: ``vmap`` over the stack when True, else a sequential
+            ``lax.map``. Decided by the caller from the memory budget
+            (:func:`_fits_vectorised`), outside the jit, so a budget change
+            reaches the compiled kernel through its cache key.
+
+    Returns:
+        HSIC values, shape ``(D,)``.
+    """
+    if vectorised:
+        return jax.vmap(lambda K: _hsic_v(K, L))(Ks)
+    return jax.lax.map(lambda K: _hsic_v(K, L), Ks)
 
 
 @partial(jax.jit, static_argnames=("total", "bandwidth"))
@@ -502,24 +636,28 @@ def _input_setup(
         the shapes :func:`_get_hsic_kernel` documents, and ``keys`` of shape
         ``(total,)`` holding ``fold_in(key, i)`` for each slice.
     """
-    D = X_unit.shape[1]
     # One vmapped bandwidth selection instead of D inlined copies halves the
-    # compile time. The kernels stay in a Python loop: vmapping the
-    # exponential too moves the last bit of the indices.
+    # compile time. The kernels are built one at a time with lax.map, which
+    # writes each into the stack. How the exponential is batched or fused
+    # can move the last bit of the indices; the result agrees with a
+    # per-input build to rounding error.
     medians = jax.vmap(_median_bandwidth_sq, in_axes=1)(X_unit)
-    Ks_stack = jnp.stack(
-        [_kernel_from_median(X_unit[:, d], medians[d], bandwidth) for d in range(D)]
+    # lax.map writes each kernel straight into the stack. A Python list of D
+    # kernels joined by jnp.stack holds a second copy at the join.
+    Ks_stack = jax.lax.map(
+        lambda args: _kernel_from_median(args[0], args[1], bandwidth),
+        (X_unit.T, medians),
     )
-    K_aug_full, K_aug_compls_stack = _complement_kernels(_augmented_kernels(Ks_stack))
+    K_aug_full, K_aug_compls_stack = _complement_kernels(Ks_stack)
     # Self-HSIC HSIC(K_d, K_d) is output-independent, so compute it once
     # here and share it across every output slice.
-    hsic_xxs = jax.vmap(lambda K: _hsic_v(K, K))(Ks_stack)
+    hsic_xxs = jax.lax.map(lambda K: _hsic_v(K, K), Ks_stack)
     keys = jax.vmap(lambda i: jax.random.fold_in(key, i))(jnp.arange(total))
     return Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, keys
 
 
 @lru_cache(maxsize=32)
-def _get_hsic_kernel(n_perms: int, bandwidth: float):
+def _get_hsic_kernel(n_perms: int, bandwidth: float, vectorised: bool):
     """Return a JIT-compiled HSIC kernel for every output slice.
 
     The atomic unit is one output slice: it builds that slice's output
@@ -601,7 +739,7 @@ def _get_hsic_kernel(n_perms: int, bandwidth: float):
         hsic_yy = _hsic_v(L, L)
         zero_var = hsic_yy < eps
 
-        hsic_xys = jax.vmap(lambda K: _hsic_v(K, L))(Ks_stack)
+        hsic_xys = _hsic_against(Ks_stack, L, vectorised)
         # A constant input column has an all-ones kernel whose self-HSIC
         # vanishes exactly, and it provably depends on no output. Those
         # parameters report exactly 0 (matching PAWN), not the NaN of a
@@ -613,7 +751,7 @@ def _get_hsic_kernel(n_perms: int, bandwidth: float):
 
         hsic_full = _hsic_v(K_aug_full, L)
         hsic_full_safe = jnp.where(jnp.abs(hsic_full) < eps, jnp.nan, hsic_full)
-        hsic_compls = jax.vmap(lambda K: _hsic_v(K, L))(K_aug_compls_stack)
+        hsic_compls = _hsic_against(K_aug_compls_stack, L, vectorised)
         t_hsic = jnp.where(zero_var, jnp.nan, 1.0 - hsic_compls / hsic_full_safe)
 
         perm_keys = jax.random.split(key, n_perms)
@@ -622,7 +760,7 @@ def _get_hsic_kernel(n_perms: int, bandwidth: float):
             """Add one permutation draw's exceedance counts to the running total."""
             perm = jax.random.permutation(pkey, N)
             L_perm = L[perm][:, perm]
-            perm_hsics = jax.vmap(lambda K: _hsic_v(K, L_perm))(Ks_stack)
+            perm_hsics = _hsic_against(Ks_stack, L_perm, vectorised)
             return (
                 null_counts + (perm_hsics >= hsic_xys).astype(null_counts.dtype),
                 None,
@@ -702,15 +840,48 @@ def _warn_constant_inputs(problem: Problem, X: Array) -> None:
     )
 
 
-def _collapsed_median_labels(values: np.ndarray) -> list[int]:
-    """Return the columns whose median heuristic collapses to the floor.
+_NEAR_COLLAPSE_RATIO = 1e-6
+"""Warn when the median non-zero squared distance is below this share of the variance."""
 
-    The median of the off-diagonal pairwise squared distances is exactly 0
-    when more than half of the ``N (N - 1) / 2`` pairs are equal, which
-    happens when one value holds a large share of the sample. A column with
-    exactly two distinct values is left alone: the equality-indicator kernel
-    the floor produces is the right kernel for it. A constant column is left
-    alone too, since it has its own warning.
+_COLLAPSE_CHECK_MAX_ROWS = 2048
+"""Rows used by the host near-collapse check (an even stride subsample)."""
+
+
+def _nonzero_pair_sq_dists(col: np.ndarray) -> np.ndarray:
+    """Return the non-zero squared distances over all pairs ``i < j`` of a column.
+
+    The pairs are built row by row into one flat buffer. This avoids the full
+    ``(n, n)`` matrix and the ``triu_indices`` arrays.
+
+    Args:
+        col: Finite samples, shape ``(n,)``.
+
+    Returns:
+        Squared distances above zero, in no particular order.
+    """
+    n = col.size
+    buf = np.empty(n * (n - 1) // 2, dtype=np.float64)
+    pos = 0
+    for i in range(n - 1):
+        m = n - 1 - i
+        np.subtract(col[i + 1 :], col[i], out=buf[pos : pos + m])
+        pos += m
+    np.square(buf, out=buf)
+    return buf[buf > 0]
+
+
+def _collapsed_median_labels(values: np.ndarray) -> list[int]:
+    """Return the columns whose median heuristic nearly collapses.
+
+    The heuristic takes the median over the non-zero pairwise squared
+    distances, so exact atoms are handled. Near-ties are not: a column where
+    most values sit within a tiny distance of each other (a spike plus
+    noise of order 1e-6) makes that median tiny against the spread of the
+    column, and the kernel then separates only the near-equal values. A
+    column is flagged when the median non-zero squared distance is below
+    ``1e-6`` times its variance. A constant column is left alone, since it
+    has its own warning. Large samples are checked on an even stride
+    subsample of at most 2048 rows.
 
     Args:
         values: Samples, shape ``(N, C)``.
@@ -719,30 +890,31 @@ def _collapsed_median_labels(values: np.ndarray) -> list[int]:
         Indices of the affected columns.
     """
     n = values.shape[0]
-    n_pairs = n * (n - 1) // 2
+    if n > _COLLAPSE_CHECK_MAX_ROWS:
+        values = values[:: -(-n // _COLLAPSE_CHECK_MAX_ROWS)]
     bad = []
     for c in range(values.shape[1]):
-        col = values[:, c]
+        col = values[:, c].astype(np.float64)
         col = col[np.isfinite(col)]
-        uniq, counts = np.unique(col, return_counts=True)
-        if uniq.size <= 2:
+        var = float(np.var(col)) if col.size else 0.0
+        if var == 0.0:
             continue
-        equal_pairs = int(np.sum(counts.astype(np.int64) * (counts.astype(np.int64) - 1) // 2))
-        if 2 * equal_pairs > n_pairs:
+        nonzero = _nonzero_pair_sq_dists(col)
+        if nonzero.size and float(np.median(nonzero)) < _NEAR_COLLAPSE_RATIO * var:
             bad.append(c)
     return bad
 
 
 def _warn_collapsed_median(problem: Problem, X: Array, Y3: Array, stacklevel: int) -> None:
-    """Warn when the median heuristic collapses for an input or an output slice.
+    """Warn when the median heuristic nearly collapses for an input or an output slice.
 
-    When more than half of the sample pairs share one value, the median
-    squared distance is 0 and the heuristic falls to its 1e-20 floor. The
-    Gaussian kernel then reads 1 for equal values and 0 for any other pair,
-    and the indices react strongly to tiny perturbations of the rest of the
-    sample. The check reads concrete values, so it lives here and not in
-    :func:`indices`. ``bandwidth`` multiplies the heuristic, so it cannot
-    rescue a collapsed one.
+    The heuristic ignores exact ties, so atoms (a spike of zeros) are fine.
+    Near-ties are not: when the median non-zero squared distance is below
+    1e-6 times the variance, the Gaussian kernel reads about 1 for
+    near-equal values and 0 for the rest, and the indices react strongly to
+    tiny perturbations. The check reads concrete values, so it lives here and
+    not in :func:`indices`. ``bandwidth`` multiplies the heuristic, so it
+    cannot rescue a collapsed one.
 
     Args:
         problem: Problem definition, used to name the parameters.
@@ -751,8 +923,8 @@ def _warn_collapsed_median(problem: Problem, X: Array, Y3: Array, stacklevel: in
         stacklevel: Stack level that points the warning at the caller's line.
 
     Warns:
-        JaxgsaWarning: If an input or an output slice has more than half of
-            its sample pairs equal and more than two distinct values.
+        JaxgsaWarning: If an input or an output slice has a median non-zero
+            squared distance below 1e-6 times its variance.
     """
     x_host = np.asarray(X)
     y_host = np.asarray(Y3)
@@ -764,12 +936,13 @@ def _warn_collapsed_median(problem: Problem, X: Array, Y3: Array, stacklevel: in
     if not parts:
         return
     warnings.warn(
-        f"jaxgsa.hsic: the median heuristic failed for {', '.join(parts)}: more than half "
-        "of the samples share one value, so the median squared distance is 0 and the "
-        "kernel only tests whether two values are equal. The indices then react strongly "
-        "to tiny changes in the other samples. The bandwidth multiplier cannot fix this. "
-        "Analyse the non-zero part of the variable separately, or use a method that does "
-        "not rely on a bandwidth.",
+        f"jaxgsa.hsic: the median heuristic failed for {', '.join(parts)}: most values lie "
+        "within a tiny distance of each other (near-ties), so the median non-zero squared "
+        "distance is below 1e-6 times the variance and the kernel only tests whether two "
+        "values are nearly equal. The indices then react strongly to tiny changes in the "
+        "other samples. The bandwidth multiplier cannot fix this. Round the near-equal "
+        "values to exact ties, analyse the non-zero part of the variable separately, or "
+        "use a method that does not rely on a bandwidth.",
         stacklevel=stacklevel,
         category=JaxgsaWarning,
     )
@@ -854,7 +1027,9 @@ def indices(
     traced and never at run time. ``bandwidth`` scales the median-heuristic
     width and is baked into the compiled kernel, which is keyed on it (see
     :func:`_get_hsic_kernel`). Changing it recompiles; it costs no
-    device-side conditional.
+    device-side conditional. Whether the kernel maps over the D inputs with
+    ``vmap`` or one at a time is also static: it follows from the shapes and
+    the memory budget, and is part of the same cache key.
 
     Peak memory is the resident kernel stacks, ~``(2D + 1) * N^2`` floats at
     once, and no keyword bounds it — see :func:`analyze` for why there is
@@ -939,7 +1114,8 @@ def indices(
         X_unit, key, total, bandwidth
     )
 
-    kernel = _get_hsic_kernel(n_perms, bandwidth)
+    vectorised = _fits_vectorised(D, N, Ks_stack.dtype.itemsize)
+    kernel = _get_hsic_kernel(n_perms, bandwidth, vectorised)
     r2_all, t_all, p_all, raw_all = kernel(
         Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, Y_cols, keys
     )

@@ -222,3 +222,36 @@ class TestAutoEngage:
         assert forced_full.streamed is False
         assert streamed.streamed is True
         _assert_results_match(streamed, single)
+
+
+def test_budget_decision_prices_the_padded_row_count():
+    """The single-pass decision uses the bucketed rows, not the real ones.
+
+    N=1025 pads to 1152 rows. A budget between the two estimates must stream,
+    because the single pass would run on the padded arrays.
+    """
+    from jaxgsa.pce._analyze import _bucket, _single_pass_fit_bytes
+
+    N, D, n_terms = 1025, 2, 6  # order 2 in two inputs
+    problem = Problem(names=("x1", "x2"), bounds=((-1.0, 1.0),) * 2)
+    X = jax.random.uniform(jax.random.PRNGKey(1), (N, D), minval=-1.0, maxval=1.0)
+    itemsize = jnp.dtype(jnp.result_type(X.dtype, float)).itemsize  # 8 under x64
+    assert _bucket(N) == 1152
+    unpadded = _single_pass_fit_bytes(N, n_terms, 1, itemsize)
+    padded = _single_pass_fit_bytes(_bucket(N), n_terms, 1, itemsize) + itemsize * _bucket(N) * (
+        D + 1
+    )
+    assert unpadded < padded
+
+    Y = jnp.sin(2.0 * X[:, 0]) + X[:, 1] ** 2
+
+    saved = jaxgsa.config.get_memory_budget(unit="b")
+    try:
+        jaxgsa.config.set_memory_budget((unpadded + padded) // 2, unit="b")
+        between = pce.analyze(problem, X, Y, order=2)
+        jaxgsa.config.set_memory_budget(padded + 1, unit="b")
+        above = pce.analyze(problem, X, Y, order=2)
+    finally:
+        jaxgsa.config.set_memory_budget(saved, unit="b")
+    assert between.streamed is True
+    assert above.streamed is False

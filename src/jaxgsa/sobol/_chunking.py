@@ -24,9 +24,9 @@ the per-slice cost is linear in ``D`` for both orders. Bootstrap also derives
 a resample width from the same model, so a small output chunk cannot leave
 an arbitrarily large ``R`` axis in one device call.
 
-The budget is a transient working-set estimate. Resident input arrays,
-already assembled results, and the pre-generated resampling index matrix are
-not included, so it is a sizing aid rather than a hard process-memory cap.
+The budget is a transient working-set estimate. Resident input arrays
+and already assembled results are not included, so it is a sizing aid
+rather than a hard process-memory cap.
 """
 
 from __future__ import annotations
@@ -153,9 +153,13 @@ def resolve_resample_chunk_size(
     Returns:
         A resample width in ``[1, n_bootstrap]``.
     """
-    bytes_per_resample = (
-        slice_elements(base_n, D, calc_second_order) * itemsize * max(1, slice_chunk_size)
-    )
+    # Per resample: the int32 draw (4 bytes per row), the transient inside
+    # randint (about 6x the row, measured on jax 0.11, so 24), and the count
+    # row in the output dtype. The count row is shared by every slice in the
+    # chunk. Second order adds the weighted BA rows, (N, D) per slice.
+    bytes_per_resample = base_n * (4 + 24 + itemsize)
+    if calc_second_order:
+        bytes_per_resample += base_n * D * itemsize * max(1, slice_chunk_size)
     budget = max(1, get_memory_budget() // max(bytes_per_resample, 1))
     return max(1, min(n_bootstrap, budget))
 

@@ -791,6 +791,19 @@ class TestQuantileRankSplit:
             np.testing.assert_array_equal(np.asarray(j_right), j_right_ref)
             np.testing.assert_allclose(np.asarray(frac_left), frac_left_ref, atol=1e-6)
 
+    def test_frac_left_float64_under_x64(self):
+        """With x64 on and a float64 dtype, the overlap fractions stay float64."""
+        from jaxgsa.optimal_transport._analyze import _quantile_rank_split
+
+        N = 23
+        sizes = np.array([7, 13, 3])
+        with jax.enable_x64(True):
+            _, _, frac = _quantile_rank_split(jnp.asarray(sizes), N, jnp.float64)
+            assert frac.dtype == jnp.float64
+            r = (np.arange(N)[None] * sizes[:, None]) % N
+            exact = np.minimum(N - r, sizes[:, None]) / sizes[:, None]
+            np.testing.assert_allclose(np.asarray(frac), exact, rtol=0, atol=1e-15)
+
 
 class TestOTCorrelatedInputs:
     """Certify the documented correlation-inclusive reading of the OT index.
@@ -1267,3 +1280,38 @@ class TestDummyFloorWarning:
             warnings.simplefilter("always")
             analyze(ishigami.PROBLEM, X, Y2, verbose=False)
         assert not any("entropic transport" in str(w.message) for w in caught)
+
+
+class TestJointMemoryWarning:
+    """The joint Sinkhorn path warns when one solve exceeds the memory budget."""
+
+    @staticmethod
+    def _run(n=200):
+        X = jnp.asarray(np.random.default_rng(0).uniform(-np.pi, np.pi, (n, 3)))
+        Y = jnp.stack([X[:, 0], X[:, 1] ** 2], axis=1)
+        return analyze(
+            ishigami.PROBLEM, X, Y, mode="multivariate", n_classes=4, max_iter=5, dummy=False
+        )
+
+    def test_estimate_scales_as_blocks(self):
+        from jaxgsa.optimal_transport._analyze import _joint_peak_bytes
+
+        assert _joint_peak_bytes(16384, 656, jnp.float32) == 4 * 16384 * 656 * 4
+        assert _joint_peak_bytes(100, 10, jnp.float64) == 4 * 100 * 10 * 8
+
+    def test_warns_when_budget_is_tiny(self):
+        from jaxgsa._core import batching
+
+        old = batching.get_memory_budget()
+        batching._set_memory_budget(1000)
+        try:
+            with pytest.warns(jaxgsa.JaxgsaWarning, match="Sinkhorn solve is expected to need"):
+                self._run()
+        finally:
+            batching._set_memory_budget(old)
+
+    def test_silent_under_default_budget(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self._run()
+        assert not [w for w in caught if "expected to need" in str(w.message)]

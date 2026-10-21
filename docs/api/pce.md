@@ -96,12 +96,12 @@ silent run.
 | Argument | Default | What it changes |
 | --- | --- | --- |
 | `order` | `3` | Maximum total polynomial degree. Higher orders capture sharper nonlinearity and larger interactions, but the term count `C(D+order, order)` grows fast and needs more rows to fit. It is reduced automatically, with a warning, when the term count would exceed `fit_ratio * N`. |
-| `ridge` | `1e-8` | Tikhonov regularization on the least-squares fit. The default is small enough to be a guard against a singular normal matrix and nothing more. Raise it when coefficients look unstable, which happens with noisy `Y` or near-duplicate rows. |
+| `ridge` | `1e-8` | Tikhonov regularization on the least-squares fit. The default is small enough to be a guard against a singular design and nothing more. Raise it when coefficients look unstable, which happens with noisy `Y` or near-duplicate rows. A ridge of about 1e-3 or more hides a singular design from the rank check. Constant, duplicate and linearly dependent inputs still raise. |
 | `fit_ratio` | `0.5` | The terms-to-samples ceiling that triggers the `order` reduction. Lower it to demand more samples per term, which gives a more conservative fit that is harder to overfit. Must be `<= 1`: a value above 1 asks for more terms than one row per term can support. `order` is never reduced below 1 (`D + 1` terms), so a row count too small even for that raises `ValueError` instead of fitting an underdetermined system. |
 | `batch_size` | `None` | Rows per batch during the fit. See below. |
 | `n_bootstrap` | `0` | Row resamples. See below. |
 | `key` | `None` | A `jax.random` key for the resampling. Required when `n_bootstrap > 0`. |
-| `on_invalid` | `"raise"` | Policy for non-finite rows. One row is one unit, so `"drop"` removes the `(X, Y)` pair. This check matters more here than for a reduction-only method: one NaN reaches the normal equations and poisons every coefficient, every leave-one-out RMSE and every index. |
+| `on_invalid` | `"raise"` | Policy for non-finite rows. One row is one unit, so `"drop"` removes the `(X, Y)` pair. This check matters more here than for a reduction-only method: one NaN reaches the QR factorisation and poisons every coefficient, every leave-one-out RMSE and every index. |
 | `verbose` | `True` | Prints the summary block shown above. |
 | `keep_replicates` | `False` | Retains the per-replicate index arrays on `result.ci`. |
 
@@ -111,11 +111,11 @@ silent run.
 
 There are two, and they give the same numbers. The single-pass path builds the
 full design matrix. The streamed path reads rows in batches, so it holds far
-less memory. Both solve the same normal equations and compute the same exact
+less memory. Both solve the same ridge least squares by QR and compute the same exact
 leave-one-out error. They differ only in the order of the float32 sums.
 
 The streamed path engages when `batch_size` is an integer below `N`, or when the
-estimated resident memory of the single-pass fit (design matrix, Gram
+estimated resident memory of the single-pass fit (design matrix, QR
 factorization, LOO residuals) exceeds the active memory budget, about 512 MiB by
 default. Set that budget with `jaxgsa.config.set_memory_budget`.
 `batch_size >= N` is one full block, which is the single-pass fit.
@@ -134,7 +134,7 @@ the fitted numbers.
 ## Confidence intervals
 
 This is the expensive kind of bootstrap. Every replicate refits the whole
-expansion, a fresh design matrix and a fresh Gram solve, so twenty replicates
+expansion, a fresh design matrix and a fresh QR solve, so twenty replicates
 cost about twenty fits. That is an order of magnitude above the row resample of
 a method like [`jaxgsa.pawn`](/api/pawn), which only re-reduces numbers it
 already has. Hence the `0` default, and hence a small `n_bootstrap` when you do
@@ -239,6 +239,18 @@ not a positive integer, when `on_invalid` is unknown or refuses the sample, when
 - Any categorical parameter. A polynomial in an unordered level code has no
   meaning. Use [`jaxgsa.optimal_transport`](/api/optimal-transport),
   [`jaxgsa.borgonovo`](/api/borgonovo), or [`jaxgsa.pawn`](/api/pawn).
+
+It also raises `ValueError` when an input is constant, when two inputs are
+equal in every row, and when an input is a linear combination of other inputs
+(for example `c = 1 - a` or `c = a + b`). The check reads `X`, so it does not
+depend on the dtype or on `ridge`. In float32 it also raises when the QR pivot
+share of the design falls below 1e-5. float64 only warns, below 1e-9.
+
+Near that precision band, float32 can warn about an overfit even when the
+indices are exact. Example: three Gaussian inputs at order 13 give exact
+indices, but `cv_rmse` is about 2 times the standard deviation of `Y`. The
+leave-one-out error is the first number to lose precision in float32, so trust
+the indices and re-run in float64 to confirm.
 
 ## Traceable core
 

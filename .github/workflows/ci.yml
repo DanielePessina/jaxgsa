@@ -93,6 +93,15 @@ jobs:
           enable-cache: true
       - name: Install project and dev dependencies
         run: uv sync --locked --extra dev
+      # tests/conftest.py keeps compiled XLA programs in .pytest_cache/jax.
+      # A program whose code changed misses the cache and compiles as usual,
+      # so a stale cache costs nothing. Locally it halves a rerun.
+      - name: Restore the JAX compilation cache
+        uses: actions/cache@v6
+        with:
+          path: .pytest_cache/jax
+          key: jax-${{ matrix.x64 }}-${{ hashFiles('uv.lock') }}-${{ github.sha }}
+          restore-keys: jax-${{ matrix.x64 }}-${{ hashFiles('uv.lock') }}-
       - name: Run all ordinary numerical regressions
         run: uv run pytest -m "not slow" -q -n auto
 

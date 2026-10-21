@@ -360,3 +360,67 @@ class TestDegenerateConditionalWarning:
         found = [w for w in caught if "deterministic function" in str(w.message)]
         assert len(found) == 1
         assert issubclass(found[0].category, jaxgsa.JaxgsaWarning)
+
+
+def _exact_self_conditionals(R: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``beta_self`` and ``std_self`` by exact rational arithmetic."""
+    from fractions import Fraction
+
+    D = R.shape[0]
+    exact = [[Fraction(float(v)) for v in row] for row in R]
+    betas = np.zeros((D, D - 1))
+    stds = np.zeros(D)
+    for i in range(D):
+        rest = [j for j in range(D) if j != i]
+        A = [[exact[a][b] for b in rest] + [exact[a][i]] for a in rest]
+        n = D - 1
+        for c in range(n):
+            p = next(r for r in range(c, n) if A[r][c] != 0)
+            A[c], A[p] = A[p], A[c]
+            for r in range(n):
+                if r != c:
+                    f = A[r][c] / A[c][c]
+                    A[r] = [x - f * y for x, y in zip(A[r], A[c])]
+        sol = [A[r][n] / A[r][r] for r in range(n)]
+        betas[i] = [float(s) for s in sol]
+        stds[i] = float(1 - sum(exact[j][i] * s for j, s in zip(rest, sol))) ** 0.5
+    return betas, stds
+
+
+def _near_singular_correlation(n_params: int, smallest: float, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    Q, _ = np.linalg.qr(rng.normal(size=(n_params, n_params)))
+    eigenvalues = np.concatenate([[smallest], np.ones(n_params - 1)])
+    R = Q @ np.diag(eigenvalues) @ Q.T
+    scale = np.sqrt(np.diag(R))
+    return 0.5 * (R / np.outer(scale, scale) + (R / np.outer(scale, scale)).T)
+
+
+@pytest.mark.filterwarnings("ignore:.*almost deterministic")
+def test_plan_self_conditionals_stay_accurate_for_near_singular_correlation():
+    # seed 12 is the worst of 15 seeds: errors ~1e-9 for beta, ~1e-11 for std.
+    R = _near_singular_correlation(4, 1e-8, seed=12)
+    plan = build_conditional_plan(R)
+    beta_ref, std_ref = _exact_self_conditionals(R)
+    # cond(R) ~ 1e8 limits any float64 method to ~1e-8 here; the precision
+    # route must not be worse than that.
+    np.testing.assert_allclose(plan.beta_self, beta_ref, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(plan.std_self, std_ref, rtol=1e-5, atol=1e-8)
+
+
+def test_plan_warns_once_for_lifted_conditionals():
+    # A slightly indefinite matrix, as a caller bypassing canonicalisation
+    # could pass: every conditional covariance needs an eigenvalue lift.
+    rng = np.random.default_rng(0)
+    Q, _ = np.linalg.qr(rng.normal(size=(5, 5)))
+    R = Q @ np.diag([-1e-9, 1e-9, 1.0, 1.5, 2.49999]) @ Q.T
+    scale = np.sqrt(np.diag(R))
+    R = R / np.outer(scale, scale)
+    R = 0.5 * (R + R.T)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        plan = build_conditional_plan(R)
+        for i in range(5):
+            plan.rest_factor(i)
+    degenerate = [w for w in caught if issubclass(w.category, jaxgsa.JaxgsaWarning)]
+    assert len(degenerate) == 1

@@ -46,7 +46,7 @@ def hdmr_ishigami_xy() -> tuple[jax.Array, jax.Array]:
 
 @pytest.fixture(scope="session")
 def hdmr_by_order(hdmr_ishigami_xy):
-    """HDMR fits (n_intervals=2) of ``hdmr_ishigami_xy`` at ``order`` 1, 2 and 3, keyed by order.
+    """HDMR fits (n_intervals=2) of ``hdmr_ishigami_xy`` at ``order`` 1 and 2, keyed by order.
 
     The order-2 fit is built with every ``JaxgsaWarning`` promoted to an
     error. That fit is a complete decomposition, so it must stay silent, and
@@ -54,7 +54,7 @@ def hdmr_by_order(hdmr_ishigami_xy):
     """
     X, Y = hdmr_ishigami_xy
     fits = {}
-    for order in (1, 2, 3):
+    for order in (1, 2):
         with warnings.catch_warnings():
             warnings.simplefilter("error" if order == 2 else "ignore", JaxgsaWarning)
             fits[order] = analyze_hdmr(ishigami.PROBLEM, X, Y, order=order, n_intervals=2)

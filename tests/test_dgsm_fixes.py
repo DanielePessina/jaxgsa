@@ -155,3 +155,14 @@ def test_truncated_gaussian_poincare_mirror_symmetry() -> None:
 def test_truncated_gaussian_variance_matches_1_1_1(kwargs, expected) -> None:
     """Ordinary truncations use scipy's closed form, as in 1.1.1."""
     assert marginal_variance(GaussianSpec(**kwargs)) == pytest.approx(expected, rel=1e-14)
+
+
+def test_truncated_gaussian_poincare_is_continuous_at_the_tail_switch() -> None:
+    """The constant has no jump where the bound crosses 5 std from the mean."""
+    lows = np.linspace(4.98, 5.02, 41)
+    c = np.array([poincare_constant(GaussianSpec(0.0, 1.0, low=float(x))) for x in lows])
+    # The constant falls about 2.3e-5 per 0.001 of bound. The old jump was 6.8e-5.
+    assert np.all(np.diff(c) < 0)
+    assert np.max(np.abs(np.diff(c))) < 3.5e-5
+    mirror = np.array([poincare_constant(GaussianSpec(0.0, 1.0, high=-float(x))) for x in lows])
+    np.testing.assert_allclose(c, mirror, rtol=1e-9)

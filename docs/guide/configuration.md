@@ -175,14 +175,16 @@ Most of the library, as of 1.0:
 - the output-slice chunking of Sobol, HDMR, PAWN, Borgonovo, eFAST, and optimal transport,
 - the Sobol bootstrap and the Morris resample chunking,
 - the DGSM Jacobian batching,
+- HSIC, which checks whether it can handle all inputs at once within the
+  budget. If not, it handles them one at a time,
 - the PCE S2 pair-mask chunking,
 - the PCE and HDMR streaming fits, which engage on their own when the
   single-pass design matrix would not fit.
 
-Borgonovo also tiles its output grid, and that tile is what bounds its peak in
-practice. The tile width comes from a fixed working-set target, not from this
-budget, so lowering the budget narrows Borgonovo's slice chunk and leaves its
-tile alone.
+Borgonovo handles its output columns in batches of at most 16. The budget sets
+the batch width. Each column in a batch holds about three copies of the class
+layout, which is close to `D * N` values. Borgonovo does not tile its output
+grid.
 
 ### Units
 

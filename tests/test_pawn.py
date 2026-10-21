@@ -285,6 +285,20 @@ class TestPAWNOutOfBounds:
         assert idx[3] == 3  # exactly 1.0 -> last bin
         assert idx[5] == -1  # NaN -> excluded, not folded into a bin
 
+    def test_lattice_value_on_an_edge_maps_to_the_upper_bin(self):
+        """A value of exactly ``k / M`` lands in bin ``k`` for every ``k``.
+
+        ``linspace(0, 1, M + 1)`` puts some interior edges one ulp above
+        ``k / M`` (``M = 10``, ``k = 3`` among them), which sent such a
+        value to bin ``k - 1``.
+        """
+        from jaxgsa.pawn._analyze import _equal_width_bins
+
+        for M in range(1, 65):
+            X = jnp.asarray(np.arange(M + 1) / M)[:, None]
+            idx = np.asarray(_equal_width_bins(X, M)).ravel()
+            np.testing.assert_array_equal(idx, np.minimum(np.arange(M + 1), M - 1))
+
 
 class TestPAWNEmptyBinWarning:
     def test_warns_once_not_per_bootstrap(self):

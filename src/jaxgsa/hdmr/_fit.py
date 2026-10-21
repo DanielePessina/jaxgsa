@@ -38,11 +38,14 @@ lane is an independent lane -- so it cannot move a number by more than the
 reassociation that adding a zero to a float32 reduction can cause.
 """
 
+import functools
 import math
+from collections.abc import Callable
 from functools import lru_cache
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax
+import jax.core
 import jax.numpy as jnp
 from jax import Array
 
@@ -52,6 +55,10 @@ from jaxgsa.hdmr._engine import _build_B1, _build_B2, _build_B3, term_order_map
 # ---------------------------------------------------------------------------
 # Memory model
 # ---------------------------------------------------------------------------
+
+# Terms per block in the final statistics pass. Larger blocks mean fewer loop
+# trips; smaller blocks mean smaller (row, lane, block) temporaries.
+_STATS_TERM_BLOCK = 32
 
 
 def _basis_bytes_per_row(
@@ -67,7 +74,8 @@ def _basis_bytes_per_row(
 
     This part is shared by every output slice: each batch materializes ``B1``
     (m1 * D per row), ``B2`` with its two gather temporaries (3 * m2 * n2),
-    and ``B3`` with its three gather temporaries (4 * m3 * n3).
+    and ``B3`` with its three gather temporaries (4 * m3 * n3), plus the
+    projected pair basis and its temporary (2 * m2 * n2).
 
     Args:
         D: Number of input parameters.
@@ -81,15 +89,18 @@ def _basis_bytes_per_row(
     Returns:
         Estimated basis-build bytes per streamed row.
     """
-    return itemsize * (m1 * D + 3 * m2 * n2 + 4 * m3 * n3)
+    # The extra 2 * m2 * n2 is the projected pair basis of the stats pass.
+    return itemsize * (m1 * D + 5 * m2 * n2 + 4 * m3 * n3)
 
 
 def _slice_bytes_per_row(n: int, itemsize: int) -> int:
     """Transient bytes one (row, output slice) pair costs in the final pass.
 
-    The statistics pass materializes the per-term contributions ``F`` plus
-    roughly two elementwise temporaries of the same shape, so 3 * n elements
-    per row per lane.
+    The statistics pass walks the terms in blocks of at most
+    ``_STATS_TERM_BLOCK``. Each block materializes the contributions ``F`` plus
+    two elementwise temporaries of the same shape, so 3 * block elements per
+    row per lane, plus a few ``(row, lane)`` arrays (the order sums and the
+    residuals). The estimate does not grow with the number of terms.
 
     Args:
         n: Total number of terms.
@@ -98,7 +109,7 @@ def _slice_bytes_per_row(n: int, itemsize: int) -> int:
     Returns:
         Estimated bytes per (row, slice) pair.
     """
-    return itemsize * 3 * n
+    return itemsize * (3 * min(n, _STATS_TERM_BLOCK) + 8)
 
 
 def _fit_bytes_per_row(
@@ -142,6 +153,7 @@ def _resolve_slice_chunk_size(
     L: int,
     b: int,
     slice_bytes: int,
+    lane_fixed_bytes: int = 0,
 ) -> int:
     """Resolve how many output slices one vmap handles, against the budget.
 
@@ -151,6 +163,8 @@ def _resolve_slice_chunk_size(
         b: Resolved rows per batch.
         slice_bytes: Bytes per (row, slice) pair, from
             :func:`_slice_bytes_per_row`.
+        lane_fixed_bytes: Bytes one lane holds regardless of the row count,
+            such as the pair solver state.
 
     Returns:
         A chunk width in ``[1, L]``. With an automatic ``b`` this is ``L``,
@@ -165,13 +179,89 @@ def _resolve_slice_chunk_size(
         if slice_chunk_size < 1:
             raise ValueError(f"jaxgsa.hdmr: slice_chunk_size must be >= 1, got {slice_chunk_size}")
         return min(slice_chunk_size, L)
-    auto = get_memory_budget() // max(b * slice_bytes, 1)
+    budget = get_memory_budget()
+    auto = budget // max(b * slice_bytes, 1)
+    if lane_fixed_bytes > 0:
+        auto = min(auto, budget // lane_fixed_bytes)
     return max(1, min(L, auto))
 
 
 # ---------------------------------------------------------------------------
 # Gram-space solvers
 # ---------------------------------------------------------------------------
+
+
+def _ridge_eye(gram: Array, ridge: float, m: int) -> Array:
+    """Return the Tikhonov term ``ridge * mean(diag(gram)) * I`` per block.
+
+    The ridge is relative to the mean Gram diagonal of each block. The raw
+    Gram scales with ``N`` and with the basis scale ``m**3``, so an absolute
+    ``ridge`` would do nothing at large ``N`` and a different amount at each
+    ``n_intervals``. Relative to the diagonal, ``ridge=0.01`` always means
+    "shrink directions that carry less than 1% of a typical column's energy".
+
+    Args:
+        gram: Gram blocks, shape ``(..., m, m)``.
+        ridge: Relative ridge strength.
+        m: Block size.
+
+    Returns:
+        Array of shape ``(..., m, m)``.
+    """
+    return ridge * _ridge_scale(gram)[..., None, None] * jnp.eye(m)
+
+
+def _ridge_scale(gram: Array) -> Array:
+    """Return the mean Gram diagonal per block, the scale of the relative ridge.
+
+    Args:
+        gram: Gram blocks, shape ``(..., m, m)``.
+
+    Returns:
+        Array of shape ``(...)``.
+    """
+    return jnp.mean(jnp.diagonal(gram, axis1=-2, axis2=-1), axis=-1)
+
+
+def _live_pairs(BtB: Array, ridge: float | Array) -> tuple[Array, Array]:
+    """Return the per-term ridge and which terms are live.
+
+    A pair whose projected Gram is near zero (an input with almost no spread)
+    holds nothing beyond the first order. Its ridge is then tiny and the
+    round-off left by the projection makes its block near-singular or
+    indefinite, which turns the coefficients of every lane into huge values or
+    NaN. Every pair solver drops such a pair alike, with zero coefficients.
+
+    Args:
+        BtB: Projected per-term Gram blocks, ``(n2, m2, m2)``.
+        ridge: Relative ridge, as in :func:`_ridge_eye`.
+
+    Returns:
+        The per-term ridge ``ridge * mean(diag)``, shape ``(n2,)``, and a
+        boolean mask of the live terms, shape ``(n2,)``.
+    """
+    lam = ridge * _ridge_scale(BtB)
+    live = lam > jnp.sqrt(jnp.finfo(lam.dtype).eps) * jnp.max(lam)
+    return lam, live
+
+
+def _eigen_cut(G: Array) -> tuple[Array, Array, Array]:
+    """Eigen-decompose a symmetric Gram and flag the directions to keep.
+
+    Eigenvalues below ``sqrt(eps)`` of the largest are dropped: the
+    first-order bases of different inputs share the constant function, so the
+    Gram has a null space.
+
+    Args:
+        G: Gram matrix, shape ``(P, P)``.
+
+    Returns:
+        The eigenvalues ``w``, the eigenvectors ``V`` and the boolean mask
+        ``keep``, shapes ``(P,)``, ``(P, P)`` and ``(P,)``.
+    """
+    w, V = jnp.linalg.eigh((G + G.T) / 2)
+    keep = w > jnp.sqrt(jnp.finfo(G.dtype).eps) * jnp.max(w)
+    return w, V, keep
 
 
 @lru_cache(maxsize=32)
@@ -187,7 +277,8 @@ def _get_gram_backfit(m1: int, n1: int, max_iter: int, ridge: float):
 
     Tikhonov regularization keeps an ill-conditioned ``B^T B`` from blowing up
     the coefficients when the basis functions are nearly collinear or the
-    sample count is low. Iteration stops when the largest change in any
+    sample count is low. The ridge is relative to the mean Gram diagonal (see
+    :func:`_ridge_eye`). Iteration stops when the largest change in any
     dimension's coefficient energy falls below one part in a thousand of the
     largest energy itself, or after ``max_iter`` sweeps. The test is relative,
     not absolute: the coefficients scale with ``Y`` and with ``m**-3``, so an
@@ -201,8 +292,7 @@ def _get_gram_backfit(m1: int, n1: int, max_iter: int, ridge: float):
     """
 
     def backfit(G1: Array, G1_diag: Array, b1res: Array) -> Array:
-        lam_eye = ridge * jnp.eye(m1)
-        M = G1_diag + lam_eye  # (n1, m1, m1)
+        M = G1_diag + _ridge_eye(G1_diag, ridge, m1)  # (n1, m1, m1)
 
         # Initial fit: C1_j = M_j^{-1} B1_j^T Y_res, one solve per dimension.
         # Backfitting below corrects for inter-dimension coupling.
@@ -244,12 +334,11 @@ def _get_gram_backfit(m1: int, n1: int, max_iter: int, ridge: float):
 def _get_gram_higher_solver(m_basis: int, ridge: float):
     """Build and cache the vmapped Gram-space higher-order solver.
 
-    Higher-order terms are fit in a single shot, with no backfitting: each
-    term is solved independently against the same lower-order residual,
-    ``C_j = (B_j^T B_j + ridge * I)^{-1} B_j^T Y_res``, from the accumulated
-    per-term Gram blocks and moments. The lower-order structure is already
-    removed, so same-order tensor-product terms overlap little and one
-    joint-free pass is accurate in practice.
+    Each term is solved independently,
+    ``C_j = (G_j + ridge * mean(diag G_j) * I)^{-1} m_j``, from its Gram block
+    ``G_j`` and moment ``m_j``. The caller passes blocks that are already
+    orthogonal to every lower-order term (see :func:`_project_pairs`), so
+    same-order terms do not compete for the same leftover.
 
     Returns:
         A jitted function ``(BtB, BtY) -> C``. ``BtB``
@@ -259,11 +348,269 @@ def _get_gram_higher_solver(m_basis: int, ridge: float):
     """
 
     def solve_lane(BtB: Array, BtY: Array) -> Array:
-        lam_eye = ridge * jnp.eye(m_basis)
-        C = jax.vmap(lambda btb, bty: jnp.linalg.solve(btb + lam_eye, bty))(BtB, BtY)
+        lam = _ridge_eye(BtB, ridge, m_basis)
+        C = jax.vmap(jnp.linalg.solve)(BtB + lam, BtY)
         return C.T  # (m_basis, n_terms)
 
     return jax.jit(jax.vmap(solve_lane, in_axes=(None, 0)))
+
+
+@jax.jit
+def _first_order_pinv(G1: Array) -> Array:
+    """Pseudo-inverse of the flat first-order Gram matrix.
+
+    The first-order bases of different inputs share the constant function (each
+    sums to one), so the Gram has a null space. Eigenvalues below
+    ``sqrt(eps)`` of the largest are dropped.
+
+    Args:
+        G1: Flat Gram, shape ``(P, P)`` with ``P = m1 * n1``.
+
+    Returns:
+        The pseudo-inverse, shape ``(P, P)``.
+    """
+    w, V, keep = _eigen_cut(G1)
+    inv = jnp.where(keep, 1.0 / jnp.where(keep, w, 1.0), 0.0)
+    return (V * inv[None, :]) @ V.T
+
+
+def _pair_normal_pass(
+    coefs: list[Array],
+    A: Array,
+    rows: list[tuple[int, int]],
+    X_p: Array,
+    w_full: Array,
+    build: Callable[..., list[Array]],
+    c2_idx: Array,
+    c3_idx: Array,
+    beta2: Array,
+    beta3: Array,
+) -> list[Array]:
+    """Apply the projected pair normal matrix to every lane chunk.
+
+    Args:
+        coefs: Pair coefficients per lane chunk, each ``(cs, n2, m2)``.
+        A: Projection of B2 onto the first-order space, ``(P, m2, n2)``.
+        rows: Row batch bounds.
+        X_p: Padded inputs.
+        w_full: Row mask.
+        build: Basis builder for orders up to 2.
+        c2_idx: Pair index table.
+        c3_idx: Triple index table.
+        beta2: Pair basis index table.
+        beta3: Triple basis index table.
+
+    Returns:
+        ``Bt^T Bt c`` for each lane chunk, without the ridge term.
+    """
+    vs = [jnp.einsum("pmj,ljm->lp", A, c) for c in coefs]
+    accs = [(jnp.zeros_like(v), jnp.zeros_like(c)) for v, c in zip(vs, coefs, strict=True)]
+    for lo, hi in rows:
+        B1_b, B2_b = build(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)[:2]
+        for j in range(len(coefs)):
+            accs[j] = _acc_pair_normal(B1_b, B2_b, coefs[j], vs[j], accs[j])
+    return [g2 - jnp.einsum("pmj,lp->ljm", A, g1) for g1, g2 in accs]
+
+
+_PAIR_ITER_FACTOR = 10
+_PAIR_STALL = 25
+_PAIR_WARN_REL = 1e-2
+
+
+def _pair_tol(eps: float) -> float:
+    """Return the relative residual the joint pair CG is held to.
+
+    A looser value (1e-4) was measured to stop early: at D = 15, N = 1024 the
+    test NRMSE was 0.14 against 0.05 at 1e-7. In float32 CG cannot reach
+    ``10 eps`` (1.2e-6) and runs to the step cap, so the floor there is
+    ``100 eps`` (1.2e-5).
+    """
+    return max(1e-7, 100 * eps) if eps > 1e-10 else 1e-7
+
+
+def _joint_pair_solve(
+    BtB: Array,
+    rhs: list[Array],
+    *,
+    ridge: float,
+    max_iter: int,
+    sweep: Callable[[list[Array]], list[Array]],
+) -> tuple[list[Array], Array, float]:
+    """Solve all pair terms jointly by block-Jacobi preconditioned CG.
+
+    Fitting each pair alone against one residual counts the same leftover
+    once per pair, so the pairs add up to far more than the residual. The
+    joint ridge solution ``(Bt^T Bt + lam) c = Bt^T r`` has no such
+    overshoot. It is solved without forming the ``n2 m2`` square matrix: each
+    CG step is one pass over the rows (:func:`_pair_normal_pass`). The
+    per-term solve is the preconditioner and the start.
+
+    Args:
+        BtB: Projected per-term Gram blocks, ``(n2, m2, m2)``.
+        rhs: ``Bt^T r`` per lane chunk, each ``(cs, n2, m2)``.
+        ridge: Relative ridge, as in :func:`_ridge_eye`.
+        max_iter: Cap on CG steps.
+        sweep: Applies the unregularized normal matrix to a list of chunks.
+
+    Returns:
+        The pair coefficients per lane chunk, each ``(cs, m2, n2)``, the final
+        worst relative residual over all lanes, and the tolerance it was
+        held to.
+    """
+    m_basis = BtB.shape[1]
+    lam = _ridge_eye(BtB, ridge, m_basis)  # (n2, m2, m2)
+    lam_diag = jnp.diagonal(lam, axis1=-2, axis2=-1)  # (n2, m2)
+    # A dead pair is dropped as in the direct solves: its preconditioner block
+    # is zero, so it starts at zero and its search direction stays zero, and
+    # its residual is masked out.
+    _, live = _live_pairs(BtB, ridge)
+    eye = jnp.eye(m_basis)
+    Minv = jnp.where(
+        live[:, None, None], jnp.linalg.inv(jnp.where(live[:, None, None], BtB + lam, eye)), 0.0
+    )
+    live_l = live[None, :, None]
+
+    def precond(r: Array) -> Array:
+        return jnp.einsum("jmn,ljn->ljm", Minv, r)
+
+    def dot(a: list[Array], b: list[Array]) -> list[Array]:
+        """Per-lane inner products, one ``(cs,)`` array per lane chunk."""
+        return [jnp.sum(x * y, axis=(1, 2)) for x, y in zip(a, b, strict=True)]
+
+    def safe(d: Array) -> Array:
+        return jnp.where(d == 0, 1.0, d)
+
+    solver = _get_gram_higher_solver(m_basis, ridge)
+    rhs = [jnp.where(live_l, rr, 0.0) for rr in rhs]
+    # Start from the independent per-term solution, stored as (cs, n2, m2).
+    # A dead block is swapped for the identity, so no near-singular solve runs.
+    BtB_live = jnp.where(live[:, None, None], BtB, eye)
+    x = [solver(BtB_live, r).transpose(0, 2, 1) for r in rhs]
+    Mx = sweep(x)
+    r = [
+        jnp.where(live_l, b - (m + lam_diag[None] * xx), 0.0)
+        for b, m, xx in zip(rhs, Mx, x, strict=True)
+    ]
+    z = [precond(rr) for rr in r]
+    # A zero right-hand side (a constant or padded lane) is already solved.
+    bnorm = [safe(jnp.sqrt(d)) for d in dot(rhs, rhs)]
+    eps = float(jnp.finfo(bnorm[0].dtype).eps)
+    tol = _pair_tol(eps)
+    # Only float32 stalls; in float64 a slow stretch is followed by progress.
+    stall = _PAIR_STALL if eps > 1e-10 else max_iter + 1
+
+    def rel_res(r: list[Array]) -> Array:
+        return jnp.max(
+            jnp.stack([jnp.max(jnp.sqrt(d) / b) for d, b in zip(dot(r, r), bnorm, strict=True)])
+        )
+
+    def cond(state: tuple) -> Array:
+        _, r, _, _, k, _, k_best = state
+        # Stop at the tolerance, at the step cap, or when the residual has not
+        # improved for _PAIR_STALL steps (float32 stalls above the tolerance).
+        return (rel_res(r) >= tol) & (k < max_iter) & (k - k_best < stall)
+
+    def body(state: tuple) -> tuple:
+        x, r, p, rz, k, best, k_best = state
+        Mp = sweep(p)
+        Ap = [m + lam_diag[None] * pp for m, pp in zip(Mp, p, strict=True)]
+        pAp = dot(p, Ap)
+        # A lane that has already converged is frozen: its residual is noise,
+        # and CG on noise can return a huge step.
+        active = [jnp.sqrt(d) / b >= tol for d, b in zip(dot(r, r), bnorm, strict=True)]
+        alpha = [jnp.where(on, a / safe(d), 0.0) for on, a, d in zip(active, rz, pAp, strict=True)]
+        x = [xx + al[:, None, None] * pp for xx, al, pp in zip(x, alpha, p, strict=True)]
+        r = [
+            jnp.where(live_l, rr - al[:, None, None] * a, 0.0)
+            for rr, al, a in zip(r, alpha, Ap, strict=True)
+        ]
+        z = [precond(rr) for rr in r]
+        rz_new = dot(r, z)
+        beta = [
+            jnp.where(on, n / safe(o), 0.0) for on, n, o in zip(active, rz_new, rz, strict=True)
+        ]
+        p = [zz + be[:, None, None] * pp for zz, be, pp in zip(z, beta, p, strict=True)]
+        rel_new = rel_res(r)
+        improved = rel_new < 0.99 * best
+        return (
+            x,
+            r,
+            p,
+            rz_new,
+            k + 1,
+            jnp.where(improved, rel_new, best),
+            jnp.where(improved, k + 1, k_best),
+        )
+
+    init = (x, r, z, dot(r, z), jnp.array(0), rel_res(r), jnp.array(0))
+    x, r, *_ = jax.lax.while_loop(cond, body, init)
+    return [xx.transpose(0, 2, 1) for xx in x], rel_res(r), tol
+
+
+def pair_solve_warning(rel: Array | None, max_iter: int) -> str | None:
+    """Return the warning text for a joint pair CG that did not converge.
+
+    Args:
+        rel: Worst relative residual, or ``None`` when no CG ran. A tracer
+            (under jit or vmap) has no value and gives no warning.
+        max_iter: The fit's ``max_iter``.
+
+    Returns:
+        The message, or ``None`` when there is nothing to warn about.
+    """
+    if rel is None or isinstance(rel, jax.core.Tracer):
+        return None
+    tol = _pair_tol(float(jnp.finfo(rel.dtype).eps))
+    if float(rel) < max(tol, _PAIR_WARN_REL):
+        return None
+    return (
+        f"jaxgsa.hdmr: the joint second-order solve stopped at relative "
+        f"residual {float(rel):.1e}, at the cap of "
+        f"{_PAIR_ITER_FACTOR * max_iter} steps (10 x max_iter) or after "
+        f"{_PAIR_STALL} steps without progress (float32). Raise ridge, "
+        "use float64, or raise max_iter."
+    )
+
+
+@lru_cache(maxsize=32)
+def _get_pair_solve(m: int, b: int, n_row_batches: int, max_iter: int, ridge: float):
+    """Build and cache the jitted joint pair solve.
+
+    It is cached on its static settings, so a repeated call with the same
+    shapes compiles nothing.
+
+    Returns:
+        A jitted function ``(X_p, w, c2_idx, c3_idx, beta2, beta3, A, BtB,
+        rhs) -> (C2, rel, tol)`` where ``rhs`` and ``C2`` stack the lane
+        chunks on the leading axis.
+    """
+    build = _get_build_bases(m, True, False)
+    rows = [(i * b, i * b + b) for i in range(n_row_batches)]
+
+    @jax.jit
+    def solve(
+        X_p: Array,
+        w_full: Array,
+        c2_idx: Array,
+        c3_idx: Array,
+        beta2: Array,
+        beta3: Array,
+        A: Array,
+        BtB: Array,
+        rhs: Array,
+    ) -> tuple[Array, Array]:
+        C, rel, _ = _joint_pair_solve(
+            BtB,
+            list(rhs),
+            ridge=ridge,
+            max_iter=max_iter,
+            sweep=lambda cs_: _pair_normal_pass(
+                cs_, A, rows, X_p, w_full, build, c2_idx, c3_idx, beta2, beta3
+            ),
+        )
+        return jnp.stack(C), rel
+
+    return solve
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +656,36 @@ def _get_build_bases(m: int, order2: bool, order3: bool):
     return build
 
 
+def _walk_term_blocks(
+    n_t: int,
+    tb: int,
+    init: Any,
+    step: Callable[[Array, Array, Any], Any],
+) -> Any:
+    """Fold ``step`` over the terms in blocks of ``tb``, counting each term once.
+
+    The last block is clamped to end at ``n_t``, so it shares terms with the
+    previous block. ``step`` gets a mask for the terms that are new.
+
+    Args:
+        n_t: Number of terms, at least 1.
+        tb: Block size, at most ``n_t``.
+        init: Initial carry.
+        step: ``(start, valid, carry) -> carry``, where ``start`` is the first
+            term of the block and ``valid`` is a boolean mask of shape
+            ``(tb,)`` for the terms not already seen.
+
+    Returns:
+        The final carry.
+    """
+
+    def body(i: Array, carry: Any) -> Any:
+        start = jnp.minimum(i * tb, n_t - tb)
+        return step(start, start + jnp.arange(tb) >= i * tb, carry)
+
+    return jax.lax.fori_loop(0, -(-n_t // tb), body, init)
+
+
 @jax.jit
 def _acc_gram(B_b: Array, BtB: Array, colsum: Array) -> tuple[Array, Array]:
     """Accumulate one basis' per-term Gram block and column sums.
@@ -324,7 +701,22 @@ def _acc_gram(B_b: Array, BtB: Array, colsum: Array) -> tuple[Array, Array]:
     Returns:
         The updated ``(BtB, colsum)``.
     """
-    return BtB + jnp.einsum("rmj,rnj->jmn", B_b, B_b), colsum + jnp.sum(B_b, axis=0)
+    n_t = B_b.shape[2]
+    if n_t == 0:
+        return BtB, colsum + jnp.sum(B_b, axis=0)
+    tb = min(n_t, _STATS_TERM_BLOCK)
+
+    # A single einsum copies B_b twice to bring the term axis to the front. A
+    # loop over term blocks copies one small block at a time instead.
+    def step(start: Array, valid: Array, G: Array) -> Array:
+        blk = jax.lax.dynamic_slice_in_dim(B_b, start, tb, axis=2)
+        cur = jax.lax.dynamic_slice_in_dim(G, start, tb, axis=0)
+        upd = jnp.where(
+            valid[:, None, None], cur + jnp.einsum("rmj,rnj->jmn", blk, blk).astype(G.dtype), cur
+        )
+        return jax.lax.dynamic_update_slice_in_dim(G, upd, start, 0)
+
+    return _walk_term_blocks(n_t, tb, BtB, step), colsum + jnp.sum(B_b, axis=0)
 
 
 @jax.jit
@@ -346,6 +738,349 @@ def _acc_cross_gram1(B1_b: Array, G1: Array, colsum1: Array) -> tuple[Array, Arr
         G1 + jnp.einsum("rmj,rnk->jmkn", B1_b, B1_b),
         colsum1 + jnp.sum(B1_b, axis=0),
     )
+
+
+@jax.jit
+def _acc_cross_gram12(B1_b: Array, B2_b: Array, G12: Array) -> Array:
+    """Accumulate the cross-Gram between the flat first-order basis and B2.
+
+    Args:
+        B1_b: Masked first-order basis, shape ``(b, m1, n1)``.
+        B2_b: Second-order basis, shape ``(b, m2, n2)``.
+        G12: Running cross-Gram, shape ``(P, m2, n2)`` with ``P = m1 * n1``.
+
+    Returns:
+        The updated ``G12``.
+    """
+    return G12 + jnp.einsum("rp,rmj->pmj", B1_b.reshape(B1_b.shape[0], -1), B2_b)
+
+
+@jax.jit
+def _acc_gram22(B2_b: Array, G22: Array) -> Array:
+    """Accumulate the full pair Gram over all pairs, one row batch.
+
+    Args:
+        B2_b: Second-order basis, shape ``(b, m2, n2)``.
+        G22: Running Gram, shape ``(K, K)`` with ``K = n2 * m2`` in the flat
+            pair layout ``k = j * m2 + m``.
+
+    Returns:
+        The updated ``G22``.
+    """
+    B2f = B2_b.transpose(0, 2, 1).reshape(B2_b.shape[0], -1)
+    return G22 + B2f.T @ B2f
+
+
+def _pair_solver(N: int, L: int, n2: int, m2: int, itemsize: int) -> str:
+    """Choose how to solve the projected pair system.
+
+    ``"dense"`` solves the ``K x K`` normal equations, ``K = n2 * m2``.
+    ``"dual"`` solves the same ridge problem as an ``N x N`` system in sample
+    space, which is smaller when there are more pair coefficients than rows.
+    Both give the exact ridge solution, so the smaller one is used when it fits
+    the memory budget: about three ``K x K`` arrays for ``"dense"``; two
+    ``N x N`` arrays (the projected kernel and its factor) plus the ``N x L``
+    residual and weights for ``"dual"``. ``"cg"`` is
+    the matrix-free fallback.
+
+    Direct solves run only in float64. In float32 an underdetermined pair
+    system (more free coefficients than rows) makes them unstable: measured at
+    D = 15, N = 1024, test NRMSE 1.7 against 0.17 with CG, which stops early
+    and so regularizes.
+
+    Args:
+        N: Number of rows.
+        L: Number of output lanes, padded.
+        n2: Number of pair terms.
+        m2: Pair basis size.
+        itemsize: Bytes per element of the working dtype.
+
+    Returns:
+        ``"dense"``, ``"dual"`` or ``"cg"``.
+    """
+    if itemsize < 8:
+        return "cg"
+    K = n2 * m2
+    budget = get_memory_budget()
+    dense_ok = 3 * K * K * itemsize <= budget
+    # 10 % margin for the tile work and the tile padding.
+    dual_ok = 1.1 * (2 * N * N + 2 * N * L) * itemsize <= budget
+    if dual_ok and (N < K or not dense_ok):
+        return "dual"
+    return "dense" if dense_ok else "cg"
+
+
+@jax.jit
+def _residual1(
+    B1_b: Array, C1_c: Array, Y_bc: Array, w: Array, shift_c: Array, mean_z_c: Array
+) -> Array:
+    """Return the first-order residual ``Y - f0 - B1 C1`` for one block.
+
+    Args:
+        B1_b: Masked first-order basis, shape ``(b, m1, n1)``.
+        C1_c: First-order coefficients, shape ``(cs, m1, n1)``.
+        Y_bc: This block of Y, shape ``(b, cs)``.
+        w: Row mask, shape ``(b,)``.
+        shift_c: The first row of Y for these lanes, shape ``(cs,)``.
+        mean_z_c: Mean of the shifted response per lane, shape ``(cs,)``.
+
+    Returns:
+        The residual, shape ``(b, cs)``, zero on padded rows.
+    """
+    Y_res = (Y_bc - shift_c[None, :]) - mean_z_c[None, :]
+    return (Y_res - jnp.einsum("rmj,lmj->rl", B1_b, C1_c)) * w[:, None]
+
+
+@jax.jit
+def _pair_kernel_rows(B1_t: Array, B1: Array, inv_lam: Array) -> Array:
+    """Rows of the pair kernel ``sum_p (G_i o G_j) / lam_p``.
+
+    A pair basis is the tensor product of two first-order bases, so its row
+    Gram is the elementwise product of theirs: ``B2_p B2_p^T = G_i o G_j``
+    with ``G_i = B1_i B1_i^T``. The ``N x K`` pair basis is never built.
+
+    Args:
+        B1_t: First-order basis of these rows, shape ``(t, m1, n1)``.
+        B1: First-order basis of all rows, shape ``(N, m1, n1)``.
+        inv_lam: ``1 / lam_p`` on the upper triangle, zero elsewhere,
+            shape ``(n1, n1)``.
+
+    Returns:
+        The kernel rows, shape ``(t, N)``.
+    """
+    G = jnp.einsum("tmi,nmi->itn", B1_t, B1)
+    # Two steps, so no (n1, n1, t, N) intermediate is ever formed.
+    H = jnp.einsum("ij,jtn->itn", inv_lam, G)
+    return jnp.sum(G * H, axis=0)
+
+
+@functools.partial(jax.jit, static_argnames=("t",))
+def _dual_pair_weights(B1: Array, inv_lam: Array, U: Array, Y_res: Array, t: int) -> Array:
+    """Return ``P1 (P1 K2 P1 + I)^-1 y`` for every lane.
+
+    ``K2`` is the pair kernel of :func:`_pair_kernel_rows` and
+    ``P1 = I - U U^T`` removes the first-order span. The projected kernel is
+    written tile by tile into one ``N x N`` buffer, so the unprojected kernel
+    is never held: peak memory is that buffer plus its Cholesky factor.
+
+    Args:
+        B1: First-order basis of the real rows, shape ``(N, m1, n1)``.
+        inv_lam: ``1 / lam_p`` on the upper triangle, shape ``(n1, n1)``.
+        U: Orthonormal basis of the first-order span, shape ``(N, r)``.
+        Y_res: First-order residuals, shape ``(N, L)``.
+        t: Kernel rows per tile.
+
+    Returns:
+        The sample-space weights, shape ``(N, L)``.
+    """
+    N = B1.shape[0]
+    n_tiles = -(-N // t)
+    Np = n_tiles * t
+    # Padded rows have a zero basis, so their kernel rows and columns are zero
+    # and the identity decouples them; their residual is zero too.
+    B1p, Up, Yp = (pad_rows(A, Np - N) for A in (B1, U, Y_res))
+
+    def rows(i: Array) -> Array:
+        return _pair_kernel_rows(jax.lax.dynamic_slice_in_dim(B1p, i * t, t), B1p, inv_lam)
+
+    def ku_tile(i: Array, KU: Array) -> Array:
+        return jax.lax.dynamic_update_slice_in_dim(KU, rows(i) @ Up, i * t, axis=0)
+
+    KU = jax.lax.fori_loop(0, n_tiles, ku_tile, jnp.zeros_like(Up))
+    # P1 K2 P1 = K2 - Z U^T - U Z^T with Z = K2 U - U (U^T K2 U) / 2.
+    Z = KU - 0.5 * Up @ (Up.T @ KU)
+    diag = jnp.arange(t)
+
+    def kp_tile(i: Array, Kp: Array) -> Array:
+        Zi = jax.lax.dynamic_slice_in_dim(Z, i * t, t)
+        Ui = jax.lax.dynamic_slice_in_dim(Up, i * t, t)
+        blk = rows(i) - Zi @ Up.T - Ui @ Z.T
+        blk = blk.at[diag, i * t + diag].add(1.0)
+        return jax.lax.dynamic_update_slice_in_dim(Kp, blk, i * t, axis=0)
+
+    Kp = jax.lax.fori_loop(0, n_tiles, kp_tile, jnp.zeros((Np, Np), dtype=B1.dtype))
+    Lc = jnp.linalg.cholesky(Kp, symmetrize_input=False)
+    a = jax.scipy.linalg.solve_triangular(Lc, Yp, lower=True)
+    a = jax.scipy.linalg.solve_triangular(Lc, a, lower=True, trans=1)
+    return (a - Up @ (Up.T @ a))[:N]
+
+
+@jax.jit
+def _acc_pair_dual(B2_b: Array, a_b: Array, acc: Array) -> Array:
+    """Accumulate ``B2^T a`` for one row batch.
+
+    Args:
+        B2_b: Second-order basis, shape ``(b, m2, n2)``.
+        a_b: Sample-space weights of these rows, shape ``(b, L)``.
+        acc: Running product, shape ``(L, n2, m2)``.
+
+    Returns:
+        The updated product.
+    """
+    return acc + jnp.einsum("rmj,rl->ljm", B2_b, a_b)
+
+
+def _dual_pair_solve(
+    G1_flat: Array,
+    BtB: Array,
+    Y_res: Array,
+    X_p: Array,
+    w_full: Array,
+    rows: list[tuple[int, int]],
+    basis_args: tuple[int, Array, Array, Array, Array],
+    n_chunks: int,
+    cs: int,
+    ridge: float,
+) -> Array:
+    """Solve all pair terms jointly in sample space.
+
+    With ``Bt = P1 B2`` the projected pair basis and ``Lam`` the per-term
+    ridge, the pair coefficients are ``(Bt^T Bt + Lam)^-1 Bt^T y``. The
+    identity ``(B^T B + Lam)^-1 B^T = Lam^-1 B^T (B Lam^-1 B^T + I)^-1``
+    turns this into one ``N x N`` system, factored once for every lane. It is
+    the exact ridge solution, the same as :func:`_dense_pair_solve`, and is
+    smaller whenever there are more pair coefficients than rows.
+
+    Args:
+        G1_flat: Flat first-order Gram, shape ``(P, P)``.
+        BtB: Projected per-term Gram blocks, ``(n2, m2, m2)``, for the ridge
+            scale.
+        Y_res: First-order residuals of the real rows, shape ``(N, L)``.
+        X_p: Padded inputs, shape ``(N_pad, D)``.
+        w_full: Row mask, shape ``(N_pad,)``.
+        rows: Row batch bounds.
+        basis_args: ``(n_intervals, c2_idx, c3_idx, beta2, beta3)``.
+        n_chunks: Number of lane chunks.
+        cs: Lanes per chunk.
+        ridge: Relative ridge.
+
+    Returns:
+        The pair coefficients, ``(n_chunks, cs, m2, n2)``.
+    """
+    n_intervals, c2_idx, c3_idx, beta2, beta3 = basis_args
+    N = Y_res.shape[0]
+    n2, m2, _ = BtB.shape
+    build1 = _get_build_bases(n_intervals, False, False)
+    B1 = jnp.concatenate(
+        [build1(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)[0] for lo, hi in rows]
+    )[:N]
+    n1 = B1.shape[2]
+
+    # Orthonormal basis of the first-order span, with the eigenvalue cut of
+    # _first_order_pinv; a dropped direction gets a zero column.
+    w, V, keep = _eigen_cut(G1_flat)
+    U = B1.reshape(N, -1) @ (V * jnp.where(keep, 1.0 / jnp.sqrt(jnp.where(keep, w, 1.0)), 0.0))
+
+    # A dead pair would make 1 / lam huge and the kernel indefinite, so the
+    # Cholesky factor of every lane turns NaN. Drop it (see _live_pairs).
+    lam, live = _live_pairs(BtB, ridge)  # (n2,)
+    inv = jnp.where(live, 1.0 / jnp.where(live, lam, 1.0), 0.0)
+    inv_lam = jnp.zeros((n1, n1), dtype=B1.dtype).at[c2_idx[:, 0], c2_idx[:, 1]].set(inv)
+    itemsize = jnp.dtype(B1.dtype).itemsize
+    # Even tiles, so the padded kernel stays close to N x N.
+    n_tiles = -(-N // max(1, min(N, get_memory_budget() // (8 * n1 * N * itemsize))))
+    t = -(-N // n_tiles)
+    a = pad_rows(_dual_pair_weights(B1, inv_lam, U, Y_res, t), X_p.shape[0] - N)
+
+    build2 = _get_build_bases(n_intervals, True, False)
+    acc = jnp.zeros((a.shape[1], n2, m2), dtype=B1.dtype)
+    for lo, hi in rows:
+        B2_b = build2(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)[1]
+        acc = _acc_pair_dual(B2_b, a[lo:hi], acc)
+    C2 = acc * inv[None, :, None]
+    return C2.reshape(n_chunks, cs, n2, m2).transpose(0, 1, 3, 2)
+
+
+@jax.jit
+def _dense_pair_solve(
+    G22: Array, G12: Array, A: Array, BtB: Array, rhs: Array, ridge: Array
+) -> Array:
+    """Solve all pair terms jointly by one direct solve.
+
+    The projected pair Gram is ``G22 - G12^T A`` (the Schur complement of the
+    first-order block). It is formed once and solved for every lane, which is
+    far cheaper than conjugate gradients whenever ``n2 * m2`` is moderate:
+    each CG step is a full pass over the rows, and the projected normal
+    matrix is ill-conditioned, so CG needs hundreds of steps and stalls in
+    float32.
+
+    Args:
+        G22: Full pair Gram, ``(K, K)``, flat layout ``k = j * m2 + m``.
+        G12: First-order to pair cross-Gram, ``(P, m2, n2)``.
+        A: Projection of the pair basis onto the first-order space,
+            ``(P, m2, n2)``.
+        BtB: Projected per-term Gram blocks, ``(n2, m2, m2)``, for the ridge
+            scale.
+        rhs: Right-hand sides, ``(n_chunks, cs, n2, m2)``.
+        ridge: Relative ridge, a scalar.
+
+    Returns:
+        The pair coefficients, ``(n_chunks, cs, m2, n2)``.
+    """
+    n_chunks, cs, n2, m2 = rhs.shape
+    K = n2 * m2
+    A_f = A.transpose(0, 2, 1).reshape(A.shape[0], K)
+    G12_f = G12.transpose(0, 2, 1).reshape(G12.shape[0], K)
+    Gt = G22 - G12_f.T @ A_f
+    Gt = (Gt + Gt.T) / 2
+    lam, live = _live_pairs(BtB, ridge)  # (n2,)
+    # A dead pair keeps an identity block and a zero right-hand side, so its
+    # coefficients are zero and it cannot reach the live pairs.
+    live_flat = jnp.repeat(live, m2)
+    lam_flat = jnp.repeat(jnp.where(live, lam, 1.0), m2)
+    mask = live_flat[:, None] & live_flat[None, :]
+    rhs_flat = jnp.where(live_flat[:, None], rhs.reshape(n_chunks * cs, K).T, 0.0)
+    sol = jnp.linalg.solve(jnp.where(mask, Gt, 0.0) + jnp.diag(lam_flat), rhs_flat)
+    return sol.T.reshape(n_chunks, cs, n2, m2).transpose(0, 1, 3, 2)
+
+
+@jax.jit
+def _acc_pair_normal(
+    B1_b: Array,
+    B2_b: Array,
+    c: Array,
+    v: Array,
+    acc: tuple[Array, Array],
+) -> tuple[Array, Array]:
+    """Accumulate ``Bt^T Bt c`` for the projected pair basis, one row batch.
+
+    With ``Bt = B2 - B1 A`` the product is formed without ever building
+    ``Bt``: ``t = B2 c - B1 (A c)`` per row, then ``Bt^T t = B2^T t -
+    A^T (B1^T t)``. The second part is left to the caller, which holds ``A``.
+
+    Args:
+        B1_b: Masked first-order basis, shape ``(b, m1, n1)``.
+        B2_b: Second-order basis, shape ``(b, m2, n2)``.
+        c: Pair coefficients, shape ``(cs, n2, m2)``.
+        v: ``A c``, shape ``(cs, P)``.
+        acc: Running ``(B1^T t, B2^T t)``, shapes ``(cs, P)`` and
+            ``(cs, n2, m2)``.
+
+    Returns:
+        The updated accumulators.
+    """
+    B1f = B1_b.reshape(B1_b.shape[0], -1)
+    t = jnp.einsum("rmj,ljm->rl", B2_b, c) - B1f @ v.T
+    g1, g2 = acc
+    return g1 + jnp.einsum("rp,rl->lp", B1f, t), g2 + jnp.einsum("rmj,rl->ljm", B2_b, t)
+
+
+@jax.jit
+def _project_pair_basis(B_all: list[Array], A: Array) -> list[Array]:
+    """Replace ``B2`` by ``B2 - B1 A``, which holds no first-order function.
+
+    It is lane-independent, so it is built once per row batch.
+
+    Args:
+        B_all: Bases ``[B1, B2, ...]`` for one row batch.
+        A: Projection of ``B2`` onto the first-order space, ``(P, m2, n2)``.
+
+    Returns:
+        The same list with ``B2`` projected.
+    """
+    B1f = B_all[0].reshape(B_all[0].shape[0], -1)
+    Bt = B_all[1] - jnp.einsum("rp,pmj->rmj", B1f, A)
+    return [B_all[0], Bt, *B_all[2:]]
 
 
 @jax.jit
@@ -419,9 +1154,120 @@ def _acc_higher_moment(
     return BtY + jnp.einsum("rmj,rl->ljm", B_new, Y_res)
 
 
-@lru_cache(maxsize=32)
-def _get_stats_step(n1: int, n2: int):
+def _stats_step_whole(
+    B_list: list[Array],
+    C_list: list[Array],
+    Y_bc: Array,
+    w: Array,
+    shift_c: Array,
+    mean_z_c: Array,
+    mean_f_c: Array,
+    mean_y0m_c: Array,
+    acc: tuple[Array, Array, Array, Array, Array, Array, Array],
+) -> tuple[Array, Array, Array, Array, Array, Array, Array]:
+    """Fold one block into the statistics with ``F`` held whole.
+
+    Same maths as the blocked step. It forms the ``(b, cs, n)`` contributions
+    once, which is fastest but needs about ``3 * b * cs * n`` elements.
+
+    Args:
+        B_list: Bases per order, each ``(b, m_k, n_k)``.
+        C_list: Coefficients per order, each ``(cs, m_k, n_k)``.
+        Y_bc: Outputs, shape ``(b, cs)``.
+        w: Row mask, shape ``(b,)``.
+        shift_c: Per-lane shift, shape ``(cs,)``.
+        mean_z_c: Per-lane mean of the shifted output, shape ``(cs,)``.
+        mean_f_c: Term means, shape ``(cs, n)``.
+        mean_y0m_c: Means of the leave-one-out sums, shape ``(cs, n)``.
+        acc: Running accumulators.
+
+    Returns:
+        The updated accumulators.
+    """
+    acc_var_f, acc_cov_fy, acc_cov_fy0m, acc_ssr, acc_cross, acc_fsq, acc_res2 = acc
+    n1 = B_list[0].shape[2]
+    n2 = B_list[1].shape[2] if len(B_list) > 1 else 0
+    F = jnp.concatenate(
+        [jnp.einsum("rmj,lmj->rlj", B, C) for B, C in zip(B_list, C_list, strict=True)],
+        axis=2,
+    )  # (b, cs, n)
+    fc = (F - mean_f_c[None]) * w[:, None, None]
+    acc_var_f = acc_var_f + jnp.sum(fc * fc, axis=0)
+    y0 = jnp.sum(F, axis=2)
+    y0_w = y0 * w[:, None]
+    acc_cov_fy = acc_cov_fy + jnp.sum(fc * y0_w[:, :, None], axis=0)
+    y0m_c = (y0[:, :, None] - F) - mean_y0m_c[None]  # leave-one-out sums
+    acc_cov_fy0m = acc_cov_fy0m + jnp.sum(fc * y0m_c, axis=0)
+    r0 = ((Y_bc - shift_c[None, :]) - mean_z_c[None, :]) * w[:, None]
+    r1 = r0 - jnp.sum(F[:, :, :n1], axis=2)
+    r2 = r1 - jnp.sum(F[:, :, n1 : n1 + n2], axis=2)
+    acc_ssr = acc_ssr + jnp.stack(
+        [jnp.sum(r0 * r0, axis=0), jnp.sum(r1 * r1, axis=0), jnp.sum(r2 * r2, axis=0)],
+        axis=1,
+    )
+    acc_cross = acc_cross + jnp.concatenate(
+        [
+            jnp.sum(r0[:, :, None] * F[:, :, :n1], axis=0),
+            jnp.sum(r1[:, :, None] * F[:, :, n1 : n1 + n2], axis=0),
+            jnp.sum(r2[:, :, None] * F[:, :, n1 + n2 :], axis=0),
+        ],
+        axis=1,
+    )
+    acc_fsq = acc_fsq + jnp.sum(F * F, axis=0)
+    r_pred = r0 - y0
+    acc_res2 = acc_res2 + jnp.sum(r_pred * r_pred, axis=0)
+    return acc_var_f, acc_cov_fy, acc_cov_fy0m, acc_ssr, acc_cross, acc_fsq, acc_res2
+
+
+def _block_sum(B: Array, C: Array, b: int, cs: int, dtype: jnp.dtype) -> Array:
+    """Sum the per-term contributions of one order, ``sum_j B_j C_j``.
+
+    One matrix product over all terms would copy ``B`` into a flat layout. A
+    loop over term blocks copies only one block at a time.
+
+    Args:
+        B: Basis, shape ``(b, m, n_k)``.
+        C: Coefficients, shape ``(cs, m, n_k)``.
+        b: Rows in the batch.
+        cs: Lanes in the chunk.
+        dtype: Accumulator dtype.
+
+    Returns:
+        The summed contribution, shape ``(b, cs)``.
+    """
+    n_k = B.shape[2]
+    if n_k == 0:
+        return jnp.zeros((b, cs), dtype=dtype)
+    tb = min(n_k, _STATS_TERM_BLOCK)
+
+    def step(start: Array, valid: Array, total: Array) -> Array:
+        B_blk = jax.lax.dynamic_slice_in_dim(B, start, tb, axis=2)
+        C_blk = jnp.where(valid, jax.lax.dynamic_slice_in_dim(C, start, tb, axis=2), 0)
+        return total + jnp.einsum("rmj,lmj->rl", B_blk, C_blk).astype(dtype)
+
+    return _walk_term_blocks(n_k, tb, jnp.zeros((b, cs), dtype=dtype), step)
+
+
+@lru_cache(maxsize=2)
+def _get_stats_step(blocked: bool):
     """Build and cache the final-pass reduction for one (row batch, chunk).
+
+    The per-term contributions ``F`` have shape ``(b, cs, n)``, which is the
+    largest tensor of the fit. XLA would also materialise two more tensors of
+    that size (the centred ``F`` and a broadcast row weight), so the step
+    never forms ``F`` whole. It first gets the per-order sums with plain
+    matrix products, then walks the terms of each order in blocks of at most
+    ``_STATS_TERM_BLOCK`` and folds each block into the accumulators. Only one
+    block's temporaries are live at a time.
+
+    The blocked path computes each term's contribution twice (once for the
+    order sums, once in the block loop), so it is slower. ``blocked=False``
+    keeps the single-pass path, which is right whenever the whole
+    ``(b, cs, n)`` working set fits the memory budget. The caller picks the
+    path; it is part of the cache key.
+
+    Args:
+        blocked: Whether to walk the terms in blocks.
 
     Returns:
         A jitted function that folds one block into the ANCOVA covariances,
@@ -441,12 +1287,20 @@ def _get_stats_step(n1: int, n2: int):
         mean_y0m_c: Array,
         acc: tuple[Array, Array, Array, Array, Array, Array, Array],
     ) -> tuple[Array, Array, Array, Array, Array, Array, Array]:
+        if not blocked:
+            return _stats_step_whole(
+                B_list, C_list, Y_bc, w, shift_c, mean_z_c, mean_f_c, mean_y0m_c, acc
+            )
         acc_var_f, acc_cov_fy, acc_cov_fy0m, acc_ssr, acc_cross, acc_fsq, acc_res2 = acc
-        # Per-term contributions f_j = B_j C_j, all orders side by side.
-        F = jnp.concatenate(
-            [jnp.einsum("rmj,lmj->rlj", B, C) for B, C in zip(B_list, C_list, strict=True)],
-            axis=2,
-        )  # (b, cs, n)
+        b, cs = Y_bc.shape
+        # The loops carry fixed dtypes, so promote once up front.
+        dtype = jnp.result_type(*B_list, *C_list, Y_bc, w, mean_f_c, mean_y0m_c)
+
+        # Per-order sums of the term contributions, sum_j f_j, with no F.
+        zero = jnp.zeros((b, cs), dtype=dtype)
+        sums = [_block_sum(B, C, b, cs, dtype) for B, C in zip(B_list, C_list, strict=True)]
+        sums = [*sums, zero, zero][:3]
+        y0 = sums[0] + sums[1] + sums[2]  # total emulator, sans f0 (= f_hat - f0)
 
         # ANCOVA (Li et al., 2010). Sa = Var(f_j)/Var(Y) is the structural
         # share, Sb = Cov(f_j, sum_{k != j} f_k)/Var(Y) the correlative
@@ -459,38 +1313,83 @@ def _get_stats_step(n1: int, n2: int):
         # measures S against Y instead, which leaves a gap of
         # Cov(f_j, Y - f_hat)/Var(Y) that does not cancel under correlated
         # inputs. With independent inputs Sb -> 0 and S -> Sa either way.
-        fc = (F - mean_f_c[None]) * w[:, None, None]
-        acc_var_f = acc_var_f + jnp.sum(fc * fc, axis=0)
-
-        y0 = jnp.sum(F, axis=2)  # (b, cs) total emulator, sans f0 (= f_hat - f0)
-        y0_w = y0 * w[:, None]
-        acc_cov_fy = acc_cov_fy + jnp.sum(fc * y0_w[:, :, None], axis=0)
-
-        y0m_c = (y0[:, :, None] - F) - mean_y0m_c[None]  # leave-one-out sums
-        acc_cov_fy0m = acc_cov_fy0m + jnp.sum(fc * y0m_c, axis=0)
+        w2 = w * w
+        w2_ = w2[None, :, None]
+        y0_w2 = y0 * w2[:, None]
 
         r0 = ((Y_bc - shift_c[None, :]) - mean_z_c[None, :]) * w[:, None]  # Y - f0
-
         # F-test for incremental model selection (Li et al., 2002). The null
         # model for a term of order k holds every term of order < k, so the
         # residuals are hierarchical.
-        r1 = r0 - jnp.sum(F[:, :, :n1], axis=2)
-        r2 = r1 - jnp.sum(F[:, :, n1 : n1 + n2], axis=2)
+        r1 = r0 - sums[0]
+        r2 = r1 - sums[1]
+        r_null = [r0, r1, r2]
+
+        outs: list[list[Array]] = [[], [], [], [], []]
+        off = 0
+        for k, (B, C) in enumerate(zip(B_list, C_list, strict=True)):
+            n_k = B.shape[2]
+            if n_k == 0:
+                for lst in outs:
+                    lst.append(jnp.zeros((0, cs), dtype=dtype))
+                continue
+            tb = min(n_k, _STATS_TERM_BLOCK)
+            r_k = r_null[k][None]
+
+            def body(
+                start: Array,
+                valid: Array,
+                carry: tuple[Array, ...],
+                B: Array = B,
+                C: Array = C,
+                off: int = off,
+                tb: int = tb,
+                r_k: Array = r_k,
+            ) -> tuple[Array, ...]:
+                B_blk = jax.lax.dynamic_slice_in_dim(B, start, tb, axis=2)
+                C_blk = jax.lax.dynamic_slice_in_dim(C, start, tb, axis=2)
+                mf = jax.lax.dynamic_slice_in_dim(mean_f_c, off + start, tb, axis=1)
+                my = jax.lax.dynamic_slice_in_dim(mean_y0m_c, off + start, tb, axis=1)
+                Fk = jnp.einsum("rmj,lmj->jrl", B_blk, C_blk)  # (tb, b, cs)
+                fcn = Fk - mf.T[:, None, :]
+                y0m_c = (y0[None] - Fk) - my.T[:, None, :]
+                vals = (
+                    jnp.sum(fcn * fcn * w2_, axis=1),
+                    jnp.sum(fcn * y0_w2[None], axis=1),
+                    jnp.sum(fcn * (y0m_c * w2_), axis=1),
+                    # sum r_null * f_i, each term against its own null residual.
+                    jnp.sum(r_k * Fk, axis=1),
+                    jnp.sum(Fk * Fk, axis=1),
+                )
+                new = []
+                for acc_k, v in zip(carry, vals, strict=True):
+                    cur = jax.lax.dynamic_slice_in_dim(acc_k, start, tb, axis=0)
+                    new.append(
+                        jax.lax.dynamic_update_slice_in_dim(
+                            acc_k,
+                            jnp.where(valid[:, None], cur + v.astype(acc_k.dtype), cur),
+                            start,
+                            0,
+                        )
+                    )
+                return tuple(new)
+
+            init = tuple(jnp.zeros((n_k, cs), dtype=dtype) for _ in range(5))
+            res = _walk_term_blocks(n_k, tb, init, body)
+            for lst, r in zip(outs, res, strict=True):
+                lst.append(r)
+            off += n_k
+
+        # Each is (n, cs) after joining the orders; return to (cs, n).
+        acc_var_f = acc_var_f + jnp.concatenate(outs[0], axis=0).T
+        acc_cov_fy = acc_cov_fy + jnp.concatenate(outs[1], axis=0).T
+        acc_cov_fy0m = acc_cov_fy0m + jnp.concatenate(outs[2], axis=0).T
+        acc_cross = acc_cross + jnp.concatenate(outs[3], axis=0).T
+        acc_fsq = acc_fsq + jnp.concatenate(outs[4], axis=0).T
         acc_ssr = acc_ssr + jnp.stack(
             [jnp.sum(r0 * r0, axis=0), jnp.sum(r1 * r1, axis=0), jnp.sum(r2 * r2, axis=0)],
             axis=1,
         )
-        # sum r_null * f_i, each term against its own null residual.
-        acc_cross = acc_cross + jnp.concatenate(
-            [
-                jnp.sum(r0[:, :, None] * F[:, :, :n1], axis=0),
-                jnp.sum(r1[:, :, None] * F[:, :, n1 : n1 + n2], axis=0),
-                jnp.sum(r2[:, :, None] * F[:, :, n1 + n2 :], axis=0),
-            ],
-            axis=1,
-        )
-        acc_fsq = acc_fsq + jnp.sum(F * F, axis=0)
-
         r_pred = r0 - y0  # full-model residual Y - (f0 + sum f_j)
         acc_res2 = acc_res2 + jnp.sum(r_pred * r_pred, axis=0)
         return acc_var_f, acc_cov_fy, acc_cov_fy0m, acc_ssr, acc_cross, acc_fsq, acc_res2
@@ -589,6 +1488,8 @@ class _FitHDMR(NamedTuple):
         f0: Grand mean per slice, shape ``(L,)``.
         streamed: Whether the sample axis was actually split into row
             batches.
+        pair_rel: Worst relative residual of the joint pair CG, or ``None``
+            when a direct solve ran. A tracer under jit or vmap.
     """
 
     Sa: Array
@@ -602,6 +1503,7 @@ class _FitHDMR(NamedTuple):
     C3: Array | None
     f0: Array
     streamed: bool
+    pair_rel: Array | None = None
 
 
 def _fit_hdmr(
@@ -684,10 +1586,11 @@ def _fit_hdmr(
     b = resolve_batch_size(
         _fit_bytes_per_row(D, m1, m2, m3, n2, n3, n, L, itemsize), N, batch_size
     )
-    cs = _resolve_slice_chunk_size(slice_chunk_size, L, b, slice_bytes)
-
     order2 = order >= 2 and n2 > 0
     order3 = order >= 3 and n3 > 0
+    # Pair solver state per lane: rhs, x, r, z, p and the matrix-vector product.
+    lane_fixed = 6 * n2 * m2 * itemsize if order2 else 0
+    cs = _resolve_slice_chunk_size(slice_chunk_size, L, b, slice_bytes, lane_fixed)
 
     # Pad both axes so each jitted step compiles once. A padded row is masked
     # to zero in every accumulator; a padded lane is an independent constant
@@ -733,20 +1636,34 @@ def _fit_hdmr(
     diag = jnp.arange(n1)
     G1_diag = G1[diag, :, diag, :]  # (n1, m1, m1)
     backfit = _get_gram_backfit(m1, n1, max_iter, ridge)
-    C1_chunks = [
-        backfit(G1, G1_diag, carry1[j][0] - mean_z[s:e, None, None] * colsum1.T[None])
-        for j, (s, e) in enumerate(lanes)
-    ]  # each (cs, m1, n1)
+    b1res_chunks = [
+        carry1[j][0] - mean_z[s:e, None, None] * colsum1.T[None] for j, (s, e) in enumerate(lanes)
+    ]  # each (cs, n1, m1)
+    C1_chunks = [backfit(G1, G1_diag, b1res) for b1res in b1res_chunks]  # each (cs, m1, n1)
+    P = m1 * n1
+    # Flat first-order index p = m * n1 + j, the layout of a (m1, n1) array.
+    G1_flat = G1.transpose(1, 0, 3, 2).reshape(P, P)
 
     # ---- Passes 2/3: higher orders on the exact sequential residual -------
     colsums = [colsum1]
-    coef_chunks = [C1_chunks]
+    coef_chunks = [C1_chunks]  # what the residuals and predict() use
+    stat_chunks = [C1_chunks]  # what the per-term statistics use
+    proj_A: Array | None = None
+    pair_rel: Array | None = None
     for term_order, (n_terms, m_basis) in enumerate(((n2, m2), (n3, m3)), start=2):
         if not (order2 if term_order == 2 else order3):
             break
         BtB = jnp.zeros((n_terms, m_basis, m_basis), dtype=dtype)
         colsum = jnp.zeros((m_basis, n_terms), dtype=dtype)
         BtY = [jnp.zeros((cs, n_terms, m_basis), dtype=dtype) for _ in lanes]
+        G12 = jnp.zeros((P, m_basis, n_terms), dtype=dtype)
+        kind = (
+            _pair_solver(N, n_chunks * cs, n_terms, m_basis, itemsize) if term_order == 2 else "cg"
+        )
+        dense = kind == "dense"
+        G22 = jnp.zeros((n_terms * m_basis,) * 2 if dense else (0, 0), dtype=dtype)
+        # The dual solve needs the first-order residual in sample space.
+        res_rows: list[Array] = []
         # Solving order ``k`` needs the bases up through order ``k`` to
         # reconstruct the exact sequential residual. Do not build a higher
         # order basis that this pass cannot consume.
@@ -755,6 +1672,27 @@ def _fit_hdmr(
             B_all = build_bases_order(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)
             B_new = B_all[term_order - 1]
             BtB, colsum = _acc_gram(B_new, BtB, colsum)
+            if term_order == 2:
+                G12 = _acc_cross_gram12(B_all[0], B_new, G12)
+                if dense:
+                    G22 = _acc_gram22(B_new, G22)
+                if kind == "dual":
+                    res_rows.append(
+                        jnp.concatenate(
+                            [
+                                _residual1(
+                                    B_all[0],
+                                    C1_chunks[j],
+                                    Y_p[lo:hi, s:e],
+                                    w_full[lo:hi],
+                                    shift[s:e],
+                                    mean_z[s:e],
+                                )
+                                for j, (s, e) in enumerate(lanes)
+                            ],
+                            axis=1,
+                        )
+                    )
             for j, (s, e) in enumerate(lanes):
                 BtY[j] = _acc_higher_moment(
                     B_new,
@@ -765,9 +1703,67 @@ def _fit_hdmr(
                     mean_z[s:e],
                     BtY[j],
                 )
-        solver = _get_gram_higher_solver(m_basis, ridge)
-        colsums.append(colsum)
-        coef_chunks.append([solver(BtB, BtY[j]) for j in range(n_chunks)])
+        # The projected pair blocks are rank-deficient by construction, so they
+        # need a ridge floor even when the caller asks for none.
+        term_ridge = (
+            max(ridge, math.sqrt(float(jnp.finfo(dtype).eps))) if term_order == 2 else ridge
+        )
+        solver = _get_gram_higher_solver(m_basis, term_ridge)
+        if term_order == 2:
+            # Project the pair basis off the first-order space, so a pair term
+            # holds only what no sum of 1-D functions can explain.
+            A = (_first_order_pinv(G1_flat) @ G12.reshape(P, -1)).reshape(G12.shape)
+            BtB = BtB - jnp.einsum("pmj,pnj->jmn", A, G12)
+            BtB = (BtB + BtB.transpose(0, 2, 1)) / 2
+            rhs = []
+            for j in range(n_chunks):
+                # B1^T of the first-order residual: not exactly zero, because
+                # the backfit stops early and the ridge shrinks.
+                r1 = b1res_chunks[j].transpose(0, 2, 1).reshape(cs, P) - (
+                    C1_chunks[j].reshape(cs, P) @ G1_flat
+                )
+                rhs.append(BtY[j] - jnp.einsum("pmj,lp->ljm", A, r1))
+            if dense:
+                C2_stack = _dense_pair_solve(
+                    G22, G12, A, BtB, jnp.stack(rhs), jnp.asarray(term_ridge, dtype=dtype)
+                )
+                rel = None
+            elif kind == "dual":
+                C2_stack = _dual_pair_solve(
+                    G1_flat,
+                    BtB,
+                    jnp.concatenate(res_rows)[:N],
+                    X_p,
+                    w_full,
+                    rows,
+                    (n_intervals, c2_idx, c3_idx, beta2, beta3),
+                    n_chunks,
+                    cs,
+                    term_ridge,
+                )
+                rel = None
+            else:
+                C2_stack, rel = _get_pair_solve(
+                    n_intervals, b, n_row_batches, _PAIR_ITER_FACTOR * max_iter, term_ridge
+                )(X_p, w_full, c2_idx, c3_idx, beta2, beta3, A, BtB, jnp.stack(rhs))
+            pair_rel = rel
+            C2_chunks = list(C2_stack)
+            C1_fold = []
+            for j in range(n_chunks):
+                shift_p = jnp.einsum("pmj,lmj->lp", A, C2_chunks[j])  # (cs, P)
+                C1_fold.append((C1_chunks[j].reshape(cs, P) - shift_p).reshape(cs, m1, n1))
+            # The pair terms are B2 C2 minus their projection: use the
+            # projected basis for the means and the stats pass.
+            colsum = colsum - jnp.einsum("p,pmj->mj", colsum1.reshape(P), A)
+            proj_A = A
+            coef_chunks = [C1_fold, C2_chunks]
+            stat_chunks = [C1_chunks, C2_chunks]
+            colsums.append(colsum)
+        else:
+            colsums.append(colsum)
+            C3_chunks = [solver(BtB, BtY[j]) for j in range(n_chunks)]
+            coef_chunks.append(C3_chunks)
+            stat_chunks.append(C3_chunks)
 
     # ---- Term means from column sums (no extra pass needed) ---------------
     # mean(f_j) = (1^T B_j C_j) / N.
@@ -775,7 +1771,7 @@ def _fit_hdmr(
         jnp.concatenate(
             [
                 jnp.einsum("mj,lmj->lj", cols, C[j]) / N
-                for cols, C in zip(colsums, coef_chunks, strict=True)
+                for cols, C in zip(colsums, stat_chunks, strict=True)
             ],
             axis=1,
         )
@@ -786,7 +1782,10 @@ def _fit_hdmr(
 
     # ---- Final pass: ANCOVA / F-test / RMSE reductions ---------------------
     build_bases_final = _get_build_bases(n_intervals, order2, order3)
-    stats_step = _get_stats_step(n1, n2)
+    # Hold F whole when the (row, lane, term) working set fits half the budget,
+    # since that is the faster path. Read the budget here, outside any jit.
+    blocked = b * cs * 3 * n * itemsize > get_memory_budget() // 2
+    stats_step = _get_stats_step(blocked)
     accs = [
         (
             jnp.zeros((cs, n), dtype=dtype),  # sum (f - mean_f)^2
@@ -801,10 +1800,12 @@ def _fit_hdmr(
     ]
     for lo, hi in rows:
         B_all = build_bases_final(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)
+        if proj_A is not None:
+            B_all = _project_pair_basis(B_all, proj_A)
         for j, (s, e) in enumerate(lanes):
             accs[j] = stats_step(
                 B_all,
-                [c[j] for c in coef_chunks],
+                [c[j] for c in stat_chunks],
                 Y_p[lo:hi, s:e],
                 w_full[lo:hi],
                 shift[s:e],
@@ -832,4 +1833,5 @@ def _fit_hdmr(
         C3=C[2] if order3 else None,
         f0=f0[:L],
         streamed=b < N,
+        pair_rel=pair_rel,
     )

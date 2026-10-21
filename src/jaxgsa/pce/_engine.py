@@ -1,9 +1,10 @@
 """Polynomial basis construction and evaluation for PCE.
 
 Each 1-D orthonormal basis is built from its three-term recurrence: Hermite
-for a Gaussian marginal, Legendre for a uniform marginal. The
-multi-dimensional basis is the tensor product of those 1-D families, selected
-by a multi-index set.
+for a Gaussian marginal, Legendre for a uniform marginal, and a recurrence
+computed for the measure itself (:class:`TruncatedFamily`) for a truncated
+Gaussian marginal. The multi-dimensional basis is the tensor product of those
+1-D families, selected by a multi-index set.
 """
 
 from __future__ import annotations
@@ -11,7 +12,9 @@ from __future__ import annotations
 from functools import lru_cache
 from itertools import combinations
 from math import comb, factorial
+from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
@@ -57,6 +60,137 @@ def _hermite_1d(x: Array, max_degree: int) -> Array:
     # gives unit-norm basis functions needed for variance decomposition.
     norms = jnp.array([1.0 / jnp.sqrt(float(factorial(k))) for k in range(max_degree + 1)])
     return H * norms
+
+
+class TruncatedFamily(NamedTuple):
+    """Three-term recurrence of the orthonormal polynomials of a truncated normal.
+
+    The polynomials are orthonormal against the standard normal truncated to
+    ``[a, b]`` and then standardised to zero mean and unit variance, so the
+    first one is the input itself. With ``p_0 = 1``::
+
+        root_beta[k+1] * p_{k+1}(x) = (x - alpha[k]) * p_k(x)
+                                      - root_beta[k] * p_{k-1}(x)
+
+    A tuple of floats, so a family is hashable and can sit in the static
+    ``input_types`` of the jitted fit. Nothing about it is stored on a
+    result: ``(a, b, order)`` rebuild it exactly.
+
+    Attributes:
+        alpha: ``alpha[k]`` for ``k = 0..order-1``.
+        root_beta: ``sqrt(beta_k)`` for ``k = 0..order``. The entry at 0 is a
+            placeholder and is never read.
+    """
+
+    alpha: tuple[float, ...]
+    root_beta: tuple[float, ...]
+
+
+def _quadrature_interval(a: float, b: float) -> tuple[float, float]:
+    """Cut a truncation interval to where the normal density has mass.
+
+    Args:
+        a: Lower bound in standard units, may be ``-inf``.
+        b: Upper bound in standard units, may be ``+inf``.
+
+    Returns:
+        ``(lo, hi)`` with ``a <= lo < hi <= b``. An interval that holds 0 is
+        cut at 12 standard units. One in a tail is cut where the density has
+        fallen by a factor of ``exp(-40)`` from its edge, so a bound far in
+        the tail still gets a finite interval.
+    """
+    lo, hi = a, b
+    if a > 0:
+        hi = min(b, a + max(12.0, 40.0 / a))
+    elif b < 0:
+        lo = max(a, b - max(12.0, 40.0 / -b))
+    else:
+        lo, hi = max(a, -12.0), min(b, 12.0)
+    return lo, hi
+
+
+@lru_cache(maxsize=256)
+def truncated_gaussian_family(
+    a: float, b: float, order: int
+) -> tuple[float, float, TruncatedFamily]:
+    """Orthonormal polynomial recurrence for a normal truncated to ``[a, b]``.
+
+    Runs the Stieltjes procedure on the host, in float64, on a Gauss-Legendre
+    discretisation of the truncated density, with full re-orthogonalisation.
+    The recurrence then runs on device in any dtype with no Cholesky of a
+    Gram matrix, so it stays accurate in float32 where a Gram-based
+    orthogonalisation would not. Raw Hermite polynomials are not orthogonal
+    against a truncated normal, and the defect grows with degree.
+
+    Args:
+        a: Lower truncation bound in standard units (``(low - mean) / std``).
+        b: Upper truncation bound in standard units. ``-inf`` and ``inf``
+            mark an open side.
+        order: Highest polynomial degree needed.
+
+    Returns:
+        ``(mean, std, family)``: the mean and standard deviation of the
+        truncated standard normal, and the recurrence of its standardised
+        orthonormal polynomials.
+    """
+    lo, hi = _quadrature_interval(a, b)
+    n_nodes = 400 + 25 * order
+    nodes, weights = np.polynomial.legendre.leggauss(n_nodes)
+    u = 0.5 * (hi - lo) * nodes + 0.5 * (hi + lo)
+    nearest = min(max(0.0, lo), hi)
+    # Subtract the log density at the nearest point to 0, so a bound far in
+    # the tail does not underflow.
+    mass = weights * np.exp(-0.5 * (u**2 - nearest**2))
+    mass /= mass.sum()
+    mean = float(mass @ u)
+    std = float(np.sqrt(mass @ (u - mean) ** 2))
+    v = (u - mean) / std
+
+    sqrt_mass = np.sqrt(mass)
+    basis = np.zeros((order + 1, n_nodes))  # orthonormal vectors sqrt(w) * p_k(v)
+    basis[0] = sqrt_mass
+    alpha = np.zeros(order)
+    root_beta = np.ones(order + 1)
+    for k in range(order):
+        current = basis[k]
+        alpha[k] = float(current @ (v * current))
+        nxt = v * current - alpha[k] * current
+        if k > 0:
+            nxt -= root_beta[k] * basis[k - 1]
+        for _ in range(2):  # Gram-Schmidt twice against every earlier vector
+            nxt -= basis[: k + 1].T @ (basis[: k + 1] @ nxt)
+        root_beta[k + 1] = float(np.linalg.norm(nxt))
+        basis[k + 1] = nxt / root_beta[k + 1]
+    return mean, std, TruncatedFamily(tuple(alpha.tolist()), tuple(root_beta.tolist()))
+
+
+def _truncated_1d(x: Array, alpha: np.ndarray, root_beta: np.ndarray, max_degree: int) -> Array:
+    """Evaluate the orthonormal polynomials of a truncated normal.
+
+    Args:
+        x: Standardised points, shape ``(N,)``, or ``(N, G)`` for ``G``
+            columns with one recurrence each.
+        alpha: ``TruncatedFamily.alpha``, shape ``(order,)``, or
+            ``(G, order)`` for ``G`` columns.
+        root_beta: ``TruncatedFamily.root_beta``, shape ``(order + 1,)``, or
+            ``(G, order + 1)`` for ``G`` columns.
+        max_degree: Maximum polynomial degree, at most the order the
+            recurrence was built for.
+
+    Returns:
+        Basis values, shape ``(..., max_degree + 1)``.
+    """
+    x = jnp.asarray(x)
+    dtype = jnp.result_type(x.dtype, float)
+    x = x.astype(dtype)
+    a = jnp.asarray(alpha, dtype=dtype)
+    rb = jnp.asarray(root_beta, dtype=dtype)
+    terms = [jnp.ones_like(x)]
+    if max_degree >= 1:
+        terms.append((x - a[..., 0]) / rb[..., 1])
+    for k in range(1, max_degree):
+        terms.append(((x - a[..., k]) * terms[k] - rb[..., k] * terms[k - 1]) / rb[..., k + 1])
+    return jnp.stack(terms, axis=-1)
 
 
 def _positive_compositions(total: int, n_parts: int):
@@ -136,20 +270,30 @@ def build_multi_index(D: int, p: int) -> np.ndarray:
     return result
 
 
+def _family_at(input_types: tuple[str | TruncatedFamily, ...], d: int) -> TruncatedFamily:
+    """Return the truncated-normal recurrence of dimension ``d``."""
+    family = input_types[d]
+    assert isinstance(family, TruncatedFamily)
+    return family
+
+
 def _basis_table(
-    X: Array, input_types: tuple[str, ...], max_degree: int
+    X: Array, input_types: tuple[str | TruncatedFamily, ...], max_degree: int
 ) -> tuple[Array, np.ndarray]:
     """Tabulate every 1-D orthonormal basis function at every sample.
 
-    Each family (Legendre for ``"uniform"``, Hermite otherwise) runs once over
+    Each family (Legendre for ``"uniform"``, Hermite for ``"gaussian"``, a
+    truncated-normal recurrence for a :class:`TruncatedFamily`) runs once over
     all of its columns, so the traced graph does not grow with the number of
     dimensions. The table lists the uniform columns first, then the Gaussian
-    ones, so no permutation back to column order is needed: ``position`` says
-    where each dimension went, and callers index through it.
+    ones, then the truncated ones, so no permutation back to column order is
+    needed: ``position`` says where each dimension went, and callers index
+    through it.
 
     Args:
         X: Reference-domain inputs, shape ``(N, D)``.
-        input_types: Per-dimension ``"uniform"`` or ``"gaussian"`` tags.
+        input_types: Per-dimension ``"uniform"`` or ``"gaussian"`` tags, or a
+            :class:`TruncatedFamily`.
         max_degree: Maximum 1-D polynomial degree.
 
     Returns:
@@ -157,8 +301,13 @@ def _basis_table(
         and ``table[n, position[d], k] = phi_k(X[n, d])``. ``position`` is an
         integer array of length ``D``.
     """
-    uniform = [d for d, kind in enumerate(input_types) if kind == "uniform"]
-    gaussian = [d for d, kind in enumerate(input_types) if kind != "uniform"]
+    uniform = [
+        d for d, kind in enumerate(input_types) if isinstance(kind, str) and kind == "uniform"
+    ]
+    gaussian = [
+        d for d, kind in enumerate(input_types) if isinstance(kind, str) and kind != "uniform"
+    ]
+    truncated = [d for d, kind in enumerate(input_types) if isinstance(kind, TruncatedFamily)]
     parts: list[Array] = []
     for family, basis in ((uniform, _legendre_1d), (gaussian, _hermite_1d)):
         if family:
@@ -168,7 +317,11 @@ def _basis_table(
             # `jit`, and the fused float32 recurrence then differs in the last
             # bit from the per-column program this table replaces.
             parts.append(basis(X[:, jnp.asarray(family)], max_degree))
-    position = np.argsort(np.asarray(uniform + gaussian))
+    if truncated:
+        alpha = np.stack([np.asarray(_family_at(input_types, d).alpha) for d in truncated])
+        root_beta = np.stack([np.asarray(_family_at(input_types, d).root_beta) for d in truncated])
+        parts.append(_truncated_1d(X[:, jnp.asarray(truncated)], alpha, root_beta, max_degree))
+    position = np.argsort(np.asarray(uniform + gaussian + truncated))
     table = parts[0] if len(parts) == 1 else jnp.concatenate(parts, axis=1)
     return table, position
 
@@ -176,7 +329,7 @@ def _basis_table(
 def _design_matrix_dense(
     X: Array,
     multi_index: np.ndarray,
-    input_types: tuple[str, ...],
+    input_types: tuple[str | TruncatedFamily, ...],
     max_degree: int,
 ) -> Array:
     """Build the design matrix as a running product over every dimension.
@@ -197,7 +350,14 @@ def _design_matrix_dense(
     D = X.shape[1]
     basis_1d: list[Array] = []
     for d in range(D):
-        if input_types[d] == "uniform":
+        kind = input_types[d]
+        if isinstance(kind, TruncatedFamily):
+            basis_1d.append(
+                _truncated_1d(
+                    X[:, d], np.asarray(kind.alpha), np.asarray(kind.root_beta), max_degree
+                )
+            )
+        elif kind == "uniform":
             basis_1d.append(_legendre_1d(X[:, d], max_degree))
         else:
             basis_1d.append(_hermite_1d(X[:, d], max_degree))
@@ -216,7 +376,7 @@ def _design_matrix_dense(
 def _design_matrix_sparse(
     X: Array,
     multi_index: np.ndarray,
-    input_types: tuple[str, ...],
+    input_types: tuple[str | TruncatedFamily, ...],
     max_degree: int,
 ) -> Array:
     """Build the design matrix from at most ``max_degree`` factors per term.
@@ -266,7 +426,7 @@ _DENSE_MAX_D = 16
 def build_design_matrix(
     X: Array,
     multi_index: np.ndarray,
-    input_types: tuple[str, ...],
+    input_types: tuple[str | TruncatedFamily, ...],
     max_degree: int,
 ) -> Array:
     """Build the PCE design matrix Phi.
@@ -416,6 +576,60 @@ def gram_cholesky(Phi: Array, ridge: float = 0.0) -> Array:
     return jnp.linalg.cholesky(gram)
 
 
+def ridge_qr(Phi: Array, Y: Array, ridge: float | Array) -> tuple[Array, Array]:
+    """Solve the ridge least-squares problem by QR of the augmented design.
+
+    The coefficients minimise ``|Phi c - Y|^2 + ridge * |c|^2``, the same
+    Tikhonov problem as the normal equations ``(Phi^T Phi + ridge*I) c =
+    Phi^T Y``. They come from the QR factorisation of ``[Phi; sqrt(ridge)*I]``
+    instead. The normal equations square the condition number of ``Phi``.
+    Float32 loses every digit of an order-12 fit that way, and QR keeps them.
+    One factorisation serves every column of ``Y``.
+
+    ``R`` satisfies ``R^T R = Phi^T Phi + ridge*I``, so ``R.T`` is a valid
+    Cholesky factor for :func:`hat_diagonal`, and :func:`r_pivot_share`
+    reads the rank diagnostic off it.
+
+    Args:
+        Phi: Design matrix, shape ``(N, n_terms)``.
+        Y: Outputs, shape ``(N, M)``, one column per output slice.
+        ridge: Tikhonov parameter, at least 0.
+
+    Returns:
+        ``(coefficients, R)``: coefficients of shape ``(n_terms, M)`` and the
+        upper-triangular factor ``R`` of shape ``(n_terms, n_terms)``.
+    """
+    n_terms = Phi.shape[1]
+    root = jnp.sqrt(jnp.asarray(ridge, dtype=Phi.dtype))
+    augmented = jnp.concatenate([Phi, root * jnp.eye(n_terms, dtype=Phi.dtype)], axis=0)
+    Q, R = jnp.linalg.qr(augmented, mode="reduced")
+    # The lower rows of the augmented right-hand side are zero, so only the
+    # first N rows of Q meet Y.
+    coefficients = solve_triangular(R, Q[: Phi.shape[0]].T @ Y, lower=False)
+    return coefficients, R
+
+
+@jax.jit
+def r_pivot_share(R: Array) -> Array:
+    """The smallest unexplained share of any column, read off a QR factor.
+
+    For column ``j`` of the augmented design ``A``, ``R[j, j]**2`` is the part
+    of ``|A_j|**2`` that the columns before it do not explain, and
+    ``|A_j|**2`` is the squared norm of column ``j`` of ``R``. The ratio is
+    the squared Cholesky pivot of the Gram matrix over its diagonal, but it
+    never goes through a Cholesky factorisation, so it stays finite in
+    float32.
+
+    Args:
+        R: Upper-triangular factor, shape ``(n_terms, n_terms)``.
+
+    Returns:
+        ``min_j R[j, j]**2 / sum_i R[i, j]**2``, a scalar in ``[0, 1]``. NaN
+        when a column of ``R`` is all zeros.
+    """
+    return jnp.min(jnp.diagonal(R) ** 2 / jnp.sum(R**2, axis=0))
+
+
 def hat_diagonal(Phi: Array, gram_chol: Array) -> Array:
     """Hat-matrix diagonal (leverage) of a design block, from a Cholesky factor.
 
@@ -464,6 +678,7 @@ def loo_error(
     coefficients: Array,
     ridge: float = 0.0,
     gram_chol: Array | None = None,
+    n_rows: Array | int | None = None,
 ) -> Array:
     """Efficient leave-one-out cross-validation error from the hat matrix.
 
@@ -486,6 +701,11 @@ def loo_error(
             reuse a factorization the caller already holds. It is the small
             factor, not an ``(n_terms, N)`` product, so reuse costs no memory
             that scales with ``N``.
+        n_rows: Number of real rows, when ``Phi`` and ``Y`` carry zero rows
+            after them (a padded fit). The sum of squared leave-one-out
+            residuals divides by this count. A zero row has leverage 0 and
+            residual 0, so it adds nothing to the sum. ``None`` means every
+            row is real, and the mean runs over all of them.
 
     Returns:
         Scalar LOO RMSE for 1-D ``Y``, or per-slice LOO RMSE of shape
@@ -498,4 +718,6 @@ def loo_error(
     if residuals.ndim == 2:
         denom = denom[:, None]  # broadcast the shared leverage over slices
     loo_residuals = residuals / denom
-    return jnp.sqrt(jnp.mean(loo_residuals**2, axis=0))
+    if n_rows is None:
+        return jnp.sqrt(jnp.mean(loo_residuals**2, axis=0))
+    return jnp.sqrt(jnp.sum(loo_residuals**2, axis=0) / n_rows)

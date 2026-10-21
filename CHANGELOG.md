@@ -1,5 +1,291 @@
 # Changelog
 
+## 1.2.0 (2026-10-21)
+
+Contains everything in the 1.2.0 pre-releases (b1 to b3, below) plus the changes in this section.
+
+### Memory
+
+Peak memory was measured with XLA's compile-time memory analysis, at the shapes given. Results are unchanged unless a tolerance is stated.
+
+- `morris`: the bootstrap runs one resample at a time. Temporary memory at r = 1000, D = 23, 291 outputs, 200 resamples: 1021 MiB before, 51 MiB now. Results are bitwise identical.
+- `borgonovo`: output columns run in batches of at most 16, and the output grid is no longer tiled. At N = 16,384, D = 23, 291 outputs: 732 MiB before, 199 MiB now, and about 1.8 times faster. `slice_chunk_size` now sets the batch width. Results agree to 7e-18 in float64.
+- `hsic`: the input kernels and their complements are built in place, and the per-output kernel handles one input at a time when all inputs at once would not fit the memory budget. At N = 2048, D = 23: setup 736 MiB before, 64 MiB now; per output 773 MiB before, 101 MiB now. Gradients use no more memory than before. HSIC now reads the memory budget.
+- `kucherenko`: the bootstrap uses resample counts, not gathered copies of the outputs. At N = 16,384, D = 23, 291 outputs it held about 2.8 GB per replicate; it now stays within the memory budget. It is about 3 times faster. Results agree to 1e-14, also for outputs with rare large spikes.
+- `sobol` and `efast`: the outputs are split and standardized one slice chunk at a time, so the full copies of Y are gone when there is more than one chunk. At N = 16,384, D = 23, 291 outputs with second order this saves about 3.7 GB for Sobol. eFAST is bitwise identical. Sobol on (N, T, K) outputs over several chunks differs by rounding (4.5e-7 in float32, 6e-16 in float64).
+- `hdmr`: the statistics pass and the pair Gram work through the terms in blocks when the whole working set does not fit half the memory budget. At D = 23, `n_intervals=9`, N = 4096, 291 outputs, 2 GiB: statistics pass 1140 MiB before, 279 MiB now; the row batch doubles. Small fits keep the old path and speed.
+- `pce`: the memory estimate of the streamed fit now covers the leave-one-out pass (it used 1.28 times its estimate).
+- `optimal_transport`: the multivariate and trajectory modes keep one fewer N x P array, and warn when their estimated peak exceeds the memory budget.
+
+### Changed
+
+- jaxgsa now requires `jax>=0.11.2` and `jaxlib>=0.11.2`. The memory figures above hold on jax 0.11.2. jax 0.8 to 0.10 do not fuse some of the new kernels and write out large temporary arrays. For example, `borgonovo` at N = 20,000 with a 400-point grid needs 5.4 GB of temporary memory on jax 0.10, against 39 MiB on jax 0.11. jax 0.11.0 is excluded because the test suite ran a 16 GB CI runner out of memory on it.
+- `config.set_memory_budget` warns when the budget comes out above 1 TiB. The number is read in megabytes unless `unit=` is given, so passing bytes by mistake turned batching off.
+
+### Fixed
+
+- `hdmr.indices`, and HDMR bootstrap replicates, no longer warn. The order-2 size warnings and the warning for an unconverged pair solve now come from `hdmr.analyze` only, and point at your line.
+- `hdmr` order 2: the direct and conjugate-gradient pair solves now drop a pair whose basis has almost no spread, as the sample-space solve already did. The three solves agree on such inputs.
+- `pce`, `hdmr` and `shapley` bootstraps now follow a `set_memory_budget` call made after an earlier bootstrap run. Before, the compiled replicate program kept the old batching.
+- The Gaussian-copula conditional plan warns once about a lifted conditional factor, not once more per input.
+- `pce` prices the single-pass fit at the padded row count, with the padded copies of X and Y. Near a bucket edge the fit could exceed the memory budget by up to about 12%.
+- `sobol` bootstrap prepares each output chunk once, not twice. Point estimates can differ from the no-bootstrap path by rounding (up to 2e-7 in float32) when the bootstrap uses a narrower chunk.
+- The `hsic` check for collapsed columns no longer builds a full pair-distance matrix: about 16 MB per column, down from 64 MB.
+
+## 1.2.0b3 (2026-10-20, pre-release)
+
+Pre-release for testing. Contains everything in 1.2.0b2 plus the changes in this section.
+
+### Performance
+
+- `hdmr.analyze` at `order=2` in float64 now solves the pair terms in sample space when there are more pair coefficients than rows and the solve fits the memory budget. It gives the same ridge solution as the direct solve (S agrees to 4e-11 in the tests), and one factorization serves every output. Measured at D = 23, 12 splines (`n_intervals=9`), N = 4096, 291 outputs, 2 GiB budget: 21 s and 3.2 GB peak. 1.2.0b2 used conjugate gradients there and did not finish in 26 min. Peak memory of the solve is about 2 x N^2 x 8 bytes (4.3 GB at N = 16,384), so N = 16,384 needs a budget of about 4.5 GiB; below that the fit falls back to conjugate gradients.
+
+### Changed
+
+- `hdmr.analyze` now raises `ValueError` for `order=3`. Third-order terms were fitted one at a time and counted the same leftover variance more than once, so the indices summed above 1. Use `order=1` or `order=2`. `hdmr.indices` raises too.
+
+## 1.2.0b2 (2026-10-20, pre-release)
+
+Pre-release for testing. 1.2.0b1 was tagged on GitHub but never published to PyPI: its release check failed on the HSIC overflow fixed below. This release contains everything in 1.2.0b1 plus the changes in this section.
+
+### Added
+
+- `kucherenko.sample` now accepts categorical inputs when the problem has a custom sampler (`problem.with_sampler`). The sampler draws every conditional itself, so it can stratify on an input such as sex. Measured on a sex-stratified NLME case with exact values: all 40 indices within 1.5 standard errors over 8 seeds. Without a custom sampler a categorical input still raises.
+
+### Fixed
+
+- `hsic` median bandwidth in float32 at N = 65,535: an all-zero check compared the pair count with a Python integer that does not fit in int32, and raised `OverflowError`. Introduced in 1.2.0b1; 1.1.2 is not affected.
+
+### Docs
+
+- New page, "Population PK (NLME)": four recipes for covariates and random effects. They give the index of each random effect, the covariate share of the variance, Shapley effects of correlated covariates, and the full index of each kinetic parameter. Each recipe was checked against exact values on a linear test case.
+
+## 1.2.0b1 (2026-10-20, pre-release)
+
+Pre-release for testing. Some fixes change index values where the old values were wrong. See Fixed and Changed values.
+
+### Fixed
+
+- `hdmr.analyze` with `order >= 2` no longer counts the same leftover once per
+  pair. Before, each pair was fitted alone against one first-order residual,
+  and a pair basis also spans the 1-D functions of its two inputs, so the sum
+  of `S` grew with `D` (1.14 at D = 9 and 3.07 at D = 23 for
+  `sin(2 pi x0) + x1^2 + 0.5 x2 + 2 x3 x4`, N = 1024) and the test error was
+  worse than order 1 (0.48 against 0.19 at D = 23). Now the pair basis is
+  projected off the first-order space and all pairs are solved together. At the
+  default ridge, sum of `S` is 1.000 and test NRMSE is 0.009 to 0.15 at D = 5
+  to 23 (0.01 at D = 5, 0.15 at D = 23, N = 1024; 0.025 at D = 23, N = 4096).
+  In float64, when the full pair system fits the memory budget (up to about
+  D = 15 at the default `n_intervals`), it is solved directly. Otherwise it
+  is solved by CG with up to 10 x `max_iter` steps, which stops early when
+  the residual stops improving (float32 needs this) and warns when the
+  residual stays above 1e-2. A fit warns when its free coefficients exceed
+  0.8 of the samples. A pair adds `(n_intervals + 2)^2` free coefficients,
+  so this happens at D = 23 with N = 4096 and at D = 9 with N = 1024 and
+  `n_intervals=3`. The pairs then fit the data too closely and the true pair
+  `S2` can read too small (0.005 against 0.034 at D = 23, N = 1024). Every `order >= 2` fit
+  changes: pair and total-order indices move (Ishigami at 1000 rows: `ST` of
+  `x3` 0.287 to 0.221, analytic 0.244; `ST` of `x2` 0.339 to 0.325; `S1` does
+  not move). In-sample error above test error was the same overshoot, and is
+  gone. `result.C1` now holds the first-order coefficients plus the projection
+  shift, so that `predict` is the sum of the terms. `predict` uses every term
+  and ignores the F-test `select`. A third-order term is still not projected
+  off the pairs, so order 3 can still overshoot (follow-up).
+- `hdmr` `ridge` now has an effect. The basis is scaled by `m^3` and the Gram
+  matrix was not divided by `N`, so `ridge=1.0` and `ridge=0.01` gave the same
+  NRMSE to three digits. Now `ridge` is relative to the mean diagonal of each
+  term's Gram matrix, so it does not depend on `N` or `n_intervals`.
+- `vkoga.analyze` now raises a `ValueError` when an input column of `X` is
+  constant, equal to another column, or a linear combination of earlier
+  columns (same check as `pce` and `hdmr`). Before, a duplicated input gave
+  `S_TC` 0.86 against a true 0.79, and a constant input gave `S_TC` 0.18
+  against a true 0. Duplicate rows are still allowed.
+- `vkoga` with independent inputs now sets `S_U = S_TC`, so `S_C` is exactly
+  0. Before, the fitted component functions left a spurious `S_C` up to
+  8e-3 (Ishigami, `x2`) and an `S_IU` of 0.012 where the exact value is 0.
+  `S_TC` and `S_TU` do not change.
+- `pce`, and `shapley` with the PCE backend, now raise a `ValueError` when an
+  input is a linear combination of other inputs, such as `c = 1 - a`,
+  `c = 2 * a` or `c = a + b`. 1.1.2 caught only exact copies. An affine copy
+  gave a singular design: float32 raised, but float64 warned and returned
+  wrong indices. The check reads the inputs, so it does not depend on the
+  dtype or on `ridge`. It raises when the combination holds to within 100
+  times the rounding error of the input dtype. A copy with more noise, for
+  example 1e-3, still goes to the near-singular warning.
+- PCE warnings about a reduced order, a poor fit and an overfit now name the
+  function you called. Through `jaxgsa.shapley.analyze` they said
+  `jaxgsa.pce` and pointed at a line inside the package. They now say
+  `jaxgsa.shapley.analyze` and point at your line. Values do not change.
+- The PCE fit now solves the ridge least squares by QR, not by the normal
+  equations. The normal equations square the condition number of the design.
+  In float32 that lost every digit at high order: a Hermite fit on three
+  Gaussian inputs at order 12 (N = 6000) raised "the Gram matrix of the design
+  is numerically singular". The same fit now returns the exact indices
+  (ST = 0.8062, 0.1938, 0.0310) at orders 12 and 13, with a precision
+  warning. Order 14 and above still raise in float32. This also holds for `shapley`
+  with the PCE backend. The streamed fit (`batch_size`) uses a tall-skinny QR
+  that folds in one batch at a time, so its memory stays within the budget.
+- The rank check reads the pivot share from the QR factor. It is finite in
+  float32, so a failed Cholesky factor no longer refuses a fit. The limits
+  are the same as in 1.1.2. float32 raises below 1e-5 and warns below 1e-4.
+  float64 only warns, below 1e-9. Measured on three Gaussian
+  inputs, N = 6000: share 1.3e-8 gives a total index off by 2e-3, and share
+  1.8e-9 off by 0.05. In the warning band the leave-one-out error `cv_rmse`
+  can be wrong by a large factor, because `1 - h` (h is the leverage of a
+  row) is mostly rounding noise, while the indices stay exact much longer.
+  At share 9.8e-5 float32 gives `cv_rmse` 0.23 against 0.005 in float64. A
+  non-finite share raises. Constant, duplicated and linearly dependent inputs
+  raise in both dtypes, because they are read off the inputs.
+- `pce.analyze` with `n_bootstrap > 0` warns when some resamples fit a
+  near-singular design, and gives the count. The rank check ran on the full
+  sample only.
+- A truncated Gaussian input now gets the orthonormal polynomials of its own
+  truncated distribution, at every truncation width and every order. This
+  replaces two routes that were not exact. Raw Hermite polynomials lose
+  orthogonality against a truncated normal as the degree grows. The Legendre
+  route through the truncated CDF has to approximate the steep inverse normal
+  CDF. The order-7 switch between the two, and its warning, are gone. On a
+  wide truncation (+-8 sigma) at order 8, S1 went from 0.7141 (true 0.7273)
+  with `cv_rmse` 0.23, to 0.7273 with `cv_rmse` 5e-6. For a narrow truncation,
+  `cv_rmse` of a cubic response fell from 0.052 to 2e-6. The basis is built on
+  the host in float64 and evaluated by a three-term recurrence, so it is
+  accurate in float32 too. Narrow (0.1 sigma wide) and far one-sided (z >= 3,
+  z >= 38) truncations give exact indices. This also holds for `shapley` with
+  the PCE backend. Untruncated Gaussian and uniform inputs are bitwise
+  unchanged.
+- Equal-frequency classes now use exact integer edges `(m * N) // M`. Before,
+  the edges were the floor of `linspace(0, N, M + 1)`. Float rounding put
+  some edges one row low, so one row went to the wrong class. This affects
+  `optimal_transport` and `borgonovo` (continuous inputs). Only `(N, M)`
+  pairs where `floor(linspace)` differs from `(m * N) // M` change. For
+  example, at `N=60, M=22` one edge moves: Borgonovo delta changes by 0.013
+  (4.2% relative) and OT `ot` by 0.021 (4.1% relative). The largest change
+  is OT `ot_dummy`, by 0.029 (6.3% relative; this can change `above_dummy`).
+  Other `borgonovo` and `optimal_transport` outputs move by a similar size.
+  `(N=1000, M=7)` and `(N=997, M=49)` are bitwise unchanged. At the changed
+  pairs the results can differ from SALib by one row per class.
+- `pawn` bin edges are now the exact values `k / n_classes`. Before, an
+  input value exactly on an interior edge (for example `0.3` with
+  `n_classes=10`) could go to the bin below. Only inputs that sit exactly on
+  an edge change bin.
+- OT: with float64 on, the overlap weights of categorical inputs in `mode="univariate"` were rounded to float32. They now use the working dtype.
+- `hdmr.analyze` now raises `ValueError` for a constant input, two equal inputs, or an input that is a linear combination of others (for example `c = a`). Before, the fit split the effect between `a` and `c` in any proportion without an error (S1 of `a` 0.000 and of `c` 0.796). It uses the same check as `pce.analyze`.
+- `hsic.analyze` and `hsic.indices`: the median bandwidth now uses the median of the non-zero pairwise squared distances. Before, an atom holding more than half of the sample (for example 75% zeros) pulled the median to 0 and the kernel only tested equality. Columns with no tied values are unchanged. The 1.1.2 warning now fires on near-ties instead (median non-zero squared distance below 1e-6 times the variance), because those still collapse. The binary-column exemption is gone: a two-valued column now gets a real bandwidth.
+- `pawn.analyze` bootstrap intervals with `ci_method="quantile"` were biased upward. The KS maximum is not differentiable at a zero gap, so the replicates sit above the point estimate (null parameter, N=1000: point 0.072, replicate mean 0.111). The draws are now mean-centred on the point estimate before the quantiles are read. `ci.replicates` keeps the raw draws. The interval is not a confidence interval for the population index.
+- `pawn` KS statistics were off by 1 ulp because XLA turns the division into a reciprocal multiply. A constant output gave 6e-8 instead of 0. The gap is now computed from exact integer counts. Cumulative bin counts are int32, so they stay exact above N=2^24.
+- `sobol.analyze` with `n_bootstrap` no longer builds a full `(R, N)` index matrix outside the memory budget. At N=2^17, D=2, R=1000 and a 512 MiB budget, peak memory above the baseline falls from about 2800 MiB to about 450 MiB (146 MiB at a 64 MiB budget). The resample width now follows the budget.
+- `efast.sample` now warns (`JaxgsaWarning`) when `D >= 3` and `n_per_curve < 4*M^2*(2*D-3) + 1`. Below this the two lowest frequencies are 1 and 2, and interacting inputs on that pair are under-sampled. At the minimum N, Ishigami gives S1 of `x2` 0.80 against a true 0.44. Index values do not change.
+
+### Changed values
+
+- `hdmr` `ridge` changes meaning and default (see Fixed). The default goes from
+  0.01 to 1e-6 relative to the Gram diagonal, which matches the old effective
+  strength. Order-1 fits at the default move by 2e-4 or less (Ishigami, 1000
+  rows, `S1`). An order-1 fit that sets `ridge` itself changes by an amount
+  that depends on `N`. `ridge=0.01` used to mean about 1e-6 here and now means
+  1% of the diagonal: Ishigami `S1` of `x2` goes from 0.311 to 0.013.
+- `vkoga` with independent inputs: `S_C` is now exactly 0 and `S_IU` drops
+  (Ishigami `x2` `S_IU` 0.0119 to 0.0035). See Fixed.
+- `vkoga` with correlated inputs and a non-Gaussian marginal (uniform and
+  other Legendre cases) now fits its component functions at degree 10, not 6.
+  This removes a truncation bias in `S_U`, `S_C` and `S_IU` (Ishigami with
+  rho = 0.5, `x2` `S_C` 0.0437 to 0.0354, reference 0.0359). The fit falls
+  back to degree 6 when `n_variance` is below two rows per coefficient, and
+  warns when even that is under-determined. Gaussian marginals do not change.
+- `vkoga` cross-validation compiles once per data shape, not once per
+  dataset. In float32 the chosen `gamma` and `ridge` can differ from 1.1.x on
+  many datasets, because the old choice was rounding noise. In float64 they
+  do not change.
+- The PCE fit now uses QR (see Fixed). Index values change only by float
+  rounding, listed below. The solver is also slower (see Performance).
+- PCE values change by float rounding in every fit, and so do Shapley values
+  from the PCE backend. Ishigami, N = 1000, orders 3, 5 and 7: at most 7e-7
+  in float32 and 1.4e-15 in float64, for S1, ST, S2, `cv_rmse` and the
+  bootstrap intervals (the Shapley PCE backend reaches 6.9e-7 in float32).
+  Fits that 1.1.2 refused in float32 now succeed. Row padding changes the
+  order of the sums, which adds float rounding of the same size and no more.
+- PCE values change for every truncated Gaussian input, and so do Shapley
+  values from the PCE backend. The old S1 error on a polynomial response was
+  4e-3 to 5e-2 on the Legendre route (every truncation narrower than 7 sigma,
+  and every order above 7). It is now 1e-12 in float64 and below 1e-6 in
+  float32. A truncation of 7 sigma or wider at order 7 or lower moves by at
+  most the old Hermite defect, 2e-4.
+- OT with categorical inputs, `mode="univariate"`, float64 only: `ot` changes by about 1e-11 to 1e-10 absolute (below 1e-9 relative), `diffusive` by up to a few 1e-9 relative, and the `ot` confidence interval endpoints by about 1e-10 absolute. The old values carried float32 rounding. Float32 runs and continuous inputs are bitwise unchanged.
+- Bootstrap intervals (`*_conf`) and `ci.replicates` of `hdmr`, `pce` and `shapley` change at rounding level. The row draws are the same. The largest change is 6e-5 in float32 (HDMR) and 4e-14 in float64. PCE and Shapley with the PCE backend are equal to about 1e-16 in float64. Point estimates do not change.
+- `hsic` with tied values in an input or output: `R2` and `T` change because the bandwidth changes. Spike output (75% zeros), N=400: `R2` 0.0151 to 0.0066 and `T` 0.0304 to 0.0151 for the second parameter. Two-valued inputs change `T` only. Data with no ties is unchanged.
+- `pawn_conf` with `ci_method="quantile"` and `n_bootstrap>0` moves down by the mean bootstrap excess: about 0.03 for a null parameter at N=1000, about 0.006 for a strong one. The width is unchanged. `"gaussian"` intervals do not change.
+- `pawn` point values and bootstrap draws change by at most 1 ulp (6e-8 in float32). A constant output now gives exactly 0.
+- Bootstrap draws now come from one key per resample (`split(key, R)`) in `sobol`, `kucherenko`, `morris`, `borgonovo`, `dgsm` and `optimal_transport`. For a fixed `key`, every bootstrap replicate and every confidence interval changes. The intervals are statistically equivalent. Point estimates do not change. A draw still does not depend on chunk width or memory budget, and the full index matrix is no longer built.
+- `sobol` bootstrap replicates now use count-weighted moments, not a row gather. In float32 the replicates differ from a gather on the same draws by at most about 3e-6, and in x64 by about 4e-15. An input the model never reads now gives a first-order replicate of exactly 0 for `saltelli-jansen` and `mauntz-kucherenko`.
+- `dgsm` Poincare constant for a one-sided truncated Gaussian is now continuous
+  in the bound. Before, it jumped by about 8e-4 (relative) when the bound
+  crossed 5 std from the mean (`low=5.0` gave 0.0874775, `low=5.001` gave
+  0.0875459). Bounds just below 5 std now change by up to about 1e-3 relative (1.05e-3 at
+  `low=5.0`). The change fades out below a bound of about -0.3 std: 3e-5 at
+  `low=3`, 2.7e-7 at `low=0`.
+
+### Performance
+
+- The Gaussian-copula conditional plan (Kucherenko, VKOGA with correlated
+  inputs) no longer stores one Cholesky factor per input. At 500 inputs the
+  build drops from 4.2 s and 963 MiB to 0.24 s and 10 MiB. The plan is now
+  built only when a conditional draw needs it, so Kucherenko Shapley and
+  nested designs skip it. The regression of `Z_i` on the others now comes from
+  one inverse of the correlation matrix. Correlated `kucherenko` and `vkoga`
+  values can move by about 1e-15 relative in float64.
+
+- `vkoga` cross-validation no longer recompiles for each new dataset. The
+  scorer compiles once, so repeated analyses skip some compile time (about
+  0.2 to 0.4 s per new dataset in one small test). Wall-clock gains on small
+  cases are within run-to-run noise.
+- `hdmr.analyze` at `order >= 2` is slower than in 1.1.2, because the pairs
+  are now solved jointly. Steady state, float64, D = 15: 0.3 to 0.5 s (direct
+  solve). D = 23, N = 4096: about 9 to 13 s with CG, against 1.2 s for the
+  old, wrong fit.
+- The PCE fit is slower, because QR does more work than the normal
+  equations. Steady-state `analyze` takes 2 to 3 times longer at large sizes:
+  about 270 ms to 800 ms for D = 6, order 6, N = 20000 (924 terms; 3 to 3.5
+  times), and 152 ms to 312 ms for D = 10, order 3, N = 50000. Small fits
+  (D = 3, order 5, N = 1000) go from about 1.9 ms to about 3 ms. The estimate
+  of fit memory, which decides when the fit streams, grows from 2 to 4 arrays
+  of the design size. The streamed fit is a `lax.scan` over the row batches,
+  so it also traces under `lax.map`.
+- `pce.analyze`, `pce.indices` and `shapley` with the PCE backend no longer
+  recompile the heavy fit programs for every new number of rows. The rows are
+  padded to a bucket (eight buckets per octave, so at most 12.5% extra rows),
+  and a 0/1 row mask keeps the extra rows out of every sum. Row counts 497,
+  498 and 499 now share one compiled fit. The first `analyze` call at a new
+  row count in the same bucket took 0.8 s and now takes about 0.4 s (N = 500,
+  D = 6). Small programs for the padding and the shared input checks still
+  compile for each new row count. Padding adds up to 12.5% more work for a
+  row count just above a bucket edge, for example N = 513 runs as 576 rows.
+- The new check for linearly dependent inputs runs on the host and costs
+  0.73 s at N = 100000, D = 200. It runs once per `analyze` call.
+- `borgonovo.analyze` and `optimal_transport.analyze` now build the class
+  tensors in blocks of bootstrap replicates, sized by the memory budget
+  (`jaxgsa.config.set_memory_budget`). Before, one `(R, D, M, P)` tensor held
+  all replicates and ignored the budget. At `N=20000`, `D=10`, 500
+  bootstrap replicates, peak memory falls from 1198 MB to 844 MB with the
+  default budget, and to 531 MB with a 64 MiB budget. Replicate blocking
+  itself changes no value. A smaller budget also shrinks the automatic output-slice chunk,
+  which can move values by about 1 ulp (5.6e-17 in x64 for OT univariate).
+  No new argument.
+- `optimal_transport.analyze` no longer recompiles for every new categorical
+  dataset of the same shape. The class width is now rounded up to a
+  quarter-octave grid (a multiple of 8, never above `N`). On a repeated call
+  with new data, the number of compile events falls from 60 to 0 (8 when
+  the width crosses a bucket edge) in the
+  `univariate` and `multivariate` modes. The padding is masked, so values
+  with categorical inputs change only by float rounding. Measured against
+  1.1.2: at most about 1.5e-7 absolute in float32, and about 2e-16 absolute
+  in x64. `borgonovo` with categorical inputs shares the change.
+- `hdmr.analyze`, `pce.analyze` and `shapley.analyze` run bootstrap replicates in one cached `jax.jit` with a sequential `lax.map`, not a Python loop. The program compiles once and a repeat call compiles nothing. Steady state is faster: about 7 times for HDMR (0.95 s to 0.13 s at N=1024, 50 replicates) and about 1.1 times for PCE. The first call is not faster, because compile time dominates it. Peak memory at N=32768 with 20 HDMR replicates rose from 478 to 576 MB.
+- `sobol` bootstrap runs on a count matrix and one matrix product per chunk. Measured on this machine (loaded, so read as ratios): N=2^17, D=2, R=1000 went from 3.0 s to 1.7 s. The design measured 2.8x at D=10 and 6.8x at D=50.
+
+### Docs
+
+- OT: the `tol` docs now give the cost of a trajectory solve. The time is in Sinkhorn iterations, not the loop over outputs. The float64 default `tol=1e-9` is about twice as slow as `1e-5`, and it stays the default.
+
 ## 1.1.2
 
 This release fixes bugs and makes several methods faster. Correct index
