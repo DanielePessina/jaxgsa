@@ -9,6 +9,8 @@ package. This directory holds the scripts that produce those numbers.
 Oracles run **locally only**. They never ship in the package, they are not
 imported by `src/jaxgsa/`, and CI never runs them. What ships is the number:
 the oracle is run by hand, and its output is typed into the test as a literal.
+The one exception is `external_checks.py`, which compares jaxgsa with live
+libraries on demand. It is outside the default test collection.
 
 Because of that, every oracle-derived literal in the suite carries a provenance
 block in the test docstring. The block names five things:
@@ -52,5 +54,29 @@ it needs.
 | Script | Oracle | Tier | Regenerates |
 | --- | --- | --- | --- |
 | `salib_delta_class_counts.py` | SALib 1.5.2 | T2 | The seven class counts in `tests/test_borgonovo.py::TestPlischkeHeuristic::test_matches_reference_class_counts` |
-| `openturns_sobol_estimators.py` | OpenTURNS 1.27 | T2 | The recorded estimator literals in `tests/test_sobol_estimators.py` |
+| `openturns_sobol_estimators.py` | OpenTURNS 1.27 | T2 | The `OPENTURNS_ISHIGAMI` literals in `tests/test_sobol_estimators.py`, used by `TestOpenTurnsOracle` |
 | `hdmr_direct_form.py` | Re-derived direct-form HDMR + `scipy.stats.f.ppf` | T4 | Nothing. Run by hand to cross-check `jaxgsa.hdmr.analyze` against an independent estimator |
+| `external_checks.py` | SALib, POT, SciPy (live) | T2 | Nothing. A pytest file of live comparisons, see below |
+
+## Live checks: `external_checks.py`
+
+`external_checks.py` holds the tests that import an outside library and compare
+jaxgsa with it at run time. It covers:
+
+- SALib Sobol parity for the default `saltelli-jansen` estimator.
+- SALib Morris parity on the same expanded design.
+- SALib `delta`: the plug-in estimator and the bias-corrected end-to-end values.
+- PAWN against SALib's median, and against `scipy.stats.ks_2samp` on tied outputs.
+- Optimal transport against POT: the 1-D W2 semantics, per-bin W2, the Sinkhorn
+  solver, the multivariate pipeline against exact `emd2`, the Ishigami `x1`
+  index and the quantile-rank split.
+
+The file name does not match `test_*.py`, so `uv run pytest` does not collect
+it. CI does not run it. Run it by hand:
+
+```
+uv run --extra dev pytest scripts/oracles/external_checks.py
+```
+
+It takes about 20 seconds. You can also run it as a script:
+`uv run --extra dev python scripts/oracles/external_checks.py`.

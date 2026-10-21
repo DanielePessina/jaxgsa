@@ -71,7 +71,7 @@ Every method also has many T4 tests. The table below lists only the checks that 
 - **dgsm, pawn, borgonovo and morris** have a small number of outside checks. Each rests on one or two closed-form cases. For morris, the Ishigami check tests the rank order, not the values. For pawn, the closed form covers one active input.
 - **hdmr** has wide tolerances (30% relative in the basic check, 0.05 to 0.06 with `n_intervals=4`). The fit is a polynomial approximation. A script compares it with a direct-form estimator by hand (see below). No test runs that comparison.
 - **hsic** has no comparison with an outside library. Its checks are a NumPy re-derivation and a population closed form.
-- **Only rank, kucherenko and optimal_transport** compare with an outside package (R or POT) at test time, and those tests are slow and skip when the package is missing.
+- **Only rank, kucherenko and optimal_transport** compare with an outside package (R or POT) inside the test suite, and those tests are slow and skip when the package is missing. Live comparisons with SALib, POT and SciPy for sobol, morris, borgonovo, pawn and optimal_transport are in a separate script (see below).
 - **Nothing here is a proof.** The tests run on a few functions, at fixed seeds, in float32 and float64. They cannot cover every model.
 
 ## External oracles
@@ -86,21 +86,45 @@ An oracle is a source of truth outside jaxgsa. The oracles never ship in the pac
 
 R code runs in a separate process through [`tests/_r_oracle.py`](https://github.com/DanielePessina/jaxgsa/blob/master/tests/_r_oracle.py). jaxgsa never reads or copies the R code. If `Rscript` or a package is missing, the test skips.
 
-Three scripts under [`scripts/oracles/`](https://github.com/DanielePessina/jaxgsa/tree/master/scripts/oracles) run by hand. Each prints a table and exits non-zero on disagreement.
+Four scripts under [`scripts/oracles/`](https://github.com/DanielePessina/jaxgsa/tree/master/scripts/oracles) run by hand. Three of them print a table and exit non-zero on disagreement.
 
 | Script | Oracle | Checks |
 | --- | --- | --- |
 | `openturns_sobol_estimators.py` | OpenTURNS 1.27 | The Jansen, Martinez and Mauntz-Kucherenko Sobol estimators on Ishigami, against recorded literals |
 | `salib_delta_class_counts.py` | SALib 1.5.2 | The class counts of the Plischke heuristic that `borgonovo` uses |
 | `hdmr_direct_form.py` | Re-derived NumPy direct-form HDMR, `scipy.stats.f.ppf` | `hdmr.analyze` against an independent estimator. This is T4: it has no external reference. |
+| `external_checks.py` | SALib, POT, SciPy (live) | A pytest file. See below. |
 
-To run one:
+The first two scripts produce saved values. Those values are back in the default test suite as T2 checks, so the suite needs neither OpenTURNS nor SALib:
+
+- `TestOpenTurnsOracle` in `tests/test_sobol_estimators.py` compares the estimators with the `OPENTURNS_ISHIGAMI` literals.
+- `TestPlischkeHeuristic` in `tests/test_borgonovo.py` compares the class counts with the SALib values.
+
+To run one script:
 
 ```bash
 uv run --extra dev scripts/oracles/hdmr_direct_form.py
 ```
 
 The OpenTURNS script is not in the dev extra. Run it with `uv run --with openturns scripts/oracles/openturns_sobol_estimators.py`.
+
+### Live checks
+
+`external_checks.py` imports the outside libraries at run time. It is not in the default test run, and CI does not run it. It covers:
+
+- sobol: the default estimator against `SALib.analyze.sobol`.
+- morris: `mu`, `mu_star` and `sigma` against `SALib.analyze.morris` on the same design.
+- borgonovo: delta and S1 against `SALib.analyze.delta`.
+- pawn: the median index against `SALib.analyze.pawn`, and the tie-aware KS statistic against `scipy.stats.ks_2samp`.
+- optimal_transport: per-bin W2, the Sinkhorn solver and the multivariate index against POT.
+
+Run it with:
+
+```bash
+uv run --extra dev pytest scripts/oracles/external_checks.py
+```
+
+It takes about 20 seconds.
 
 ## Run the tests yourself
 

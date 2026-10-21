@@ -4,7 +4,7 @@ You have input rows `X` and model outputs `Y`. You did not build them with a
 sensitivity design. This page shows which jaxgsa methods accept such data and
 what each one gives you.
 
-All four methods below are called the same way: `method.analyze(problem, X, Y)`.
+The methods below are called the same way: `method.analyze(problem, X, Y)`.
 `X` has shape `(N, D)`. `Y` has shape `(N,)`, `(N, T)` or `(N, T, K)`.
 
 | Method | What it gives | Main limit |
@@ -14,6 +14,9 @@ All four methods below are called the same way: `method.analyze(problem, X, Y)`.
 | `hdmr` | Per-term variance shares from a fitted surrogate | Order 2 at most. Check the fit before you trust the shares. |
 | `borgonovo` | Moment-independent index `delta` | Measures influence on the whole output distribution, not variance. |
 | `pawn` | KS distance between conditional and unconditional output distributions | Same kind of measure as `delta`. It is not a variance share. |
+
+`hsic`, `optimal_transport`, `shapley` and `vkoga` also accept existing data.
+The [methods guide](/guide/methods) lists what each one measures.
 
 ## Rank: first-order effects
 

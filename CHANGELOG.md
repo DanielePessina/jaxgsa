@@ -4,9 +4,10 @@
 
 ### Documentation
 
-- README: "Start from your situation" replaces "Choose a method". Each row names the existing function for a common need: given data, failed runs, many outputs, correlated or categorical inputs, gradients, small budgets.
+- README: a "Capabilities" table replaces "Choose a method". It lists which methods support each capability, with a link to an example. It does not recommend a method.
 - New guide pages: "Sensitivity indices from existing data", "Failed model runs", "Differentiable Sobol indices in JAX" and "Sobol indices on GPU". The GPU page says the published benchmarks are CPU only.
 - New "Validation" page: each method's reference checks, their tier and tolerance, and the test file.
+- Tests: the OpenTURNS Sobol estimator values and the SALib delta class counts are back in the suite as saved values. Live comparisons against SALib, SciPy and POT moved to `scripts/oracles/external_checks.py`, outside the default pytest run (`uv run --extra dev pytest scripts/oracles/external_checks.py`, about 20 s).
 - Concepts: why an S1 estimate can come out slightly above ST. The studio's Sobol result card says the same.
 - Getting started: a field-by-field guide to the verbose output.
 - Examples, the API reference and docstrings call the sample object `design`, as the getting-started guide does.

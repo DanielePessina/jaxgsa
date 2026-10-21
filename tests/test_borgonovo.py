@@ -507,6 +507,36 @@ class TestDeltaXarray:
         assert list(ds.coords["param"].values) == ["x1", "x2", "x3"]
 
 
+class TestPlischkeHeuristic:
+    def test_matches_reference_class_counts(self):
+        """Tier T2 (external library): class counts of the Plischke heuristic.
+
+        Provenance:
+
+        * Tier: T2.
+        * Oracle: SALib, ``SALib.analyze.delta.analyze``, which applies the rule
+          ``min(ceil(N ** (2 / (7 + tanh((1500 - N) / 500)))), 48)``.
+        * Version: SALib 1.5.2.
+        * Run on: 2026-08-18.
+        * Script: ``scripts/oracles/salib_delta_class_counts.py``.
+
+        SALib is a development extra, so the oracle runs locally and the values
+        are typed in here as literals. The test then compares against fixed
+        numbers and never against our own code.
+        """
+        expected = {
+            100: 4,
+            500: 5,
+            1000: 6,
+            1500: 9,
+            5000: 18,
+            10000: 22,
+            100000: 47,
+        }
+        for n_samples, n_classes in expected.items():
+            assert _plischke_n_classes(n_samples) == n_classes, n_samples
+
+
 class TestDeltaRegression:
     """Regression coverage for confirmed code-review findings."""
 

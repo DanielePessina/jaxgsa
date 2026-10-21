@@ -71,24 +71,25 @@ so check their uncertainty before making a close decision.
 The [getting-started tutorial](https://danielepessina.github.io/jaxgsa/guide/getting-started)
 explains each step and how to interpret the result.
 
-## Start from your situation
+## Capabilities
 
-jaxgsa provides fourteen analysis methods. Pick the row that matches your
-work:
+jaxgsa provides fourteen analysis methods. Which one fits depends on your
+model and your question. The table lists what the package supports and
+where to find a worked example:
 
-| Your situation | Use | Read more |
+| Capability | Methods | Example |
 | --- | --- | --- |
-| You can choose where to run the model | `sobol.sample`, then `sobol.analyze` | [Basic example](https://danielepessina.github.io/jaxgsa/examples/basic) |
-| You already have `X` and `Y` with no special design | `rank.analyze(problem, X, Y)` for first-order effects. `pce.analyze` or `hdmr.analyze` for total effects and interactions | [Existing data](https://danielepessina.github.io/jaxgsa/guide/existing-data) |
-| Some model runs failed or returned NaN | `on_invalid="drop"` in `analyze` (every method except eFAST) | [Failed runs](https://danielepessina.github.io/jaxgsa/guide/failed-runs) |
-| Your model has many outputs, or an output over time | Pass `Y` with shape `(N, T)` or `(N, T, K)` | [Multi-output example](https://danielepessina.github.io/jaxgsa/examples/multi-output) |
-| Inputs are correlated | `Problem.with_correlation`, then `kucherenko`, `optimal_transport`, or `shapley` with `backend="hdmr"` | [Dependent inputs](https://danielepessina.github.io/jaxgsa/guide/dependent-inputs) |
-| Inputs are categorical | `CategoricalSpec` with `sobol`, `pawn`, `borgonovo` or `optimal_transport` | [Categorical example](https://danielepessina.github.io/jaxgsa/examples/categorical-inputs) |
-| You need the gradient of an index | `sobol.indices` inside `jax.grad` or `jax.jacrev` | [Differentiation guide](https://danielepessina.github.io/jaxgsa/guide/differentiation) |
-| You have a small budget and many inputs | `morris` | [Morris example](https://danielepessina.github.io/jaxgsa/examples/morris) |
+| Generate a sampling design | `sobol`, `efast`, `morris`, `kucherenko` | [Basic example](https://danielepessina.github.io/jaxgsa/examples/basic) |
+| Analyse existing `X`, `Y` with no special design | `borgonovo`, `hdmr`, `hsic`, `optimal_transport`, `pawn`, `pce`, `rank`, `shapley`, `vkoga` | [Existing data](https://danielepessina.github.io/jaxgsa/guide/existing-data) |
+| Drop failed or NaN model runs (`on_invalid="drop"`) | every method except `efast` | [Failed runs](https://danielepessina.github.io/jaxgsa/guide/failed-runs) |
+| Many outputs, or an output over time, in one call | all methods | [Multi-output example](https://danielepessina.github.io/jaxgsa/examples/multi-output) |
+| Correlated inputs | `borgonovo`, `hdmr`, `hsic`, `kucherenko`, `optimal_transport`, `pawn`, `rank`, `vkoga`, `shapley` with `backend="hdmr"` | [Dependent inputs](https://danielepessina.github.io/jaxgsa/guide/dependent-inputs) |
+| Categorical inputs | `borgonovo`, `optimal_transport`, `pawn`, `sobol` | [Categorical example](https://danielepessina.github.io/jaxgsa/examples/categorical-inputs) |
+| Gradients of an index | differentiable estimator cores | [Differentiation guide](https://danielepessina.github.io/jaxgsa/guide/differentiation) |
+| Bootstrap confidence intervals (`n_bootstrap`) | every method except `efast` and `hsic` (HSIC reports permutation p-values) | [Bootstrap example](https://danielepessina.github.io/jaxgsa/examples/bootstrap) |
 
 The [methods guide](https://danielepessina.github.io/jaxgsa/guide/methods)
-covers all fourteen methods and their assumptions. The
+describes what each method measures and its assumptions. The
 [API reference](https://danielepessina.github.io/jaxgsa/api/) gives signatures
 and result fields.
 
