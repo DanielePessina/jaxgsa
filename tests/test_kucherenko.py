@@ -491,3 +491,80 @@ class TestBootstrap:
         for name in ("S1", "ST"):
             assert f"{name}_lower" in ds
             assert f"{name}_upper" in ds
+
+
+class TestBootstrapMatchesGather:
+    """The count-weight bootstrap equals the resample-gather definition."""
+
+    @staticmethod
+    def _blocks(dtype, n_blocks, n=64, s=3, seed=0):
+        rng = np.random.default_rng(seed)
+        # A large mean makes a lost re-centring show up.
+        return (1e3 + rng.normal(size=(n_blocks, n, s))).astype(dtype).astype(np.float64)
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_first_and_total_match_gathered_estimator(self, dtype):
+        from jaxgsa.kucherenko._analyze import _bootstrap_estimates, _estimate
+
+        D = 3
+        F = self._blocks(dtype, 2 * D + 1)
+        fj, ff, ft = F[0], F[1 : D + 1], F[D + 1 :]
+        rows = np.random.default_rng(1).integers(0, fj.shape[0], size=(7, fj.shape[0]))
+        first, second = _bootstrap_estimates(rows, fj, ff, ft, None, D)
+        for r, i in enumerate(rows):
+            s1, st, _ = _estimate(fj[i], ff[:, i], ft[:, i])
+            np.testing.assert_allclose(first[r], s1, rtol=1e-6, atol=1e-8)
+            np.testing.assert_allclose(second[r], st, rtol=1e-6, atol=1e-8)
+
+    def test_subsets_match_gathered_estimator(self):
+        from jaxgsa.kucherenko._analyze import _bootstrap_estimates, _estimate_subsets
+
+        D = 3
+        F = self._blocks(np.float64, 2**D)
+        fa, fb, fs = F[0], F[1], F[2:]
+        rows = np.random.default_rng(2).integers(0, fa.shape[0], size=(5, fa.shape[0]))
+        first, second = _bootstrap_estimates(rows, fa, fs, None, fb, D)
+        for r, i in enumerate(rows):
+            closed, total, _ = _estimate_subsets(fa[i], fb[i], fs[:, i], D)
+            np.testing.assert_allclose(first[r], closed, rtol=1e-6, atol=1e-8)
+            np.testing.assert_allclose(second[r], total, rtol=1e-6, atol=1e-8)
+
+    def test_resample_that_misses_far_outliers_matches_gather(self):
+        """Two outliers 1e8 sigma away: a resample that drops them stays exact."""
+        from jaxgsa.kucherenko._analyze import _bootstrap_estimates, _estimate
+
+        D, n = 3, 40
+        rng = np.random.default_rng(0)
+        rows = rng.integers(0, n, size=(400, n))
+        missed = ~np.isin(rows, [0, 1]).any(axis=1)
+        assert missed.any()
+        F = rng.normal(size=(2 * D + 1, n, 1))
+        F[:, :2] += 1e8
+        fj, ff, ft = F[0], F[1 : D + 1], F[D + 1 :]
+        first, second = _bootstrap_estimates(rows, fj, ff, ft, None, D)
+        ref = [_estimate(fj[i], ff[:, i], ft[:, i]) for i in rows]
+        ref_first = np.stack([r[0] for r in ref])
+        ref_second = np.stack([r[1] for r in ref])
+        np.testing.assert_array_equal(np.isnan(first), np.isnan(ref_first))
+        np.testing.assert_allclose(first[missed], ref_first[missed], rtol=1e-6, atol=1e-8)
+        np.testing.assert_allclose(second[missed], ref_second[missed], rtol=1e-6, atol=1e-8)
+
+    @pytest.mark.parametrize("subsets", [False, True])
+    def test_chunked_weights_match_unchunked(self, monkeypatch, subsets):
+        """A tiny chunk size (ragged last chunk) changes nothing."""
+        from jaxgsa.kucherenko import _analyze
+        from jaxgsa.kucherenko._analyze import _bootstrap_estimates
+
+        D = 3
+        F = self._blocks(np.float64, 2**D if subsets else 2 * D + 1)
+        n = F.shape[1]
+        rows = np.random.default_rng(3).integers(0, n, size=(7, n))
+        if subsets:
+            args = (rows, F[0], F[2:], None, F[1], D)
+        else:
+            args = (rows, F[0], F[1 : D + 1], F[D + 1 :], None, D)
+        whole = _bootstrap_estimates(*args)
+        monkeypatch.setattr(_analyze, "_BOOT_WEIGHT_ELEMENTS", 3 * n)  # chunks 3, 3, 1
+        chunked = _bootstrap_estimates(*args)
+        for a, b in zip(whole, chunked, strict=True):
+            np.testing.assert_allclose(a, b, rtol=1e-10, atol=1e-12)

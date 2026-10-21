@@ -57,6 +57,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
+from jaxgsa._core.batching import get_memory_budget
 from jaxgsa._core.bootstrap import draw_row_matrix, interval
 from jaxgsa._core.entry import _user_stacklevel, bootstrap_checks, prepare
 from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
@@ -207,6 +208,154 @@ def _estimate_subsets(
     complement = np.arange(1, n_masks) ^ n_masks  # for u = 1 .. 2^D - 2
     total = np.concatenate([total_of_complement[complement - 1], one[None]], axis=0)
     return closed, total, variance
+
+
+# Largest (chunk, N) weight matrix the bootstrap builds, in elements (32 MiB).
+_BOOT_WEIGHT_ELEMENTS = 1 << 22
+
+
+def _count_weights(rows: np.ndarray, n: int) -> np.ndarray:
+    """Resample counts as weights: ``W[r, k]`` is (times base point k drawn) / n.
+
+    Args:
+        rows: Resample indices, shape ``(R, n)``.
+        n: Number of base points.
+
+    Returns:
+        Float64 array of shape ``(R, n)``. The mean of any per-point quantity
+        ``x`` over resample ``r`` is ``W[r] @ x``.
+    """
+    W = np.empty((rows.shape[0], n), dtype=np.float64)
+    for r, row in enumerate(rows):
+        W[r] = np.bincount(row, minlength=n)
+    W /= n
+    return W
+
+
+def _bootstrap_closed(
+    W: np.ndarray,
+    c_a: np.ndarray,
+    f_blocks: np.ndarray,
+    safe_variance: np.ndarray,
+    shift: np.ndarray,
+) -> np.ndarray:
+    """Closed estimate of every block for a chunk of resamples.
+
+    Equals :func:`_closed_estimate` on the gathered rows ``f[rows[r]]``. The
+    covariance is taken about each resample's own means, ``sum_n w_rn
+    (a_n - m_a,r)(b_n - m_b,r)``, in two passes. The one-pass form
+    ``W@(ab) - m_a m_b`` cancels badly when a resample misses a far-off group
+    of points. The cost is a ``(r, N, S)`` temporary, so the caller sizes the
+    chunk ``r`` from the memory budget.
+
+    Args:
+        W: Count weights, shape ``(r, N)``.
+        c_a: Joint block centred about each resample's mean, shape
+            ``(r, N, S)``.
+        f_blocks: Block outputs, shape ``(M, N, S)``.
+        safe_variance: Resample variance with ``NaN`` where undefined,
+            shape ``(r, S)``.
+        shift: Global centring constant, shape ``(S,)``.
+
+    Returns:
+        Array of shape ``(r, M, S)``.
+    """
+    out = np.empty((W.shape[0], f_blocks.shape[0], c_a.shape[2]))
+    for m in range(f_blocks.shape[0]):
+        g_b = f_blocks[m] - shift
+        c_b = g_b[None] - (W @ g_b)[:, None, :]
+        out[:, m] = np.einsum("rn,rns,rns->rs", W, c_a, c_b) / safe_variance
+    return out
+
+
+def _bootstrap_jansen(
+    W: np.ndarray, f_a: np.ndarray, f_blocks: np.ndarray, safe_variance: np.ndarray
+) -> np.ndarray:
+    """Jansen estimate of every block for a chunk of resamples.
+
+    Equals :func:`_jansen_estimate` on gathered rows. The arguments are as in
+    :func:`_bootstrap_closed`; the result has shape ``(R, M, S)``.
+    """
+    out = np.empty((W.shape[0], f_blocks.shape[0], f_a.shape[1]))
+    for m in range(f_blocks.shape[0]):
+        out[:, m] = 0.5 * (W @ (f_a - f_blocks[m]) ** 2) / safe_variance
+    return out
+
+
+def _bootstrap_estimates(
+    rows: np.ndarray,
+    f_joint: np.ndarray,
+    f_blocks: np.ndarray,
+    f_total: np.ndarray | None,
+    f_other: np.ndarray | None,
+    n_params: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Bootstrap replicates of the index estimates, without gathering blocks.
+
+    Each resample takes the same base points out of every block. The result
+    is the point estimator applied to the gathered rows of every resample,
+    in exact arithmetic. In floating point it agrees to rounding error of
+    the centred sums (checked at rtol 1e-6, including a resample that misses
+    outliers 1e8 sigma away). Peak memory is a few ``(r, N, S)`` blocks, with
+    ``r`` set from the memory budget.
+
+    Args:
+        rows: Resample indices, shape ``(R, N)``.
+        f_joint: Joint-block outputs, shape ``(N, S)``.
+        f_blocks: First-order blocks ``(D, N, S)`` or, with ``f_other``, the
+            subset blocks ``(2^D - 2, N, S)``.
+        f_total: Total blocks ``(D, N, S)``, or ``None`` for ``subsets="all"``.
+        f_other: Independent joint block ``B`` for ``subsets="all"``, else
+            ``None``.
+        n_params: Number of parameters ``D``.
+
+    Returns:
+        ``(first, second)`` replicates, each ``(R, M, S)`` with ``M = D`` or
+        ``2^D - 1``.
+    """
+    n, n_slices = f_joint.shape
+    shift = f_joint.mean(axis=0)
+    g_a = f_joint - shift
+    g_b = None if f_other is None else f_other - shift
+    point_var = (
+        f_joint.var(axis=0)
+        if f_other is None
+        else np.concatenate([f_joint, f_other], axis=0).var(axis=0)
+    )
+    # The weight matrix is (r, N); the centred temporaries are (r, N, S) and
+    # about four are live at once, so r is bounded by both.
+    tensor_rows = get_memory_budget() // (4 * 8 * n * n_slices)
+    chunk = max(1, min(_BOOT_WEIGHT_ELEMENTS // n, tensor_rows))
+    first_parts: list[np.ndarray] = []
+    second_parts: list[np.ndarray] = []
+    for start in range(0, rows.shape[0], chunk):
+        W = _count_weights(rows[start : start + chunk], n)
+        c_a = g_a[None] - (W @ g_a)[:, None, :]  # about each resample's mean
+        if g_b is None:
+            var = np.einsum("rn,rns,rns->rs", W, c_a, c_a)
+        else:
+            # Variance of the pooled A and B rows of the resample, about
+            # the pooled mean.
+            pooled = 0.5 * (W @ g_a + W @ g_b)
+            ca = g_a[None] - pooled[:, None, :]
+            cb = g_b[None] - pooled[:, None, :]
+            var = 0.5 * (
+                np.einsum("rn,rns,rns->rs", W, ca, ca) + np.einsum("rn,rns,rns->rs", W, cb, cb)
+            )
+            del ca, cb
+        safe = np.where((var > 0.0) & (point_var > 0.0), var, np.nan)
+        closed = _bootstrap_closed(W, c_a, f_blocks, safe, shift)
+        if f_other is None:
+            assert f_total is not None
+            first_parts.append(closed)
+            second_parts.append(_bootstrap_jansen(W, f_joint, f_total, safe))
+        else:
+            jansen = _bootstrap_jansen(W, f_joint, f_blocks, safe)
+            one = np.where(np.isfinite(safe), 1.0, np.nan)[:, None]
+            complement = np.arange(1, 2**n_params - 1) ^ (2**n_params - 1)
+            first_parts.append(np.concatenate([closed, one], axis=1))
+            second_parts.append(np.concatenate([jansen[:, complement - 1], one], axis=1))
+    return np.concatenate(first_parts), np.concatenate(second_parts)
 
 
 def analyze(
@@ -404,27 +553,15 @@ def analyze(
         n_kept = f_joint.shape[0]
         idx = np.asarray(draw_row_matrix(key, n_bootstrap, n_kept))
 
-        # One transpose makes each resample's gather contiguous.
-        f_sub_t = np.ascontiguousarray(f_sub.transpose(1, 0, 2)) if all_subsets else None
-
-        def replicate(i: np.ndarray) -> tuple[np.ndarray, ...]:
-            """Index estimates of one resample of the base points.
-
-            One resample takes the same base points out of every block, so
-            every conditional row still sits beside the joint row it was
-            drawn around.
-            """
-            if all_subsets:
-                assert f_sub_t is not None
-                return _estimate_subsets(f_joint[i], f_other[i], f_sub_t[i].transpose(1, 0, 2), D)[
-                    :2
-                ]
-            assert f_first is not None and f_total is not None
-            return _estimate(f_joint[i], f_first[:, i], f_total[:, i])[:2]
-
-        replicates = [replicate(i) for i in idx]
-        boot_first = np.stack([r[0] for r in replicates])  # (R, D or 2^D - 1, S)
-        boot_second = np.stack([r[1] for r in replicates])
+        # Resamples read through count weights (no gathered block copies).
+        boot_first, boot_second = _bootstrap_estimates(
+            idx,
+            f_joint,
+            f_sub if f_first is None else f_first,
+            f_total,
+            f_other if all_subsets else None,
+            D,
+        )  # (R, D or 2^D - 1, S)
         # _shape already squeezes to the caller's own rank; interval() reads
         # a shape only to broadcast [lower, upper], so it works the same on
         # this squeezed layout as on the raw (T, K, D) one.
