@@ -847,6 +847,29 @@ _COLLAPSE_CHECK_MAX_ROWS = 2048
 """Rows used by the host near-collapse check (an even stride subsample)."""
 
 
+def _nonzero_pair_sq_dists(col: np.ndarray) -> np.ndarray:
+    """Return the non-zero squared distances over all pairs ``i < j`` of a column.
+
+    The pairs are built row by row into one flat buffer. This avoids the full
+    ``(n, n)`` matrix and the ``triu_indices`` arrays.
+
+    Args:
+        col: Finite samples, shape ``(n,)``.
+
+    Returns:
+        Squared distances above zero, in no particular order.
+    """
+    n = col.size
+    buf = np.empty(n * (n - 1) // 2, dtype=np.float64)
+    pos = 0
+    for i in range(n - 1):
+        m = n - 1 - i
+        np.subtract(col[i + 1 :], col[i], out=buf[pos : pos + m])
+        pos += m
+    np.square(buf, out=buf)
+    return buf[buf > 0]
+
+
 def _collapsed_median_labels(values: np.ndarray) -> list[int]:
     """Return the columns whose median heuristic nearly collapses.
 
@@ -876,9 +899,7 @@ def _collapsed_median_labels(values: np.ndarray) -> list[int]:
         var = float(np.var(col)) if col.size else 0.0
         if var == 0.0:
             continue
-        d2 = (col[:, None] - col[None, :]) ** 2
-        nonzero = d2[np.triu_indices(col.size, k=1)]
-        nonzero = nonzero[nonzero > 0]
+        nonzero = _nonzero_pair_sq_dists(col)
         if nonzero.size and float(np.median(nonzero)) < _NEAR_COLLAPSE_RATIO * var:
             bad.append(c)
     return bad

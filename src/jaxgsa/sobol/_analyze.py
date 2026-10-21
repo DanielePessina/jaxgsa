@@ -507,6 +507,48 @@ def _flatten_slices(
     return A_flat, AB_flat, BA_flat, B_flat
 
 
+def _point_kernel_chunk(
+    blocks: tuple[Array, Array, Array | None, Array],
+    *,
+    D: int,
+    is_scalar: bool,
+    estimator: str,
+) -> tuple[Array, Array, Array | None]:
+    """Run the point-estimate kernel on one already-separated chunk of slices.
+
+    Both :func:`_point_indices_3d` and the bootstrap loop call this on the
+    blocks they already built, so a chunk is standardized, split and flattened
+    once, and the point estimate comes from the same arithmetic on both paths.
+
+    Args:
+        blocks: ``(A, AB, BA, B)`` from :meth:`_SeparatedSlices.chunk`. ``BA``
+            is ``None`` when second order is off.
+        D: Number of input parameters.
+        is_scalar: Whether the single slice takes the direct fused-kernel path
+            (T*K=1, so the chunk holds one slice).
+        estimator: Which named estimator pair to use.
+
+    Returns:
+        ``(S1, ST, S2)`` with a leading slice axis: ``(n, D)``, ``(n, D)`` and
+        ``(n, D, D)``, ``S2`` ``None`` when second order is off. Padded lanes
+        are still present; the caller drops them.
+    """
+    A_c, AB_c, BA_c, B_c = blocks
+    if is_scalar:
+        # Scalar path (T*K=1): call the fused kernel directly on 1-D arrays.
+        # This avoids vmap dispatch overhead and produces a simpler XLA graph.
+        a, b, ab = A_c[0], B_c[0], AB_c[0]
+        if BA_c is not None:
+            s1, st, s2_raw = _get_scalar_kernel(True, estimator)(a, ab, BA_c[0], b)
+            return s1.reshape(1, D), st.reshape(1, D), s2_raw.reshape(1, D, D)
+        s1, st = _get_scalar_kernel(False, estimator)(a, ab, b)
+        return s1.reshape(1, D), st.reshape(1, D), None
+    if BA_c is not None:
+        return _get_batched_kernel(True, estimator)(A_c, AB_c, BA_c, B_c)
+    s1, st = _get_batched_kernel(False, estimator)(A_c, AB_c, B_c)
+    return s1, st, None
+
+
 def _point_indices_3d(
     slices: _SeparatedSlices,
     *,
@@ -519,10 +561,9 @@ def _point_indices_3d(
 ) -> tuple[Array, Array, Array | None]:
     """Run the estimator over every output slice, in the promoted 3-D layout.
 
-    This is the one place the point-estimate kernels are called. Both
-    :func:`_indices_from_expanded` and the bootstrap path go through it, so
-    an index and the centre of its confidence interval come from the same
-    arithmetic by construction.
+    :func:`_indices_from_expanded` calls it. The bootstrap path calls
+    :func:`_point_kernel_chunk` directly on the blocks it already built, so
+    both paths run the same point-estimate kernel.
 
     The shape is the library's usual one: an atomic kernel for a single
     slice, ``vmap`` over a chunk of slices, a host loop over the chunks. A
@@ -568,55 +609,27 @@ def _point_indices_3d(
         slices.dtype.itemsize,
     )
 
-    if is_scalar:
-        # Scalar path (T*K=1): call the fused kernel directly on 1-D arrays.
-        # This avoids vmap dispatch overhead and produces a simpler XLA graph.
-        A_flat, AB_flat, BA_flat, B_flat = slices.chunk(0, 1, 1)
-        a, b, ab = A_flat[0], B_flat[0], AB_flat[0]
-        if calc_second_order:
-            assert BA_flat is not None
-            kernel = _get_scalar_kernel(True, estimator)
-            s1, st, s2_raw = kernel(a, ab, BA_flat[0], b)
-            S2_out = s2_raw.reshape(1, 1, D, D)
-        else:
-            kernel = _get_scalar_kernel(False, estimator)
-            s1, st = kernel(a, ab, b)
-            S2_out = None
-        return s1.reshape(1, 1, D), st.reshape(1, 1, D), S2_out
-
     # Every chunk is padded back to `cs` slices, so the kernel traces once
     # instead of once more for a ragged tail. The padded lanes are separate
     # vmap lanes and are dropped before anything reads them.
-    if calc_second_order:
-        batched = _get_batched_kernel(True, estimator)
-        s1_parts, st_parts, s2_parts = [], [], []
-        for start in range(0, total, cs):
-            end = min(start + cs, total)
-            actual = end - start
-            A_c, AB_c, BA_c, B_c = slices.chunk(start, end, cs)
-            s1, st, s2 = batched(A_c, AB_c, BA_c, B_c)
-            s1_parts.append(s1[:actual])
-            st_parts.append(st[:actual])
+    s1_parts, st_parts, s2_parts = [], [], []
+    for start in range(0, total, cs):
+        end = min(start + cs, total)
+        actual = end - start
+        s1, st, s2 = _point_kernel_chunk(
+            slices.chunk(start, end, cs),
+            D=D,
+            is_scalar=is_scalar,
+            estimator=estimator,
+        )
+        s1_parts.append(s1[:actual])
+        st_parts.append(st[:actual])
+        if s2 is not None:
             s2_parts.append(s2[:actual])
 
-        S1_out = jnp.concatenate(s1_parts).reshape(T, K, D)
-        ST_out = jnp.concatenate(st_parts).reshape(T, K, D)
-        S2_out = jnp.concatenate(s2_parts).reshape(T, K, D, D)
-    else:
-        batched = _get_batched_kernel(False, estimator)
-        s1_parts, st_parts = [], []
-        for start in range(0, total, cs):
-            end = min(start + cs, total)
-            actual = end - start
-            A_c, AB_c, _, B_c = slices.chunk(start, end, cs)
-            s1, st = batched(A_c, AB_c, B_c)
-            s1_parts.append(s1[:actual])
-            st_parts.append(st[:actual])
-
-        S1_out = jnp.concatenate(s1_parts).reshape(T, K, D)
-        ST_out = jnp.concatenate(st_parts).reshape(T, K, D)
-        S2_out = None
-
+    S1_out = jnp.concatenate(s1_parts).reshape(T, K, D)
+    ST_out = jnp.concatenate(st_parts).reshape(T, K, D)
+    S2_out = jnp.concatenate(s2_parts).reshape(T, K, D, D) if calc_second_order else None
     return S1_out, ST_out, S2_out
 
 
@@ -891,9 +904,10 @@ def _analyze_bootstrap(
 ) -> SobolResult:
     """Compute Sobol indices with bootstrap confidence intervals.
 
-    The point estimates come from :func:`_point_indices_3d`, the same chunked
-    ``vmap`` the no-bootstrap path uses, so an interval is always centred on
-    the number the plain analysis reports.
+    The point estimates come from :func:`_point_kernel_chunk`, run on the
+    same blocks as the draws, so each chunk is prepared once. It is the kernel
+    the no-bootstrap path uses. The chunk width can be narrower here, so the
+    two paths agree to float rounding, not bit for bit.
 
     The draws follow the same shape one level deeper. The atomic unit is one
     estimator call on one slice and one resample; the resamples of a slice are
@@ -918,16 +932,6 @@ def _analyze_bootstrap(
     # across (T, K) slices so every output sees the same resamples.
     draw_keys = resample_keys(key, n_bootstrap)
 
-    S1_out, ST_out, S2_raw = _point_indices_3d(
-        slices,
-        T=T,
-        K=K,
-        D=D,
-        is_scalar=layout is YLayout.SCALAR,
-        slice_chunk_size=slice_chunk_size,
-        estimator=estimator,
-    )
-
     cs = resolve_point_chunk_size(
         slice_chunk_size,
         total,
@@ -951,22 +955,25 @@ def _analyze_bootstrap(
         cs,
     )
 
-    S1_flat = S1_out.reshape(total, D)
-    ST_flat = ST_out.reshape(total, D)
-    S2_sym = None
-    if calc_second_order:
-        assert S2_raw is not None
-        S2_sym = _symmetrize_s2(S2_raw)
-        S2_flat = S2_sym.reshape(total, D, D)
-    else:
-        S2_flat = None
-
+    point_s1, point_st, point_s2 = [], [], []
     s1_draw_parts, st_draw_parts, s2_draw_parts = [], [], []
     s1_conf_parts, st_conf_parts, s2_conf_parts = [], [], []
     for start in range(0, total, cs):
         end = min(start + cs, total)
         actual = end - start
-        A_chunk, AB_chunk, BA_chunk, B_chunk = slices.chunk(start, end, cs)
+        blocks = slices.chunk(start, end, cs)
+        A_chunk, AB_chunk, BA_chunk, B_chunk = blocks
+        # The point estimate reuses the blocks the draws need, so each chunk is
+        # prepared once. The interval is centred on this exact value.
+        s1_pt, st_pt, s2_pt = _point_kernel_chunk(
+            blocks,
+            D=D,
+            is_scalar=layout is YLayout.SCALAR,
+            estimator=estimator,
+        )
+        s1_pt, st_pt = s1_pt[:actual], st_pt[:actual]
+        point_s1.append(s1_pt)
+        point_st.append(st_pt)
         s1_chunk, st_chunk, s2_chunk = _bootstrap_indices(
             draw_keys,
             A_chunk,
@@ -985,13 +992,13 @@ def _analyze_bootstrap(
 
         if not keep_replicates:
             s1_lo, s1_hi = _bootstrap_ci_endpoints(
-                S1_flat[start:end],
+                s1_pt,
                 s1_draws,
                 conf_level=conf_level,
                 ci_method=ci_method,
             )
             st_lo, st_hi = _bootstrap_ci_endpoints(
-                ST_flat[start:end],
+                st_pt,
                 st_draws,
                 conf_level=conf_level,
                 ci_method=ci_method,
@@ -1000,18 +1007,24 @@ def _analyze_bootstrap(
             st_conf_parts.append(jnp.stack([st_lo, st_hi]))
 
         if calc_second_order:
-            assert s2_chunk is not None and S2_flat is not None
+            assert s2_chunk is not None and s2_pt is not None
+            s2_pt = _symmetrize_s2(s2_pt[:actual])
+            point_s2.append(s2_pt)
             s2_draws = _symmetrize_s2(jnp.moveaxis(s2_chunk[:actual], 1, 0))
             if keep_replicates:
                 s2_draw_parts.append(s2_draws)
             if not keep_replicates:
                 s2_lo, s2_hi = _bootstrap_ci_endpoints(
-                    S2_flat[start:end],
+                    s2_pt,
                     s2_draws,
                     conf_level=conf_level,
                     ci_method=ci_method,
                 )
                 s2_conf_parts.append(jnp.stack([s2_lo, s2_hi]))
+
+    S1_out = jnp.concatenate(point_s1).reshape(T, K, D)
+    ST_out = jnp.concatenate(point_st).reshape(T, K, D)
+    S2_sym = jnp.concatenate(point_s2).reshape(T, K, D, D) if calc_second_order else None
 
     if keep_replicates:
         S1_boot = jnp.concatenate(s1_draw_parts, axis=1).reshape(n_bootstrap, T, K, D)
