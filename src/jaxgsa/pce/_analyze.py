@@ -44,7 +44,7 @@ from jaxgsa._core.irregular import (
 )
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.surrogate import _PredictPlan
-from jaxgsa._core.transforms import GROUPED_MIN_D, _in_column_order
+from jaxgsa._core.transforms import GROUPED_MIN_D, _in_column_order, family_cdf_block
 from jaxgsa._core.validation import (
     _prepare_Y,
     as_key,
@@ -62,7 +62,14 @@ from jaxgsa.pce._engine import (
     truncated_gaussian_family,
 )
 from jaxgsa.pce._result import PCEResult
-from jaxgsa.problem import CategoricalSpec, GaussianSpec, Problem, UniformSpec
+from jaxgsa.problem import (
+    _CONTINUOUS_FAMILY_SPECS,
+    CategoricalSpec,
+    ContinuousFamilySpec,
+    GaussianSpec,
+    Problem,
+    UniformSpec,
+)
 
 # Keyword-only parameters the irregular engine forwards unchanged to the
 # per-channel recursive analyze() calls. verbose is excluded:
@@ -96,7 +103,10 @@ def _map_to_reference(
 
     This is the Wiener-Askey rule. Uniform inputs use Legendre, mapped to
     [-1, 1]. Untruncated Gaussian inputs use Hermite, standardized to
-    N(0, 1).
+    N(0, 1). Lognormal, Weibull, triangular and beta inputs have no matched
+    basis here: they are mapped to U(0, 1) through their own CDF and then use
+    Legendre like a uniform input. The indices stay unbiased, but convergence
+    in the degree is algebraic rather than spectral.
 
     A truncated Gaussian has no classical family, so it gets the orthonormal
     polynomials of its own measure. The input is standardised by the mean and
@@ -184,6 +194,11 @@ def _map_by_column(
             cols.append(2.0 * (X[:, d] - spec.low) / (spec.high - spec.low) - 1.0)
             input_types.append("uniform")
             continue
+        if isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
+            # No matched basis: map through the CDF to U(0, 1) and use Legendre.
+            cols.append(2.0 * family_cdf_block(X[:, d : d + 1], [spec])[:, 0] - 1.0)
+            input_types.append("uniform")
+            continue
         if not isinstance(spec, GaussianSpec):
             raise TypeError(f"unsupported marginal {type(spec).__name__}")
 
@@ -221,6 +236,8 @@ def _map_by_group(
     uniform: list[int] = []
     standard: list[int] = []  # Gaussian, truncated or not: (x - centre) / scale
     consts: dict[int, tuple[float, float]] = {}
+    # lognormal, Weibull, triangular, beta: CDF to U(0, 1), then Legendre
+    families: dict[str, list[tuple[int, ContinuousFamilySpec]]] = {}
     for d in range(D):
         spec = problem.input_specs[d]
         if isinstance(spec, CategoricalSpec):
@@ -233,6 +250,10 @@ def _map_by_group(
             uniform.append(d)
             input_types[d] = "uniform"
             consts[d] = (spec.low, spec.high - spec.low)
+            continue
+        if isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
+            families.setdefault(spec.dist, []).append((d, spec))
+            input_types[d] = "uniform"
             continue
         if not isinstance(spec, GaussianSpec):
             raise TypeError(f"unsupported marginal {type(spec).__name__}")
@@ -253,6 +274,10 @@ def _map_by_group(
     if standard:
         centre, scale = column_consts(standard)
         parts.append((standard, (X[:, standard] - centre) / scale))
+    for members in families.values():
+        group = [d for d, _ in members]
+        u = family_cdf_block(X[:, group], [spec for _, spec in members])
+        parts.append((group, 2.0 * u - 1.0))
 
     return _in_column_order(parts, D), tuple(input_types)
 

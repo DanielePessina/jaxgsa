@@ -47,7 +47,8 @@ def monte_carlo(
     """Draw Monte Carlo samples from a problem's marginals.
 
     Each column follows the corresponding parameter's declared input
-    distribution (uniform, Gaussian, truncated Gaussian, or categorical) via
+    distribution (uniform, Gaussian, truncated Gaussian, lognormal, Weibull,
+    triangular, beta, or categorical) via
     inverse-CDF transformation of pseudo-random draws; a categorical column
     comes back as level codes drawn with the declared probabilities. Unlike
     :func:`jaxgsa.sobol.sample`, this uses plain pseudo-random draws with no

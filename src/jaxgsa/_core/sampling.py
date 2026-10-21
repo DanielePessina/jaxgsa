@@ -16,14 +16,23 @@ import math
 from typing import Any, Mapping, TypeAlias
 
 import jax
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
 from jax.scipy.special import ndtr, ndtri
 from scipy.stats import norm, truncnorm
 
+from jaxgsa._core import marginals
 from jaxgsa._core.precision import unit_clip_bounds
-from jaxgsa.problem import CategoricalSpec, GaussianSpec, Problem, UniformSpec
+from jaxgsa.problem import (
+    _CONTINUOUS_FAMILY_SPECS,
+    BetaSpec,
+    CategoricalSpec,
+    GaussianSpec,
+    Problem,
+    UniformSpec,
+)
 
 
 def check_seed(seed: object, who: str) -> None:
@@ -251,6 +260,12 @@ def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray
                 low=spec.low,
                 high=spec.high,
             )
+        elif isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
+            # Same clip as the Gaussian: the lognormal and Weibull inverse
+            # CDFs are infinite at u = 1, and it is harmless for the bounded
+            # triangular and beta families.
+            clipped = np.clip(samples_unit[:, idx], UNIT_CLIP, 1.0 - UNIT_CLIP)
+            transformed[:, idx] = marginals.host_ppf(spec, clipped)
         else:
             raise TypeError(f"unsupported marginal {type(spec).__name__}")
 
@@ -282,6 +297,14 @@ def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray
 _THETA_FIELDS: dict[str, frozenset[str]] = {
     "uniform": frozenset({"low", "high"}),
     "gaussian": frozenset({"mean", "variance", "low", "high"}),
+    "lognormal": frozenset({"mu", "sigma"}),
+    "weibull": frozenset({"shape", "scale"}),
+    "triangular": frozenset({"low", "mode", "high"}),
+    # The beta shape parameters a and b are fixed: JAX has no betaincinv,
+    # and jax.scipy.special.betainc has no gradient in a or b. The inverse
+    # CDF is therefore computed on the host and only the affine map onto
+    # [low, high] is traced. See _validate_theta for the refusal.
+    "beta": frozenset({"low", "high"}),
 }
 
 
@@ -419,6 +442,16 @@ def _validate_theta(problem: Problem, theta: Theta) -> None:
                 f"Known parameters: {list(problem.names)}"
             )
         dist = problem.input_specs[problem.names.index(name)].dist
+        if dist == "beta":
+            shape_fields = sorted(set(fields) & {"a", "b"})
+            if shape_fields:
+                raise ValueError(
+                    f"theta[{name!r}] sets the beta shape parameter(s) {shape_fields}, "
+                    "which transform() cannot differentiate: JAX has no inverse of the "
+                    "regularized incomplete beta function, and its betainc has no "
+                    "gradient in a or b. Only 'low' and 'high' of a beta input can "
+                    "be varied."
+                )
         allowed = _THETA_FIELDS.get(dist, frozenset())
         unknown = sorted(set(fields) - allowed)
         if unknown:
@@ -463,6 +496,24 @@ def _jax_transform_samples(
     else:
         _validate_theta(problem, theta)
 
+    # The beta inverse CDF has no JAX implementation. Its standard quantiles
+    # depend only on the unit design and the fixed shape parameters, so they
+    # are computed once on the host, in float64, before anything is traced.
+    beta_z: dict[int, np.ndarray] = {}
+    for idx, (name, spec) in enumerate(zip(problem.names, problem.input_specs)):
+        if not isinstance(spec, BetaSpec):
+            continue
+        if isinstance(samples_unit, jax.core.Tracer):
+            raise ValueError(
+                f"Parameter {name!r} is beta-distributed; its inverse CDF is computed "
+                "on the host, so the unit design must be a concrete array, not a "
+                "traced one"
+            )
+        unit_column = np.clip(
+            np.asarray(samples_unit[:, idx], dtype=np.float64), UNIT_CLIP, 1.0 - UNIT_CLIP
+        )
+        beta_z[idx] = marginals.beta_unit_quantiles(spec, unit_column)
+
     samples_unit = jnp.asarray(samples_unit)
     columns = []
     for idx, (name, spec) in enumerate(zip(problem.names, problem.input_specs)):
@@ -487,6 +538,19 @@ def _jax_transform_samples(
                     fields.get("variance", spec.variance),
                     low=fields.get("low", spec.low),
                     high=fields.get("high", spec.high),
+                )
+            )
+        elif isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
+            # Same clip as the Gaussian, brought inside the column dtype. The
+            # Weibull shape gradient is NaN at u = 0, and the lognormal and
+            # Weibull inverse CDFs are infinite at u = 1.
+            clip_lo, clip_hi = unit_clip_bounds(UNIT_CLIP, unit_column.dtype)
+            columns.append(
+                marginals.jax_ppf(
+                    spec,
+                    jnp.clip(unit_column, clip_lo, clip_hi),
+                    dict(fields),
+                    beta_z=beta_z.get(idx),
                 )
             )
         else:
@@ -563,6 +627,8 @@ def _inverse_transform_samples(problem: Problem, samples_physical: np.ndarray) -
                 low=spec.low,
                 high=spec.high,
             )
+        elif isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
+            unit[:, idx] = marginals.host_cdf(spec, samples_physical[:, idx])
         else:
             raise TypeError(f"unsupported marginal {type(spec).__name__}")
 

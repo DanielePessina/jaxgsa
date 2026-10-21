@@ -62,6 +62,59 @@ class CategoricalInputSpec(TypedDict):
     labels: NotRequired[list[str | int | float]]
 
 
+class LognormalInputSpec(TypedDict):
+    """Lognormal marginal distribution: ``log(X)`` is normal.
+
+    Pass to :meth:`Problem.from_dict` as
+    ``{"dist": "lognormal", "mu": 0.0, "sigma": 0.5}``. ``mu`` and ``sigma``
+    are the mean and standard deviation of the underlying normal, not of
+    ``X``.
+    """
+
+    dist: Literal["lognormal"]
+    mu: float
+    sigma: float
+
+
+class WeibullInputSpec(TypedDict):
+    """Weibull marginal distribution on ``[0, inf)``.
+
+    Pass to :meth:`Problem.from_dict` as
+    ``{"dist": "weibull", "shape": 2.0, "scale": 1.0}``.
+    """
+
+    dist: Literal["weibull"]
+    shape: float
+    scale: float
+
+
+class TriangularInputSpec(TypedDict):
+    """Triangular marginal distribution on ``[low, high]`` with peak at ``mode``.
+
+    Pass to :meth:`Problem.from_dict` as
+    ``{"dist": "triangular", "low": 0.0, "mode": 0.3, "high": 1.0}``.
+    """
+
+    dist: Literal["triangular"]
+    low: float
+    mode: float
+    high: float
+
+
+class BetaInputSpec(TypedDict):
+    """Beta marginal distribution, rescaled to ``[low, high]``.
+
+    Pass to :meth:`Problem.from_dict` as
+    ``{"dist": "beta", "a": 2.0, "b": 5.0, "low": 0.0, "high": 1.0}``.
+    """
+
+    dist: Literal["beta"]
+    a: float
+    b: float
+    low: float
+    high: float
+
+
 # Hashable canonical storage for a validated latent correlation matrix.
 _CorrelationTuple: TypeAlias = tuple[tuple[float, ...], ...]
 
@@ -75,6 +128,10 @@ _INPUT_SPEC_KEYS: dict[str, frozenset[str]] = {
     "uniform": frozenset({"dist", "low", "high"}),
     "gaussian": frozenset({"dist", "mean", "variance", "low", "high"}),
     "categorical": frozenset({"dist", "probs", "labels"}),
+    "lognormal": frozenset({"dist", "mu", "sigma"}),
+    "weibull": frozenset({"dist", "shape", "scale"}),
+    "triangular": frozenset({"dist", "low", "mode", "high"}),
+    "beta": frozenset({"dist", "a", "b", "low", "high"}),
 }
 
 # A correlation entry that touches a categorical parameter counts as a real
@@ -259,9 +316,212 @@ class CategoricalSpec:
         object.__setattr__(self, "labels", label_values)
 
 
+def _finite_float(value: float, family: str, field_name: str) -> float:
+    """Coerce a spec parameter to a finite Python float.
+
+    Args:
+        value: The parameter as given.
+        family: Family name for the message, such as ``"Lognormal"``.
+        field_name: Parameter name for the message.
+
+    Returns:
+        ``value`` as a Python float.
+
+    Raises:
+        ValueError: If the value is not finite.
+    """
+    # Coerce to Python float to keep JAX tracers and numpy scalars out of
+    # hashable jit-cache metadata.
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{family} input requires a finite {field_name}, got {result!r}")
+    return result
+
+
+def _positive_float(value: float, family: str, field_name: str) -> float:
+    """Coerce a spec parameter to a finite, strictly positive Python float.
+
+    Raises:
+        ValueError: If the value is not finite or not above 0.
+    """
+    result = _finite_float(value, family, field_name)
+    if not result > 0:
+        raise ValueError(f"{family} input requires {field_name} > 0, got {result!r}")
+    return result
+
+
+@dataclass(frozen=True)
+class LognormalSpec:
+    """Lognormal marginal distribution: ``log(X) ~ N(mu, sigma**2)``.
+
+    This is SciPy's ``lognorm(s=sigma, scale=exp(mu))``. The support is
+    ``(0, inf)``. Sampling clips the unit coordinate to
+    ``[UNIT_CLIP, 1 - UNIT_CLIP]``, so draws stay finite. In float32 the
+    largest draw overflows when ``mu + 5.3 * sigma`` exceeds about 88.
+
+    Attributes:
+        mu: Mean of the underlying normal (of ``log X``). Must be finite.
+        sigma: Standard deviation of the underlying normal, strictly positive
+            and finite.
+    """
+
+    mu: float
+    sigma: float
+
+    #: Distribution tag, matching the ``"dist"`` key of the dict input form.
+    dist: ClassVar[Literal["lognormal"]] = "lognormal"
+
+    def __post_init__(self) -> None:
+        """Coerce the parameters to Python floats and validate them.
+
+        Raises:
+            ValueError: If ``mu`` is not finite or ``sigma`` is not finite
+                and positive.
+        """
+        object.__setattr__(self, "mu", _finite_float(self.mu, "Lognormal", "mu"))
+        object.__setattr__(self, "sigma", _positive_float(self.sigma, "Lognormal", "sigma"))
+
+    def support(self) -> tuple[float, float]:
+        """Return the support ``[0, inf)``."""
+        return (0.0, math.inf)
+
+
+@dataclass(frozen=True)
+class WeibullSpec:
+    """Weibull marginal distribution with CDF ``1 - exp(-(x / scale)**shape)``.
+
+    This is SciPy's ``weibull_min(c=shape, scale=scale)``. The support is
+    ``[0, inf)``.
+
+    Attributes:
+        shape: Shape parameter ``k``, strictly positive and finite.
+        scale: Scale parameter ``lambda``, strictly positive and finite.
+    """
+
+    shape: float
+    scale: float
+
+    #: Distribution tag, matching the ``"dist"`` key of the dict input form.
+    dist: ClassVar[Literal["weibull"]] = "weibull"
+
+    def __post_init__(self) -> None:
+        """Coerce the parameters to Python floats and validate them.
+
+        Raises:
+            ValueError: If ``shape`` or ``scale`` is not finite and positive.
+        """
+        object.__setattr__(self, "shape", _positive_float(self.shape, "Weibull", "shape"))
+        object.__setattr__(self, "scale", _positive_float(self.scale, "Weibull", "scale"))
+
+    def support(self) -> tuple[float, float]:
+        """Return the support ``[0, inf)``."""
+        return (0.0, math.inf)
+
+
+@dataclass(frozen=True)
+class TriangularSpec:
+    """Triangular marginal distribution on ``[low, high]`` with peak at ``mode``.
+
+    This is SciPy's ``triang(c=(mode - low) / (high - low), loc=low,
+    scale=high - low)``. ``mode`` may equal ``low`` or ``high``, as SciPy
+    allows; the density is then a right-angled triangle.
+
+    Attributes:
+        low: Lower end of the support. Must be finite.
+        mode: Peak of the density, with ``low <= mode <= high``.
+        high: Upper end of the support, strictly above ``low``.
+    """
+
+    low: float
+    mode: float
+    high: float
+
+    #: Distribution tag, matching the ``"dist"`` key of the dict input form.
+    dist: ClassVar[Literal["triangular"]] = "triangular"
+
+    def __post_init__(self) -> None:
+        """Coerce the parameters to Python floats and validate them.
+
+        Raises:
+            ValueError: If any parameter is not finite, ``low`` is not
+                strictly below ``high``, or ``mode`` is outside
+                ``[low, high]``.
+        """
+        object.__setattr__(self, "low", _finite_float(self.low, "Triangular", "low"))
+        object.__setattr__(self, "mode", _finite_float(self.mode, "Triangular", "mode"))
+        object.__setattr__(self, "high", _finite_float(self.high, "Triangular", "high"))
+        if not self.low < self.high:
+            raise ValueError(
+                f"Triangular input requires low < high, got {(self.low, self.high)!r}"
+            )
+        if not self.low <= self.mode <= self.high:
+            raise ValueError(
+                "Triangular input requires low <= mode <= high, got "
+                f"{(self.low, self.mode, self.high)!r}"
+            )
+
+    def support(self) -> tuple[float, float]:
+        """Return the support ``(low, high)``."""
+        return (self.low, self.high)
+
+
+@dataclass(frozen=True)
+class BetaSpec:
+    """Beta marginal distribution, rescaled to ``[low, high]``.
+
+    This is SciPy's ``beta(a, b, loc=low, scale=high - low)``. The defaults
+    give the standard beta on ``[0, 1]``.
+
+    Attributes:
+        a: First shape parameter, strictly positive and finite.
+        b: Second shape parameter, strictly positive and finite.
+        low: Lower end of the support. Must be finite.
+        high: Upper end of the support, strictly above ``low``.
+    """
+
+    a: float
+    b: float
+    low: float = 0.0
+    high: float = 1.0
+
+    #: Distribution tag, matching the ``"dist"`` key of the dict input form.
+    dist: ClassVar[Literal["beta"]] = "beta"
+
+    def __post_init__(self) -> None:
+        """Coerce the parameters to Python floats and validate them.
+
+        Raises:
+            ValueError: If ``a`` or ``b`` is not finite and positive, a bound
+                is not finite, or ``low`` is not strictly below ``high``.
+        """
+        object.__setattr__(self, "a", _positive_float(self.a, "Beta", "a"))
+        object.__setattr__(self, "b", _positive_float(self.b, "Beta", "b"))
+        object.__setattr__(self, "low", _finite_float(self.low, "Beta", "low"))
+        object.__setattr__(self, "high", _finite_float(self.high, "Beta", "high"))
+        if not self.low < self.high:
+            raise ValueError(f"Beta input requires low < high, got {(self.low, self.high)!r}")
+
+    def support(self) -> tuple[float, float]:
+        """Return the support ``(low, high)``."""
+        return (self.low, self.high)
+
+
 # Canonical stored form of one parameter's marginal. This is what
 # `Problem.input_specs` returns, and what every internal consumer reads.
-InputSpec: TypeAlias = UniformSpec | GaussianSpec | CategoricalSpec
+InputSpec: TypeAlias = (
+    UniformSpec
+    | GaussianSpec
+    | CategoricalSpec
+    | LognormalSpec
+    | WeibullSpec
+    | TriangularSpec
+    | BetaSpec
+)
+
+# The four continuous families added in 1.3. They share one code path in the
+# samplers and transforms (``jaxgsa._core.marginals``).
+ContinuousFamilySpec: TypeAlias = LognormalSpec | WeibullSpec | TriangularSpec | BetaSpec
+_CONTINUOUS_FAMILY_SPECS = (LognormalSpec, WeibullSpec, TriangularSpec, BetaSpec)
 
 # Public-facing input union -- users pass one of these per parameter.
 InputSpecValue: TypeAlias = (
@@ -270,9 +530,17 @@ InputSpecValue: TypeAlias = (
     | UniformInputSpec
     | GaussianInputSpec
     | CategoricalInputSpec
+    | LognormalInputSpec
+    | WeibullInputSpec
+    | TriangularInputSpec
+    | BetaInputSpec
     | UniformSpec
     | GaussianSpec
     | CategoricalSpec
+    | LognormalSpec
+    | WeibullSpec
+    | TriangularSpec
+    | BetaSpec
 )
 
 
@@ -281,11 +549,11 @@ def _normalize_input_spec(spec: InputSpecValue) -> InputSpec:
 
     Raises:
         ValueError: If ``spec`` is not a tuple, a dict with a ``"dist"`` key,
-            or one of the three spec dataclasses, if a dict with a known
+            or one of the spec dataclasses, if a dict with a known
             ``"dist"`` is missing one of that distribution's required keys,
             or if it carries keys outside that distribution's declared set.
     """
-    if isinstance(spec, UniformSpec | GaussianSpec | CategoricalSpec):
+    if isinstance(spec, UniformSpec | GaussianSpec | CategoricalSpec | ContinuousFamilySpec):
         return spec  # already canonical and validated by its own __post_init__
     if isinstance(spec, tuple | list):  # bare (low, high) pair is shorthand for uniform
         if len(spec) != 2:
@@ -294,13 +562,14 @@ def _normalize_input_spec(spec: InputSpecValue) -> InputSpec:
     if not isinstance(spec, dict):
         raise ValueError(
             f"Unsupported input spec {spec!r}; pass a (low, high) tuple, a "
-            "UniformSpec, GaussianSpec, or CategoricalSpec instance, or a "
-            "dict with a 'dist' key ('uniform', 'gaussian', or 'categorical')"
+            "UniformSpec, GaussianSpec, CategoricalSpec, LognormalSpec, "
+            "WeibullSpec, TriangularSpec, or BetaSpec instance, or a dict with "
+            f"a 'dist' key (one of {sorted(_INPUT_SPEC_KEYS)})"
         )
     if "dist" not in spec:
         raise ValueError(
             f"Input spec dict {spec!r} has no 'dist' key; give one of "
-            "'uniform', 'gaussian', or 'categorical', or pass a bare "
+            f"{sorted(_INPUT_SPEC_KEYS)}, or pass a bare "
             "(low, high) tuple for a uniform marginal"
         )
 
@@ -330,6 +599,14 @@ def _normalize_input_spec(spec: InputSpecValue) -> InputSpec:
                 tuple(spec["probs"]),
                 labels=() if labels is None else tuple(str(label) for label in labels),
             )
+        if spec["dist"] == "lognormal":
+            return LognormalSpec(spec["mu"], spec["sigma"])
+        if spec["dist"] == "weibull":
+            return WeibullSpec(spec["shape"], spec["scale"])
+        if spec["dist"] == "triangular":
+            return TriangularSpec(spec["low"], spec["mode"], spec["high"])
+        if spec["dist"] == "beta":
+            return BetaSpec(spec["a"], spec["b"], spec["low"], spec["high"])
     except KeyError as exc:
         raise ValueError(
             f"{spec['dist']!r} input spec dict {spec!r} is missing {exc.args[0]!r}"
@@ -467,8 +744,24 @@ def _canonical_correlation(
 
 def _normalized_input_to_dict(
     spec: InputSpec,
-) -> UniformInputSpec | GaussianInputSpec | CategoricalInputSpec:
+) -> (
+    UniformInputSpec
+    | GaussianInputSpec
+    | CategoricalInputSpec
+    | LognormalInputSpec
+    | WeibullInputSpec
+    | TriangularInputSpec
+    | BetaInputSpec
+):
     """Convert a canonical input spec into a JSON-friendly mapping."""
+    if isinstance(spec, LognormalSpec):
+        return LognormalInputSpec(dist="lognormal", mu=spec.mu, sigma=spec.sigma)
+    if isinstance(spec, WeibullSpec):
+        return WeibullInputSpec(dist="weibull", shape=spec.shape, scale=spec.scale)
+    if isinstance(spec, TriangularSpec):
+        return TriangularInputSpec(dist="triangular", low=spec.low, mode=spec.mode, high=spec.high)
+    if isinstance(spec, BetaSpec):
+        return BetaInputSpec(dist="beta", a=spec.a, b=spec.b, low=spec.low, high=spec.high)
     if isinstance(spec, UniformSpec):
         return UniformInputSpec(dist="uniform", low=spec.low, high=spec.high)
     if isinstance(spec, CategoricalSpec):
@@ -786,7 +1079,8 @@ class Problem:
         """Create a ``Problem`` from per-parameter distribution specs.
 
         This is the most general constructor: it accepts any mix of uniform,
-        Gaussian, and categorical marginals. Parameter order follows the
+        Gaussian, categorical, lognormal, Weibull, triangular, and beta
+        marginals. Parameter order follows the
         dict's insertion order, which must match the column order of the
         model's input matrix.
 
@@ -794,7 +1088,9 @@ class Problem:
             params: Mapping from parameter name to one of:
                 a ``(low, high)`` tuple (shorthand for uniform),
                 a :class:`UniformInputSpec`, a :class:`GaussianInputSpec`,
-                or a :class:`CategoricalInputSpec`.
+                a :class:`CategoricalInputSpec`, a :class:`LognormalInputSpec`,
+                a :class:`WeibullInputSpec`, a :class:`TriangularInputSpec`,
+                a :class:`BetaInputSpec`, or the matching spec dataclass.
             output_names: Optional output labels used by ``to_dataset()``.
             truncate_gaussians: Optional tail probability ``q`` in
                 ``(0, 0.5)``. ``None`` (the default) leaves every Gaussian
@@ -1046,8 +1342,9 @@ class Problem:
     def input_specs(self) -> tuple[InputSpec, ...]:
         """Canonical marginal spec of each parameter, in model-input order.
 
-        Each entry is a :class:`UniformSpec`, :class:`GaussianSpec`, or
-        :class:`CategoricalSpec`, whatever input form declared it. Read the
+        Each entry is a :class:`UniformSpec`, :class:`GaussianSpec`,
+        :class:`CategoricalSpec`, :class:`LognormalSpec`, :class:`WeibullSpec`,
+        :class:`TriangularSpec`, or :class:`BetaSpec`, whatever input form declared it. Read the
         fields by name, and tell the families apart with ``isinstance``.
         """
         return self._input_specs

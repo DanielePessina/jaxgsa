@@ -43,7 +43,18 @@ from jaxgsa._core.copula import (
     latent_to_physical,
 )
 from jaxgsa._core.transforms import cdf_to_unit_interval
-from jaxgsa.problem import CategoricalSpec, GaussianSpec, InputSpec, Problem, UniformSpec
+from jaxgsa.problem import (
+    _CONTINUOUS_FAMILY_SPECS,
+    BetaSpec,
+    CategoricalSpec,
+    GaussianSpec,
+    InputSpec,
+    LognormalSpec,
+    Problem,
+    TriangularSpec,
+    UniformSpec,
+    WeibullSpec,
+)
 
 # Keeps the probit and the marginal inverse CDFs finite at exact 0 and 1.
 _UNIT_CLIP = 1e-12
@@ -191,6 +202,8 @@ def _check_support(
                 low[i] = spec.low
             if spec.high is not None:
                 high[i] = spec.high
+        elif isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
+            low[i], high[i] = spec.support()
         else:
             raise TypeError(f"unsupported marginal {type(spec).__name__}")
     continuous = [i for i in range(len(input_specs)) if i not in levels]
@@ -228,6 +241,14 @@ def _check_support(
             kind = "uniform"
         elif isinstance(spec, GaussianSpec):
             kind = "truncated Gaussian"
+        elif isinstance(spec, LognormalSpec):
+            kind = "lognormal"
+        elif isinstance(spec, WeibullSpec):
+            kind = "Weibull"
+        elif isinstance(spec, TriangularSpec):
+            kind = "triangular"
+        elif isinstance(spec, BetaSpec):
+            kind = "beta"
         else:
             raise TypeError(f"unsupported marginal {type(spec).__name__}")
         support = f"{kind} on [{low[i]:g}, {high[i]:g}]"

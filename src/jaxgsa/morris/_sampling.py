@@ -40,7 +40,7 @@ from jaxgsa._core.sampling import (
 )
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa._core.warning_types import JaxgsaWarning
-from jaxgsa.problem import GaussianSpec, Problem
+from jaxgsa.problem import GaussianSpec, LognormalSpec, Problem, WeibullSpec
 
 # Offset between the Sobol' draws used for the radial base points (a) and the
 # auxiliary points (b). Reusing draw i for both would give delta = 0.
@@ -523,6 +523,15 @@ def _squash_open_sides(
     """
     q = truncation_quantile
     for idx, spec in enumerate(problem.input_specs):
+        if isinstance(spec, LognormalSpec | WeibullSpec):
+            # Open upper tail: without a squash the design would sit at the
+            # 1 - 1e-12 quantile and mu_star would have no fixed scale. The
+            # upper-side squash for these families is not implemented yet.
+            raise TypeError(
+                f"unsupported marginal {type(spec).__name__} in jaxgsa.morris.sample "
+                f"(parameter {problem.names[idx]!r}): its support is open above. "
+                "Use jaxgsa.sobol or a given-data method for this input."
+            )
         # shortcut: Gaussian is the only open-tailed family today; extend when one is added
         # Only a Gaussian marginal can be unbounded. Uniform and categorical
         # marginals are bounded, so they never move.

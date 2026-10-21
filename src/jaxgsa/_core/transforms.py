@@ -9,9 +9,17 @@ import numpy as np
 from jax import Array
 from jax.scipy.special import ndtr
 
+from jaxgsa._core import marginals
 from jaxgsa._core.precision import unit_clip_bounds
 from jaxgsa._core.sampling import UNIT_CLIP
-from jaxgsa.problem import CategoricalSpec, GaussianSpec, Problem, UniformSpec
+from jaxgsa.problem import (
+    _CONTINUOUS_FAMILY_SPECS,
+    CategoricalSpec,
+    ContinuousFamilySpec,
+    GaussianSpec,
+    Problem,
+    UniformSpec,
+)
 
 
 def _truncnorm_cdf(
@@ -76,7 +84,8 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
     """Map each column of ``X`` to ``[0, 1]`` through its marginal CDF.
 
     Uniform inputs use an affine map. Gaussian inputs, truncated or not, go
-    through their normal CDF. The result suits a B-spline basis directly, or
+    through their normal CDF. The other continuous families go through their
+    own CDF. The result suits a B-spline basis directly, or
     a further affine map to ``[-1, 1]`` for Legendre polynomials.
 
     The two families do not treat the interval ends the same way, and the
@@ -97,6 +106,10 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
       :func:`jaxgsa.pawn._analyze._equal_width_bins` reads that as its
       out-of-range signal and drops the sample. Clipping the column would
       hide the caller's mistake instead.
+    * A lognormal, Weibull, triangular or beta column goes through its own
+      CDF (:func:`jaxgsa._core.marginals.jax_cdf`) and is treated like a
+      Gaussian one: in-range values are clipped off 0 and 1, and a sample
+      outside the support maps outside ``[0, 1]`` and is left alone.
 
     Args:
         X: ``(N, D)`` input samples in physical units.
@@ -163,6 +176,9 @@ def _cdf_by_column(X: Array, problem: Problem) -> Array:
         if isinstance(spec, UniformSpec):  # affine map (x - lo)/(hi - lo) is the CDF of U(lo, hi)
             cols.append((X[:, d] - spec.low) / (spec.high - spec.low))
             continue
+        if isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
+            cols.append(family_cdf_block(X[:, d : d + 1], [spec])[:, 0])
+            continue
         if not isinstance(spec, GaussianSpec):
             raise TypeError(f"unsupported marginal {type(spec).__name__}")
         # math.sqrt, not float(jnp.sqrt(...)): inside a trace jnp.sqrt returns a
@@ -226,6 +242,8 @@ def _cdf_by_group(X: Array, problem: Problem) -> Array:
     lower: list[int] = []  # truncated, interval not in the upper tail
     upper: list[int] = []  # truncated, interval in the upper tail
     consts: dict[int, tuple[float, ...]] = {}
+    # lognormal, Weibull, triangular, beta columns, grouped by family
+    families: dict[str, list[tuple[int, ContinuousFamilySpec]]] = {}
     for d in range(D):
         spec = problem.input_specs[d]
         if isinstance(spec, CategoricalSpec):
@@ -238,6 +256,9 @@ def _cdf_by_group(X: Array, problem: Problem) -> Array:
         if isinstance(spec, UniformSpec):  # affine map (x - lo)/(hi - lo) is the CDF of U(lo, hi)
             uniform.append(d)
             consts[d] = (spec.low, spec.high - spec.low)
+            continue
+        if isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
+            families.setdefault(spec.dist, []).append((d, spec))
             continue
         if not isinstance(spec, GaussianSpec):
             raise TypeError(f"unsupported marginal {type(spec).__name__}")
@@ -288,7 +309,37 @@ def _cdf_by_group(X: Array, problem: Problem) -> Array:
             # edge bin. See the docstring above and _truncnorm_cdf.
             u = _truncnorm_cdf((X[:, group] - mean) / std, a_host, b_host, clip=False)
             parts.append((group, clipped(u)))
+    for members in families.values():
+        group = [d for d, _ in members]
+        parts.append((group, family_cdf_block(X[:, group], [spec for _, spec in members])))
     return _in_column_order(parts, D)
+
+
+def family_cdf_block(X_block: Array, specs: list[ContinuousFamilySpec]) -> Array:
+    """Map columns of one lognormal, Weibull, triangular or beta family to ``[0, 1]``.
+
+    In-range values are clipped off 0 and 1 the same way a Gaussian column
+    is. A value outside the declared support maps outside ``[0, 1]`` and is
+    left alone, the out-of-range signal a uniform column also gives.
+
+    Args:
+        X_block: ``(N, k)`` physical values, one column per spec.
+        specs: ``k`` specs of the same family.
+
+    Returns:
+        ``(N, k)`` array of CDF values.
+    """
+    X_block = jnp.asarray(X_block)
+    dtype = (
+        X_block.dtype
+        if jnp.issubdtype(X_block.dtype, jnp.floating)
+        else jnp.result_type(X_block.dtype, float)
+    )
+    X_block = X_block.astype(dtype)
+    u = marginals.jax_cdf(specs[0].dist, X_block, marginals.stacked_params(specs, dtype))
+    clip_lo, clip_hi = unit_clip_bounds(UNIT_CLIP, dtype)
+    in_range = (u >= 0.0) & (u <= 1.0)
+    return jnp.where(in_range, jnp.clip(u, clip_lo, clip_hi), u)
 
 
 def _in_column_order(parts: list[tuple[list[int], Array]], D: int) -> Array:

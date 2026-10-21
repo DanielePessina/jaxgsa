@@ -149,6 +149,12 @@ class SobolSamples(UniqueDesignSamples):
                      "b": {"mean": 3.0, "variance": 9.0}}
             X = samples.transform(theta)
 
+        Lognormal (``mu``, ``sigma``), Weibull (``shape``, ``scale``) and
+        triangular (``low``, ``mode``, ``high``) inputs are closed forms in JAX
+        and differentiate in every field. A beta input differentiates in
+        ``low`` and ``high`` only: its standard quantiles are computed once on
+        the host, so ``theta`` naming ``a`` or ``b`` raises ``ValueError``.
+
         Tier T4 (behavioural contract): the returned array must reproduce
         :attr:`samples` when ``theta`` is ``None``, and its Jacobian with
         respect to ``theta`` must match central finite differences. Both are
