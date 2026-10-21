@@ -208,8 +208,8 @@ examples = [
 
 [package.metadata]
 requires-dist = [
-    { name = "jax", specifier = ">=0.8" },
-    { name = "jaxlib", specifier = ">=0.8" },
+    { name = "jax", specifier = ">=0.11" },
+    { name = "jaxlib", specifier = ">=0.11" },
     { name = "matplotlib", marker = "extra == 'examples'", specifier = ">=3.10.8" },
     { name = "numpy", specifier = ">=2" },
     { name = "pot", marker = "extra == 'dev'", specifier = ">=0.9" },
