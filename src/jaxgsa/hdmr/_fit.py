@@ -58,6 +58,10 @@ from jaxgsa.hdmr._engine import _build_B1, _build_B2, _build_B3, term_order_map
 # Memory model
 # ---------------------------------------------------------------------------
 
+# Terms per block in the final statistics pass. Larger blocks mean fewer loop
+# trips; smaller blocks mean smaller (row, lane, block) temporaries.
+_STATS_TERM_BLOCK = 32
+
 
 def _basis_bytes_per_row(
     D: int,
@@ -94,9 +98,11 @@ def _basis_bytes_per_row(
 def _slice_bytes_per_row(n: int, itemsize: int) -> int:
     """Transient bytes one (row, output slice) pair costs in the final pass.
 
-    The statistics pass materializes the per-term contributions ``F`` plus
-    roughly two elementwise temporaries of the same shape, so 3 * n elements
-    per row per lane.
+    The statistics pass walks the terms in blocks of at most
+    ``_STATS_TERM_BLOCK``. Each block materializes the contributions ``F`` plus
+    two elementwise temporaries of the same shape, so 3 * block elements per
+    row per lane, plus a few ``(row, lane)`` arrays (the order sums and the
+    residuals). The estimate does not grow with the number of terms.
 
     Args:
         n: Total number of terms.
@@ -105,7 +111,7 @@ def _slice_bytes_per_row(n: int, itemsize: int) -> int:
     Returns:
         Estimated bytes per (row, slice) pair.
     """
-    return itemsize * 3 * n
+    return itemsize * (3 * min(n, _STATS_TERM_BLOCK) + 8)
 
 
 def _fit_bytes_per_row(
@@ -574,7 +580,24 @@ def _acc_gram(B_b: Array, BtB: Array, colsum: Array) -> tuple[Array, Array]:
     Returns:
         The updated ``(BtB, colsum)``.
     """
-    return BtB + jnp.einsum("rmj,rnj->jmn", B_b, B_b), colsum + jnp.sum(B_b, axis=0)
+    n_t = B_b.shape[2]
+    if n_t == 0:
+        return BtB, colsum + jnp.sum(B_b, axis=0)
+    tb = min(n_t, _STATS_TERM_BLOCK)
+
+    # A single einsum copies B_b twice to bring the term axis to the front. A
+    # loop over term blocks copies one small block at a time instead.
+    def body(i: Array, G: Array) -> Array:
+        # The last block is clamped to end at n_t; mask the terms it shares
+        # with the previous block so none counts twice.
+        start = jnp.minimum(i * tb, n_t - tb)
+        valid = (start + jnp.arange(tb) >= i * tb)[:, None, None]
+        blk = jax.lax.dynamic_slice_in_dim(B_b, start, tb, axis=2)
+        cur = jax.lax.dynamic_slice_in_dim(G, start, tb, axis=0)
+        upd = jnp.where(valid, cur + jnp.einsum("rmj,rnj->jmn", blk, blk).astype(G.dtype), cur)
+        return jax.lax.dynamic_update_slice_in_dim(G, upd, start, 0)
+
+    return jax.lax.fori_loop(0, -(-n_t // tb), body, BtB), colsum + jnp.sum(B_b, axis=0)
 
 
 @jax.jit
@@ -1011,9 +1034,124 @@ def _acc_higher_moment(
     return BtY + jnp.einsum("rmj,rl->ljm", B_new, Y_res)
 
 
-@lru_cache(maxsize=32)
-def _get_stats_step(n1: int, n2: int):
+def _stats_step_whole(
+    B_list: list[Array],
+    C_list: list[Array],
+    Y_bc: Array,
+    w: Array,
+    shift_c: Array,
+    mean_z_c: Array,
+    mean_f_c: Array,
+    mean_y0m_c: Array,
+    acc: tuple[Array, Array, Array, Array, Array, Array, Array],
+) -> tuple[Array, Array, Array, Array, Array, Array, Array]:
+    """Fold one block into the statistics with ``F`` held whole.
+
+    Same maths as the blocked step. It forms the ``(b, cs, n)`` contributions
+    once, which is fastest but needs about ``3 * b * cs * n`` elements.
+
+    Args:
+        B_list: Bases per order, each ``(b, m_k, n_k)``.
+        C_list: Coefficients per order, each ``(cs, m_k, n_k)``.
+        Y_bc: Outputs, shape ``(b, cs)``.
+        w: Row mask, shape ``(b,)``.
+        shift_c: Per-lane shift, shape ``(cs,)``.
+        mean_z_c: Per-lane mean of the shifted output, shape ``(cs,)``.
+        mean_f_c: Term means, shape ``(cs, n)``.
+        mean_y0m_c: Means of the leave-one-out sums, shape ``(cs, n)``.
+        acc: Running accumulators.
+
+    Returns:
+        The updated accumulators.
+    """
+    acc_var_f, acc_cov_fy, acc_cov_fy0m, acc_ssr, acc_cross, acc_fsq, acc_res2 = acc
+    n1 = B_list[0].shape[2]
+    n2 = B_list[1].shape[2] if len(B_list) > 1 else 0
+    F = jnp.concatenate(
+        [jnp.einsum("rmj,lmj->rlj", B, C) for B, C in zip(B_list, C_list, strict=True)],
+        axis=2,
+    )  # (b, cs, n)
+    fc = (F - mean_f_c[None]) * w[:, None, None]
+    acc_var_f = acc_var_f + jnp.sum(fc * fc, axis=0)
+    y0 = jnp.sum(F, axis=2)
+    y0_w = y0 * w[:, None]
+    acc_cov_fy = acc_cov_fy + jnp.sum(fc * y0_w[:, :, None], axis=0)
+    y0m_c = (y0[:, :, None] - F) - mean_y0m_c[None]  # leave-one-out sums
+    acc_cov_fy0m = acc_cov_fy0m + jnp.sum(fc * y0m_c, axis=0)
+    r0 = ((Y_bc - shift_c[None, :]) - mean_z_c[None, :]) * w[:, None]
+    r1 = r0 - jnp.sum(F[:, :, :n1], axis=2)
+    r2 = r1 - jnp.sum(F[:, :, n1 : n1 + n2], axis=2)
+    acc_ssr = acc_ssr + jnp.stack(
+        [jnp.sum(r0 * r0, axis=0), jnp.sum(r1 * r1, axis=0), jnp.sum(r2 * r2, axis=0)],
+        axis=1,
+    )
+    acc_cross = acc_cross + jnp.concatenate(
+        [
+            jnp.sum(r0[:, :, None] * F[:, :, :n1], axis=0),
+            jnp.sum(r1[:, :, None] * F[:, :, n1 : n1 + n2], axis=0),
+            jnp.sum(r2[:, :, None] * F[:, :, n1 + n2 :], axis=0),
+        ],
+        axis=1,
+    )
+    acc_fsq = acc_fsq + jnp.sum(F * F, axis=0)
+    r_pred = r0 - y0
+    acc_res2 = acc_res2 + jnp.sum(r_pred * r_pred, axis=0)
+    return acc_var_f, acc_cov_fy, acc_cov_fy0m, acc_ssr, acc_cross, acc_fsq, acc_res2
+
+
+def _block_sum(B: Array, C: Array, b: int, cs: int, dtype: jnp.dtype) -> Array:
+    """Sum the per-term contributions of one order, ``sum_j B_j C_j``.
+
+    One matrix product over all terms would copy ``B`` into a flat layout. A
+    loop over term blocks copies only one block at a time.
+
+    Args:
+        B: Basis, shape ``(b, m, n_k)``.
+        C: Coefficients, shape ``(cs, m, n_k)``.
+        b: Rows in the batch.
+        cs: Lanes in the chunk.
+        dtype: Accumulator dtype.
+
+    Returns:
+        The summed contribution, shape ``(b, cs)``.
+    """
+    n_k = B.shape[2]
+    if n_k == 0:
+        return jnp.zeros((b, cs), dtype=dtype)
+    tb = min(n_k, _STATS_TERM_BLOCK)
+
+    def body(i: Array, total: Array) -> Array:
+        # The last block is clamped to end at n_k; mask the terms it shares
+        # with the previous block.
+        start = jnp.minimum(i * tb, n_k - tb)
+        valid = start + jnp.arange(tb) >= i * tb
+        B_blk = jax.lax.dynamic_slice_in_dim(B, start, tb, axis=2)
+        C_blk = jnp.where(valid, jax.lax.dynamic_slice_in_dim(C, start, tb, axis=2), 0)
+        return total + jnp.einsum("rmj,lmj->rl", B_blk, C_blk).astype(dtype)
+
+    return jax.lax.fori_loop(0, -(-n_k // tb), body, jnp.zeros((b, cs), dtype=dtype))
+
+
+@lru_cache(maxsize=2)
+def _get_stats_step(blocked: bool):
     """Build and cache the final-pass reduction for one (row batch, chunk).
+
+    The per-term contributions ``F`` have shape ``(b, cs, n)``, which is the
+    largest tensor of the fit. XLA would also materialise two more tensors of
+    that size (the centred ``F`` and a broadcast row weight), so the step
+    never forms ``F`` whole. It first gets the per-order sums with plain
+    matrix products, then walks the terms of each order in blocks of at most
+    ``_STATS_TERM_BLOCK`` and folds each block into the accumulators. Only one
+    block's temporaries are live at a time.
+
+    The blocked path computes each term's contribution twice (once for the
+    order sums, once in the block loop), so it is slower. ``blocked=False``
+    keeps the single-pass path, which is right whenever the whole
+    ``(b, cs, n)`` working set fits the memory budget. The caller picks the
+    path; it is part of the cache key.
+
+    Args:
+        blocked: Whether to walk the terms in blocks.
 
     Returns:
         A jitted function that folds one block into the ANCOVA covariances,
@@ -1033,12 +1171,20 @@ def _get_stats_step(n1: int, n2: int):
         mean_y0m_c: Array,
         acc: tuple[Array, Array, Array, Array, Array, Array, Array],
     ) -> tuple[Array, Array, Array, Array, Array, Array, Array]:
+        if not blocked:
+            return _stats_step_whole(
+                B_list, C_list, Y_bc, w, shift_c, mean_z_c, mean_f_c, mean_y0m_c, acc
+            )
         acc_var_f, acc_cov_fy, acc_cov_fy0m, acc_ssr, acc_cross, acc_fsq, acc_res2 = acc
-        # Per-term contributions f_j = B_j C_j, all orders side by side.
-        F = jnp.concatenate(
-            [jnp.einsum("rmj,lmj->rlj", B, C) for B, C in zip(B_list, C_list, strict=True)],
-            axis=2,
-        )  # (b, cs, n)
+        b, cs = Y_bc.shape
+        # The loops carry fixed dtypes, so promote once up front.
+        dtype = jnp.result_type(*B_list, *C_list, Y_bc, w, mean_f_c, mean_y0m_c)
+
+        # Per-order sums of the term contributions, sum_j f_j, with no F.
+        zero = jnp.zeros((b, cs), dtype=dtype)
+        sums = [_block_sum(B, C, b, cs, dtype) for B, C in zip(B_list, C_list, strict=True)]
+        sums = [*sums, zero, zero][:3]
+        y0 = sums[0] + sums[1] + sums[2]  # total emulator, sans f0 (= f_hat - f0)
 
         # ANCOVA (Li et al., 2010). Sa = Var(f_j)/Var(Y) is the structural
         # share, Sb = Cov(f_j, sum_{k != j} f_k)/Var(Y) the correlative
@@ -1051,38 +1197,85 @@ def _get_stats_step(n1: int, n2: int):
         # measures S against Y instead, which leaves a gap of
         # Cov(f_j, Y - f_hat)/Var(Y) that does not cancel under correlated
         # inputs. With independent inputs Sb -> 0 and S -> Sa either way.
-        fc = (F - mean_f_c[None]) * w[:, None, None]
-        acc_var_f = acc_var_f + jnp.sum(fc * fc, axis=0)
-
-        y0 = jnp.sum(F, axis=2)  # (b, cs) total emulator, sans f0 (= f_hat - f0)
-        y0_w = y0 * w[:, None]
-        acc_cov_fy = acc_cov_fy + jnp.sum(fc * y0_w[:, :, None], axis=0)
-
-        y0m_c = (y0[:, :, None] - F) - mean_y0m_c[None]  # leave-one-out sums
-        acc_cov_fy0m = acc_cov_fy0m + jnp.sum(fc * y0m_c, axis=0)
+        w2 = w * w
+        w2_ = w2[None, :, None]
+        y0_w2 = y0 * w2[:, None]
 
         r0 = ((Y_bc - shift_c[None, :]) - mean_z_c[None, :]) * w[:, None]  # Y - f0
-
         # F-test for incremental model selection (Li et al., 2002). The null
         # model for a term of order k holds every term of order < k, so the
         # residuals are hierarchical.
-        r1 = r0 - jnp.sum(F[:, :, :n1], axis=2)
-        r2 = r1 - jnp.sum(F[:, :, n1 : n1 + n2], axis=2)
+        r1 = r0 - sums[0]
+        r2 = r1 - sums[1]
+        r_null = [r0, r1, r2]
+
+        outs: list[list[Array]] = [[], [], [], [], []]
+        off = 0
+        for k, (B, C) in enumerate(zip(B_list, C_list, strict=True)):
+            n_k = B.shape[2]
+            if n_k == 0:
+                for lst in outs:
+                    lst.append(jnp.zeros((0, cs), dtype=dtype))
+                continue
+            tb = min(n_k, _STATS_TERM_BLOCK)
+            n_blocks = -(-n_k // tb)
+            r_k = r_null[k][None]
+
+            def body(
+                i: Array,
+                carry: tuple[Array, ...],
+                B: Array = B,
+                C: Array = C,
+                off: int = off,
+                n_k: int = n_k,
+                tb: int = tb,
+                r_k: Array = r_k,
+            ) -> tuple[Array, ...]:
+                # The last block is clamped to end at n_k; the terms it shares
+                # with the previous block are masked out so no term counts twice.
+                start = jnp.minimum(i * tb, n_k - tb)
+                valid = (start + jnp.arange(tb) >= i * tb)[:, None]
+                B_blk = jax.lax.dynamic_slice_in_dim(B, start, tb, axis=2)
+                C_blk = jax.lax.dynamic_slice_in_dim(C, start, tb, axis=2)
+                mf = jax.lax.dynamic_slice_in_dim(mean_f_c, off + start, tb, axis=1)
+                my = jax.lax.dynamic_slice_in_dim(mean_y0m_c, off + start, tb, axis=1)
+                Fk = jnp.einsum("rmj,lmj->jrl", B_blk, C_blk)  # (tb, b, cs)
+                fcn = Fk - mf.T[:, None, :]
+                y0m_c = (y0[None] - Fk) - my.T[:, None, :]
+                vals = (
+                    jnp.sum(fcn * fcn * w2_, axis=1),
+                    jnp.sum(fcn * y0_w2[None], axis=1),
+                    jnp.sum(fcn * (y0m_c * w2_), axis=1),
+                    # sum r_null * f_i, each term against its own null residual.
+                    jnp.sum(r_k * Fk, axis=1),
+                    jnp.sum(Fk * Fk, axis=1),
+                )
+                new = []
+                for acc_k, v in zip(carry, vals, strict=True):
+                    cur = jax.lax.dynamic_slice_in_dim(acc_k, start, tb, axis=0)
+                    new.append(
+                        jax.lax.dynamic_update_slice_in_dim(
+                            acc_k, jnp.where(valid, cur + v.astype(acc_k.dtype), cur), start, 0
+                        )
+                    )
+                return tuple(new)
+
+            init = tuple(jnp.zeros((n_k, cs), dtype=dtype) for _ in range(5))
+            res = jax.lax.fori_loop(0, n_blocks, body, init)
+            for lst, r in zip(outs, res, strict=True):
+                lst.append(r)
+            off += n_k
+
+        # Each is (n, cs) after joining the orders; return to (cs, n).
+        acc_var_f = acc_var_f + jnp.concatenate(outs[0], axis=0).T
+        acc_cov_fy = acc_cov_fy + jnp.concatenate(outs[1], axis=0).T
+        acc_cov_fy0m = acc_cov_fy0m + jnp.concatenate(outs[2], axis=0).T
+        acc_cross = acc_cross + jnp.concatenate(outs[3], axis=0).T
+        acc_fsq = acc_fsq + jnp.concatenate(outs[4], axis=0).T
         acc_ssr = acc_ssr + jnp.stack(
             [jnp.sum(r0 * r0, axis=0), jnp.sum(r1 * r1, axis=0), jnp.sum(r2 * r2, axis=0)],
             axis=1,
         )
-        # sum r_null * f_i, each term against its own null residual.
-        acc_cross = acc_cross + jnp.concatenate(
-            [
-                jnp.sum(r0[:, :, None] * F[:, :, :n1], axis=0),
-                jnp.sum(r1[:, :, None] * F[:, :, n1 : n1 + n2], axis=0),
-                jnp.sum(r2[:, :, None] * F[:, :, n1 + n2 :], axis=0),
-            ],
-            axis=1,
-        )
-        acc_fsq = acc_fsq + jnp.sum(F * F, axis=0)
-
         r_pred = r0 - y0  # full-model residual Y - (f0 + sum f_j)
         acc_res2 = acc_res2 + jnp.sum(r_pred * r_pred, axis=0)
         return acc_var_f, acc_cov_fy, acc_cov_fy0m, acc_ssr, acc_cross, acc_fsq, acc_res2
@@ -1509,7 +1702,10 @@ def _fit_hdmr(
 
     # ---- Final pass: ANCOVA / F-test / RMSE reductions ---------------------
     build_bases_final = _get_build_bases(n_intervals, order2, order3)
-    stats_step = _get_stats_step(n1, n2)
+    # Hold F whole when the (row, lane, term) working set fits half the budget,
+    # since that is the faster path. Read the budget here, outside any jit.
+    blocked = b * cs * 3 * n * itemsize > get_memory_budget() // 2
+    stats_step = _get_stats_step(blocked)
     accs = [
         (
             jnp.zeros((cs, n), dtype=dtype),  # sum (f - mean_f)^2
