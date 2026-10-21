@@ -24,7 +24,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.batching import resolve_batch_size
+from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints, draw_row_matrix
 from jaxgsa._core.entry import at_least, bootstrap_checks, prepare
 from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
@@ -208,12 +208,31 @@ def _resample_stats(idx_chunk: Array, ee: Array) -> tuple[Array, Array, Array]:
         resample.
     """
 
-    # The closure over ee lets vmap vary only the index vector per resample.
-    # ee[idx] gathers r trajectories with replacement.
+    # ee[idx] gathers r trajectories with replacement. lax.map runs the
+    # resamples one after another, so one gathered copy of ee (plus its |ee|
+    # or centred twin, which XLA reuses in place) is live at a time. A vmap
+    # would hold C of them at once, measured at 2x the estimate below.
     def single(idx: Array) -> tuple[Array, Array, Array]:
         return _stats_from_ee(ee[idx])
 
-    return jax.vmap(single)(idx_chunk)
+    return jax.lax.map(single, idx_chunk)
+
+
+def _resample_temp_bytes(ee_shape: tuple[int, ...], itemsize: int, chunk: int) -> int:
+    """Estimate the XLA temporary bytes of :func:`_resample_stats`.
+
+    Args:
+        ee_shape: Shape ``(r, D, T, K)`` of the elementary effects.
+        itemsize: Bytes per element of ``ee``.
+        chunk: Resamples per call.
+
+    Returns:
+        One gathered copy of ``ee`` (the resamples run sequentially) plus the
+        three ``(chunk, T, K, D)`` result arrays.
+    """
+    n_ee = int(np.prod(ee_shape))
+    n_out = int(np.prod(ee_shape[1:]))  # D * T * K, one resample's statistic
+    return (n_ee + 3 * chunk * n_out) * itemsize
 
 
 class MorrisIndices(NamedTuple):
@@ -584,13 +603,17 @@ def analyze(
         # transformable entry point.
         resample_idx = draw_row_matrix(key, n_bootstrap, r)
 
-        # One chunk materialises cs copies of the (r, D, T, K) effects tensor,
-        # so a large T*K would otherwise exhaust device memory at the caller's
-        # width. The memory budget lowers it, never raises it.
-        per_replicate = int(np.prod(ee.shape))  # r * D * T * K
-        cs = resolve_batch_size(
-            per_replicate * ee.dtype.itemsize, n_bootstrap, resample_chunk_size
-        )
+        # One chunk holds a single gathered copy of the (r, D, T, K) effects
+        # tensor (the resamples run in sequence) plus three (T, K, D) results
+        # per resample. The copy is a fixed cost, so the budget left after it
+        # sets how many resamples fit in a chunk.
+        itemsize = ee.dtype.itemsize
+        fixed = _resample_temp_bytes(ee.shape, itemsize, 0)
+        per_resample = _resample_temp_bytes(ee.shape, itemsize, 1) - fixed
+        if resample_chunk_size is None:
+            cs = max(1, min(n_bootstrap, (get_memory_budget() - fixed) // per_resample))
+        else:
+            cs = resolve_batch_size(per_resample, n_bootstrap, resample_chunk_size)
         mu_parts, mu_star_parts, sigma_parts = [], [], []
         for start in range(0, n_bootstrap, cs):
             end = min(start + cs, n_bootstrap)
