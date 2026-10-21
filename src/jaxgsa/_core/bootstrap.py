@@ -34,6 +34,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from jaxgsa._core.batching import get_memory_budget
 from jaxgsa._core.result import CIInfo
 
 _T = TypeVar("_T")
@@ -94,7 +95,7 @@ def draw_row_matrix(key: Array, n_bootstrap: int, n: int) -> Array:
     return jax.lax.map(lambda k: draw_rows(k, n), resample_keys(key, n_bootstrap))
 
 
-@partial(jax.jit, static_argnames=("replicate_fn", "static", "n_bootstrap"))
+@partial(jax.jit, static_argnames=("replicate_fn", "static", "n_bootstrap", "budget"))
 def _mapped_draws(
     key: Array,
     operands: tuple[Array, ...],
@@ -102,6 +103,7 @@ def _mapped_draws(
     replicate_fn: Callable[..., _T],
     static: tuple[tuple[str, Any], ...],
     n_bootstrap: int,
+    budget: int | float,
 ) -> _T:
     """Run the replicates under one cached ``jit`` with a sequential ``lax.map``.
 
@@ -112,10 +114,15 @@ def _mapped_draws(
         replicate_fn: Module-level per-replicate fit.
         static: Hashable keyword arguments for ``replicate_fn``.
         n_bootstrap: Number of replicates.
+        budget: Memory budget in bytes at call time. The fits read it while
+            tracing (streamed-versus-single-pass, batch widths), so it is part
+            of the cache key and a budget change rebuilds the program. The
+            body does not use it.
 
     Returns:
         The stacked replicate pytree.
     """
+    del budget
     N = operands[0].shape[0]
     kwargs = dict(static)
 
@@ -171,6 +178,7 @@ def bootstrap_draws(
         replicate_fn=replicate_fn,
         static=_hashable_static(static),
         n_bootstrap=n_bootstrap,
+        budget=get_memory_budget(),
     )
 
 
