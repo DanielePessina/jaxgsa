@@ -35,8 +35,11 @@ from jax import Array
 from numpy.typing import NDArray
 
 from jaxgsa._core import verbose as _verbose
+from jaxgsa._core.result import param_frame
 
 if TYPE_CHECKING:
+    import pandas as pd
+
     from jaxgsa.problem import Problem
 
 
@@ -281,6 +284,33 @@ class IrregularResult:
         merged = xr.merge(datasets)
         if first_attrs is not None:
             merged.attrs = first_attrs
+        return merged
+
+    def to_pandas(self) -> pd.DataFrame:
+        """Stack the per-channel tables into one tidy pandas DataFrame.
+
+        Each channel's result is exported on its own time grid, as in
+        :meth:`to_dataset`, and turned into a table the same way as the
+        regular ``to_pandas``. The tables are stacked under an ``output``
+        index level named after the channels, so the index levels are
+        ``output``, ``time`` and ``param``. Each channel keeps its own time
+        values; no channel is padded onto another channel's grid.
+
+        Returns:
+            A :class:`pandas.DataFrame` with one row per channel, time point
+            and input. ``DataFrame.attrs`` holds the first channel's
+            dataset attributes, as :meth:`to_dataset` does.
+        """
+        import pandas as pd
+
+        frames = []
+        for name, res in self.channels.items():
+            ds = res.to_dataset(time_coords=np.asarray(self.times[name]))
+            if "output" in ds.dims:
+                ds = ds.squeeze("output", drop=True)
+            frames.append(param_frame(ds))
+        merged = pd.concat(frames, keys=list(self.channels), names=["output"])
+        merged.attrs = dict(frames[0].attrs)
         return merged
 
     def __repr__(self) -> str:

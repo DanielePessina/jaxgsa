@@ -575,6 +575,60 @@ that fits the chosen surrogate and calls `.shapley()` in one step.
 
 All result objects support `to_dataset(...)` for labeled xarray export. The dataset `attrs` include `method` (the method name) and `jaxgsa_version` (the version that made the result).
 
+## Tables with pandas
+
+Every result object also has `to_pandas()`. It returns a pandas
+`DataFrame` built from `to_dataset()`. pandas is installed with xarray,
+so you do not need a new dependency.
+
+The table has one row per input, on an index level named `param` that
+uses `problem.names`. It has one column per index, with the same name as
+in the dataset. When the result has confidence intervals (for example
+`n_bootstrap > 0`), each index is followed by its `*_lower` and `*_upper`
+columns. For the [first analysis](https://github.com/danielepessina/jaxgsa#first-analysis)
+in the README:
+
+```python
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
+
+design = jaxgsa.sobol.sample(PROBLEM, n_samples=4096, seed=42, verbose=False)
+Y = evaluate(design.samples)
+result = jaxgsa.sobol.analyze(design, Y, verbose=False)
+
+print(result.to_pandas().round(3))
+```
+
+```text
+          S1     ST
+param
+x1     0.339  0.627
+x2     0.442  0.440
+x3     0.016  0.242
+```
+
+A result with several outputs or time points adds `output` and `time`
+index levels in front of `param`. An irregular (ragged) result stacks
+its channels under an `output` level, and each channel keeps its own time
+values.
+
+The table holds only values with one entry per input. Second-order
+matrices such as `S2`, HDMR's per-term arrays, Kucherenko's subset arrays
+and per-output values such as `variance` stay in the dataset. For a
+scalar output, `result.to_dataset()["S2"].to_pandas()` gives `S2` as an
+input-by-input table.
+An HDMR table therefore has only `ST`. Its first-order values are
+`result.S1`.
+
+If you have matplotlib installed, a bar plot takes one more line:
+
+```python
+import matplotlib.pyplot as plt
+
+result.to_pandas()[["S1", "ST"]].plot.bar()
+plt.show()
+```
+
 ## Benchmarks
 
 `jaxgsa.benchmarks` holds analytical test functions whose Sobol indices are
