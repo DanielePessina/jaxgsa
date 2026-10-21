@@ -23,7 +23,7 @@ from jax.scipy.special import ndtr, ndtri
 from scipy.stats import norm, truncnorm
 
 from jaxgsa._core.precision import unit_clip_bounds
-from jaxgsa.problem import CategoricalSpec, Problem, UniformSpec
+from jaxgsa.problem import CategoricalSpec, GaussianSpec, Problem, UniformSpec
 
 
 def check_seed(seed: object, who: str) -> None:
@@ -243,7 +243,7 @@ def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray
             transformed[:, idx] = _transform_uniform(samples_unit[:, idx], spec.low, spec.high)
         elif isinstance(spec, CategoricalSpec):
             transformed[:, idx] = _transform_categorical(samples_unit[:, idx], spec.probs)
-        else:
+        elif isinstance(spec, GaussianSpec):
             transformed[:, idx] = _transform_gaussian(
                 samples_unit[:, idx],
                 spec.mean,
@@ -251,6 +251,8 @@ def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray
                 low=spec.low,
                 high=spec.high,
             )
+        else:
+            raise TypeError(f"unsupported marginal {type(spec).__name__}")
 
     return transformed
 
@@ -477,7 +479,7 @@ def _jax_transform_samples(
                     unit_column, fields.get("low", spec.low), fields.get("high", spec.high)
                 )
             )
-        else:
+        elif isinstance(spec, GaussianSpec):
             columns.append(
                 _jax_transform_gaussian(
                     unit_column,
@@ -487,6 +489,8 @@ def _jax_transform_samples(
                     high=fields.get("high", spec.high),
                 )
             )
+        else:
+            raise TypeError(f"unsupported marginal {type(spec).__name__}")
 
     return jnp.stack(columns, axis=1)
 
@@ -551,7 +555,7 @@ def _inverse_transform_samples(problem: Problem, samples_physical: np.ndarray) -
             unit[:, idx] = _inverse_transform_uniform(
                 samples_physical[:, idx], spec.low, spec.high
             )
-        else:
+        elif isinstance(spec, GaussianSpec):
             unit[:, idx] = _inverse_transform_gaussian(
                 samples_physical[:, idx],
                 spec.mean,
@@ -559,6 +563,8 @@ def _inverse_transform_samples(problem: Problem, samples_physical: np.ndarray) -
                 low=spec.low,
                 high=spec.high,
             )
+        else:
+            raise TypeError(f"unsupported marginal {type(spec).__name__}")
 
     return unit
 

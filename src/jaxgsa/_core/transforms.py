@@ -11,7 +11,7 @@ from jax.scipy.special import ndtr
 
 from jaxgsa._core.precision import unit_clip_bounds
 from jaxgsa._core.sampling import UNIT_CLIP
-from jaxgsa.problem import CategoricalSpec, Problem, UniformSpec
+from jaxgsa.problem import CategoricalSpec, GaussianSpec, Problem, UniformSpec
 
 
 def _truncnorm_cdf(
@@ -163,6 +163,8 @@ def _cdf_by_column(X: Array, problem: Problem) -> Array:
         if isinstance(spec, UniformSpec):  # affine map (x - lo)/(hi - lo) is the CDF of U(lo, hi)
             cols.append((X[:, d] - spec.low) / (spec.high - spec.low))
             continue
+        if not isinstance(spec, GaussianSpec):
+            raise TypeError(f"unsupported marginal {type(spec).__name__}")
         # math.sqrt, not float(jnp.sqrt(...)): inside a trace jnp.sqrt returns a
         # tracer even for a Python-float input, so float() on it raises. The
         # variance is a plain float on the spec, so no JAX op is needed at all,
@@ -237,6 +239,8 @@ def _cdf_by_group(X: Array, problem: Problem) -> Array:
             uniform.append(d)
             consts[d] = (spec.low, spec.high - spec.low)
             continue
+        if not isinstance(spec, GaussianSpec):
+            raise TypeError(f"unsupported marginal {type(spec).__name__}")
         # math.sqrt, not float(jnp.sqrt(...)): inside a trace jnp.sqrt returns a
         # tracer even for a Python-float input, so float() on it raises. The
         # variance is a plain float on the spec, so no JAX op is needed at all,

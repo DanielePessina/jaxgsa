@@ -523,6 +523,7 @@ def _squash_open_sides(
     """
     q = truncation_quantile
     for idx, spec in enumerate(problem.input_specs):
+        # shortcut: Gaussian is the only open-tailed family today; extend when one is added
         # Only a Gaussian marginal can be unbounded. Uniform and categorical
         # marginals are bounded, so they never move.
         if not isinstance(spec, GaussianSpec):

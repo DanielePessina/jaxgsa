@@ -184,6 +184,8 @@ def _map_by_column(
             cols.append(2.0 * (X[:, d] - spec.low) / (spec.high - spec.low) - 1.0)
             input_types.append("uniform")
             continue
+        if not isinstance(spec, GaussianSpec):
+            raise TypeError(f"unsupported marginal {type(spec).__name__}")
 
         centre, scale, family = _gaussian_standardisation(spec, order)
         cols.append((X[:, d] - centre) / scale)
@@ -232,6 +234,8 @@ def _map_by_group(
             input_types[d] = "uniform"
             consts[d] = (spec.low, spec.high - spec.low)
             continue
+        if not isinstance(spec, GaussianSpec):
+            raise TypeError(f"unsupported marginal {type(spec).__name__}")
 
         centre, scale, family = _gaussian_standardisation(spec, order)
         standard.append(d)

@@ -475,6 +475,8 @@ def _normalized_input_to_dict(
         label_list: list[str | int | float] = list(spec.labels)
         return CategoricalInputSpec(dist="categorical", probs=list(spec.probs), labels=label_list)
 
+    if not isinstance(spec, GaussianSpec):
+        raise TypeError(f"unsupported marginal {type(spec).__name__}")
     # Reconstruct the TypedDict for JSON serialization (used by SobolSamples.save).
     payload: GaussianInputSpec = GaussianInputSpec(
         dist="gaussian",

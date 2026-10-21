@@ -606,6 +606,7 @@ def _warn_unbounded_gaussian(problem: Problem) -> None:
     truncation still leaves the opposite tail unbounded and is reported. Only
     uniforms and two-sided-truncated Gaussians stay silent.
     """
+    # shortcut: Gaussian is the only open-tailed family today; extend when one is added
     # Only Gaussian marginals can be unbounded; categorical codes are bounded.
     unbounded = [
         name
