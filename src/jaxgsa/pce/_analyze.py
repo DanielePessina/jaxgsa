@@ -862,7 +862,13 @@ def _fit_pce_core(
     # problem — the library-wide semantics: ``batch_size`` sizes row blocks,
     # clamped to N, and never selects a different algorithm.
     itemsize = jnp.dtype(jnp.result_type(X.dtype, float)).itemsize
-    single_pass_bytes = _single_pass_fit_bytes(N, n_terms, T * K, itemsize)
+    # The single pass runs on rows padded to their bucket, and ``_pad_x`` and
+    # ``_pad_y`` hold second copies of ``X`` and ``Y``, so price all of them
+    # at the padded row count.
+    n_padded = _bucket(N)
+    single_pass_bytes = _single_pass_fit_bytes(n_padded, n_terms, T * K, itemsize)
+    if n_padded != N:
+        single_pass_bytes += itemsize * n_padded * (D + T * K)
     if batch_size is not None:
         streamed = batch_size < N
     else:
