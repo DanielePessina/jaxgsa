@@ -153,7 +153,7 @@ def _validate_output(
         problem: Optional problem definition used to validate output labels.
         expected_from: What fixes ``n_expected``. ``"X"`` (the default) means
             the caller's input matrix. Any other value names the design
-            attribute to evaluate, such as ``"samples.samples"``, and the
+            attribute to evaluate, such as ``"design.samples"``, and the
             error then talks about the design.
 
     Returns:

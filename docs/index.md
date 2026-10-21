@@ -66,8 +66,7 @@ As a text citation:
 > Sensitivity Analysis in JAX*. Zenodo.
 > https://doi.org/10.5281/zenodo.22099117
 
-To cite a specific release, use its version DOI instead — for v1.0.2 that is
-[10.5281/zenodo.23057233](https://doi.org/10.5281/zenodo.23057233).
+This DOI is the concept DOI. It always resolves to the latest version.
 
 ## Where to go next
 

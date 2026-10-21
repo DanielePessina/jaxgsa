@@ -518,7 +518,7 @@ def prepare(
         if n_expected is None:
             n_expected = int(X.shape[0])
     # Without X, the row count comes from the design the sampler built.
-    Y = _validate_output(Y, n_expected, problem, "X" if X is not None else "samples.samples")
+    Y = _validate_output(Y, n_expected, problem, "X" if X is not None else "design.samples")
     deferred_expand: Callable[[Array], Array] | None = None
     if expand is not None:
         # The user evaluated the model once per unique row. The estimator,

@@ -82,7 +82,26 @@ reporting a precise index:
 
 ```python
 import jax
+import jax.numpy as jnp
+import jaxgsa
 
+problem = jaxgsa.Problem.from_dict({
+    "x1": (-jnp.pi, jnp.pi),
+    "x2": (-jnp.pi, jnp.pi),
+    "x3": (-jnp.pi, jnp.pi),
+})
+design = jaxgsa.sobol.sample(problem, n_samples=4096, seed=42, verbose=False)
+
+
+def model(X):
+    return (
+        jnp.sin(X[:, 0])
+        + 7.0 * jnp.sin(X[:, 1]) ** 2
+        + 0.1 * X[:, 2] ** 4 * jnp.sin(X[:, 0])
+    )
+
+
+Y = model(design.samples)
 boot = jaxgsa.sobol.analyze(
     design, Y, n_bootstrap=1000, key=jax.random.key(0), verbose=False
 )
@@ -90,7 +109,9 @@ print("S1 lower and upper bounds:\n", boot.S1_conf)
 print("ST lower and upper bounds:\n", boot.ST_conf)
 ```
 
-Each confidence array has a lower row and an upper row. If a range is too wide
+Each confidence array has a lower row and an upper row. The lower bound of a
+near-zero index can fall below zero, as it does for `S1` of `x3`. Sampling error
+causes this. Read it as "no detectable effect on its own". If a range is too wide
 for your decision, run more model evaluations. The [Ishigami example](/examples/basic)
 shows how estimates change as the sample budget grows. Your real model has no
 known answer to compare with, so intervals and convergence checks matter more.
@@ -132,9 +153,9 @@ precision settings.
 
 If you use jaxgsa in research, cite the version you ran and the paper for
 your sensitivity method (see the [Sobol' references](/api/sobol#references)
-for this tutorial's estimators). For v1.0.2, use
-[10.5281/zenodo.23057233](https://doi.org/10.5281/zenodo.23057233)
-(the archived v1.0.0 record is
-[10.5281/zenodo.23054912](https://doi.org/10.5281/zenodo.23054912)).
+for this tutorial's estimators). Use the
+concept DOI
+[10.5281/zenodo.22099117](https://doi.org/10.5281/zenodo.22099117).
+It always resolves to the latest version.
 See [`CITATION.cff`](https://github.com/DanielePessina/jaxgsa/blob/master/CITATION.cff)
 and the [methods guide](/guide/methods).

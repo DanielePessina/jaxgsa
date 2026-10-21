@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.1 (unreleased)
+
+### Fixed
+
+- Zenodo labelled every deposit from 1.1.0 to 1.2.0 as version 1.1.0, because `.zenodo.json` pinned the version. The field is gone, so Zenodo now takes the version from the release tag.
+- The shape error for a wrong number of output rows now says `design.samples`, as the docs do.
+- Getting started: the bootstrap example runs on its own. The page explains why the lower bound of a near-zero index can fall below zero. The citation uses the concept DOI, which always resolves to the latest version.
+- Studio: the footer shows the current version. At phone width the low and high fields are no longer cut off. Each input field, select and table header has an accessible name. The hero button says "Run the demo", because the run takes under a second.
+
 ## 1.2.0 (2026-10-21)
 
 Contains everything in the 1.2.0 pre-releases (b1 to b3, below) plus the changes in this section.

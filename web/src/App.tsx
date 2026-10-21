@@ -537,7 +537,7 @@ export default function App() {
               }}
               disabled={device === null || demoRunning !== null}
             >
-              {demoRunning === null ? "Run the 2-minute demo" : "Running the demo…"}
+              {demoRunning === null ? "Run the demo" : "Running the demo…"}
             </Button>
             <span className="text-xs text-muted-foreground" role="status">
               {demoRunning ?? "full workflow: problem → design → outputs → indices"}
