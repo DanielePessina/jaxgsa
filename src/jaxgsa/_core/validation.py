@@ -22,6 +22,8 @@ from jax import Array
 from jaxgsa._core.warning_types import JaxgsaWarning
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from jaxgsa.problem import Problem
 
 
@@ -445,6 +447,86 @@ def _raise_categorical_design(problem: Problem, method: str) -> None:
 def _raise_categorical_analysis(problem: Problem, method: str) -> None:
     """Reject a categorical problem in a categorical-naive analyzer."""
     _raise_unsupported(problem, method, kind="categorical", design=False)
+
+
+# Display name and spec class of each continuous family a method may refuse.
+_MARGINAL_FAMILIES: dict[str, tuple[str, str]] = {
+    "lognormal": ("lognormal", "LognormalSpec"),
+    "weibull": ("Weibull", "WeibullSpec"),
+    "triangular": ("triangular", "TriangularSpec"),
+    "beta": ("beta", "BetaSpec"),
+}
+
+
+def _marginal_tolerant_methods(families: Sequence[str]) -> str:
+    """Name every registered method that accepts all of ``families``.
+
+    Given-data methods come first and the design-based ones follow, as in the
+    categorical message. A method that registers later reaches the message
+    with no edit here.
+
+    Args:
+        families: Family tags the problem uses and the refusing method refuses.
+
+    Returns:
+        A comma-separated list of ``jaxgsa.<name>`` routes.
+    """
+    from jaxgsa._core.registry import methods
+
+    accepting = [
+        spec
+        for spec in methods().values()
+        if not any(family in spec.refused_marginals for family in families)
+    ]
+    given = [f"jaxgsa.{spec.name}" for spec in accepting if not spec.is_design_based]
+    design = [f"jaxgsa.{spec.name}" for spec in accepting if spec.is_design_based]
+    listed = ", ".join(given)
+    if design:
+        listed = f"{listed}, or the design-based {', '.join(design)}"
+    return listed
+
+
+def _raise_refused_marginals(
+    problem: Problem, method: str, refused: Mapping[str, str], *, design: bool
+) -> None:
+    """Reject a problem whose marginal families the method has declared it refuses.
+
+    Args:
+        problem: Problem the design or analysis was requested for.
+        method: Fully qualified sampler or analyzer name for the message.
+        refused: The method's ``MethodSpec.refused_marginals``: family tag to
+            the reason for the refusal.
+        design: True when ``method`` builds a design, False for an analyzer.
+            Selects the wording only.
+
+    Raises:
+        ValueError: If any parameter uses a refused family. The message names
+            each refused family, its parameters and the reason, and lists the
+            methods that accept every refused family the problem uses.
+    """
+    if not refused:
+        return
+    hits: dict[str, list[str]] = {}
+    for name, spec in zip(problem.names, problem.input_specs, strict=True):
+        if spec.dist in refused:
+            hits.setdefault(spec.dist, []).append(name)
+    if not hits:
+        return
+    found = "; ".join(
+        f"parameters {names} are {_MARGINAL_FAMILIES.get(family, (family, family))[0]} "
+        f"({_MARGINAL_FAMILIES.get(family, (family, family))[1]})"
+        for family, names in hits.items()
+    )
+    # Two families can share one reason; state it once.
+    reasons = " ".join(dict.fromkeys(refused[family] for family in hits))
+    names_ = [_MARGINAL_FAMILIES.get(f, (f, f))[0] for f in hits]
+    labels = ", ".join(names_[:-1]) + " and " + names_[-1] if len(names_) > 1 else names_[0]
+    lead = "cannot build a design for this problem" if design else "cannot analyze this problem"
+    raise ValueError(
+        f"{method} {lead}. It does not support these marginals: {found}. "
+        f"{reasons} Use a method that accepts {labels} "
+        f"inputs instead: {_marginal_tolerant_methods(tuple(hits))}."
+    )
 
 
 def _dims_and_coords(

@@ -283,7 +283,7 @@ def indices(
 
     # The same gates analyze applies, in the same order: categorical for both
     # backends from the registry record, correlation per backend below.
-    gates(_SPEC, problem, method="jaxgsa.shapley.indices", check=("categorical",))
+    gates(_SPEC, problem, method="jaxgsa.shapley.indices", check=("categorical", "marginal"))
     check_scalars(
         (
             one_of("backend", backend, ("pce", "hdmr")),
@@ -517,7 +517,7 @@ def analyze(
     # for unordered level codes; reject with the Shapley-specific name. Only
     # the categorical half is gated from the record: whether a correlation is
     # tolerated depends on the backend, so it is settled below instead.
-    gates(_SPEC, problem, method="jaxgsa.shapley.analyze", check=("categorical",))
+    gates(_SPEC, problem, method="jaxgsa.shapley.analyze", check=("categorical", "marginal"))
     check_scalars(
         (
             *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),

@@ -17,7 +17,20 @@ analysis commands for the method.
   both sides, on one side, or on neither.
 - `jaxgsa.CategoricalSpec(probs, labels)` — an unordered discrete marginal.
   `probs` and `labels` are tuples, so the spec stays hashable.
-- `jaxgsa.InputSpec` — the union of the three, for type annotations.
+- `jaxgsa.LognormalSpec(mu, sigma)` — a lognormal marginal. `mu` and `sigma`
+  are the mean and standard deviation of `log(x)`. SciPy:
+  `lognorm(s=sigma, scale=exp(mu))`.
+- `jaxgsa.WeibullSpec(shape, scale)` — a Weibull marginal. SciPy:
+  `weibull_min(c=shape, scale=scale)`.
+- `jaxgsa.TriangularSpec(low, mode, high)` — a triangular marginal. SciPy:
+  `triang(c=(mode - low) / (high - low), loc=low, scale=high - low)`.
+- `jaxgsa.BetaSpec(a, b, low=0.0, high=1.0)` — a beta marginal on
+  `[low, high]`. SciPy: `beta(a, b, loc=low, scale=high - low)`.
+- `jaxgsa.InputSpec` — the union of these seven, for type annotations.
+
+`jaxgsa.dgsm` refuses the lognormal, Weibull, triangular and beta families,
+and `jaxgsa.efast` refuses the lognormal and Weibull families. See the
+[method capabilities table](/guide/methods#method-capabilities).
 
 `Problem.input_specs` returns these dataclasses, one per parameter. Tell the
 families apart with `isinstance`, and read the fields by name.
@@ -32,8 +45,14 @@ per parameter: one of the dataclasses above, a bare `(low, high)` tuple
   optional.
 - `jaxgsa.CategoricalInputSpec` — `{"dist": "categorical", "probs": [...],
   "labels": [...]}`, where `labels` is optional.
+- `jaxgsa.LognormalInputSpec` — `{"dist": "lognormal", "mu": ..., "sigma": ...}`.
+- `jaxgsa.WeibullInputSpec` — `{"dist": "weibull", "shape": ..., "scale": ...}`.
+- `jaxgsa.TriangularInputSpec` — `{"dist": "triangular", "low": ...,
+  "mode": ..., "high": ...}`.
+- `jaxgsa.BetaInputSpec` — `{"dist": "beta", "a": ..., "b": ..., "low": ...,
+  "high": ...}`. In the dict form `low` and `high` are required.
 
-The three `...InputSpec` names are `TypedDict`s. They describe the dict form
+The seven `...InputSpec` names are `TypedDict`s. They describe the dict form
 and give it type checking. A problem written that way is JSON-expressible.
 
 ```python

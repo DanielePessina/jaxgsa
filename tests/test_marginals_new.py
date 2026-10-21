@@ -10,6 +10,7 @@ save/load round trips.
 from __future__ import annotations
 
 import math
+import warnings
 from typing import Any
 
 import jax
@@ -23,6 +24,8 @@ from jaxgsa import BetaSpec, LognormalSpec, Problem, TriangularSpec, WeibullSpec
 from jaxgsa._core import marginals
 from jaxgsa._core.sampling import _inverse_transform_samples, _transform_samples
 from jaxgsa._core.transforms import cdf_to_unit_interval
+from jaxgsa.efast import EFASTResult
+from jaxgsa.morris import MorrisResult
 from jaxgsa.pce import PCEResult
 from jaxgsa.problem import ContinuousFamilySpec
 from jaxgsa.sobol import SobolResult, SobolSamples
@@ -288,6 +291,126 @@ def test_pce_recovers_product_model_indices(name):
     np.testing.assert_allclose(np.asarray(result.ST).ravel(), st, atol=0.03)
 
 
-def test_morris_refuses_open_tailed_families_for_now():
-    with pytest.raises(TypeError, match="unsupported marginal LognormalSpec"):
-        jaxgsa.morris.sample(_problem("lognormal", 2), 4, seed=0, verbose=False)
+# ---------------------------------------------------------------------------
+# Method capability gates (ticket 03). Tier T4: behavioural contract.
+# ---------------------------------------------------------------------------
+
+
+def _mixed(name: str) -> Problem:
+    """One parameter of the family under test, then two uniforms."""
+    return Problem.from_dict({"x0": CASES[name][0], "x1": (0.0, 1.0), "x2": (0.0, 1.0)})
+
+
+def _point_model(x):
+    return jnp.sin(x[0]) + x[1] ** 2 + 0.1 * x[2]
+
+
+@pytest.mark.parametrize("name", FAMILIES)
+def test_dgsm_refuses_each_new_family_with_the_registry_message(name):
+    problem = _mixed(name)
+    X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, 32, seed=0))
+    cls = type(CASES[name][0]).__name__
+    for call in (
+        lambda: jaxgsa.dgsm.analyze(problem, X, fn=_point_model, verbose=False),
+        lambda: jaxgsa.dgsm.indices(problem, X, fn=_point_model),
+    ):
+        # Refused before the lower_bound warning: no warning may escape first.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(ValueError, match=cls) as info:
+                call()
+        message = str(info.value)
+        assert "['x0']" in message
+        assert "jaxgsa.sobol" in message  # names an accepting method
+        assert "jaxgsa.dgsm," not in message  # never names itself
+
+
+@pytest.mark.parametrize("name", FAMILIES)
+def test_dgsm_poincare_constant_refuses_each_new_family(name):
+    with pytest.raises(ValueError, match="does not support"):
+        jaxgsa.dgsm.poincare_constant(CASES[name][0])
+
+
+@pytest.mark.parametrize("name", ["lognormal", "weibull"])
+def test_efast_refuses_heavy_tailed_families(name):
+    with pytest.raises(ValueError, match=type(CASES[name][0]).__name__) as info:
+        jaxgsa.efast.sample(_mixed(name), 400)
+    message = str(info.value)
+    assert "biased low" in message
+    assert "jaxgsa.efast" not in message.split("instead:")[1]
+
+
+@pytest.mark.parametrize("name", ["triangular", "beta"])
+def test_efast_accepts_bounded_families(name):
+    problem = _mixed(name)
+    samples = jaxgsa.efast.sample(problem, 400)
+    X = np.asarray(samples.samples)
+    low, high = CASES[name][0].support()
+    assert X[:, 0].min() >= low and X[:, 0].max() <= high
+    Y = jnp.asarray(X[:, 0] + X[:, 1] + X[:, 2])
+    result = jaxgsa.efast.analyze(samples, Y, verbose=False)
+    assert isinstance(result, EFASTResult)
+    assert np.all(np.isfinite(np.asarray(result.S1)))
+
+
+@pytest.mark.parametrize("name", ["lognormal", "weibull"])
+def test_morris_squashes_only_the_open_upper_side(name):
+    spec, dist, _, _ = CASES[name]
+    problem = _mixed(name)
+    q = 0.01
+    sr = jaxgsa.morris.sample(problem, 20, seed=1, truncation_quantile=q, verbose=False)
+    x0 = np.asarray(sr.samples)[:, 0]
+    assert np.all(np.isfinite(x0))
+    # The top level sits at the 1 - q quantile, the bottom one at the clip.
+    np.testing.assert_allclose(x0.max(), dist.ppf(1.0 - q), rtol=1e-6)
+    assert x0.min() < dist.ppf(1e-6)
+
+
+@pytest.mark.parametrize("name", FAMILIES)
+@pytest.mark.parametrize("method", ["trajectory", "radial"])
+def test_morris_effects_use_the_squashed_step(name, method):
+    """A model linear in each unit coordinate recovers its exact coefficients.
+
+    ``F(x0)`` is the unit coordinate of ``x0``, so ``Y = 3 x1 + 5 F(x0)`` has
+    elementary effects of exactly 5 on ``x0`` and 3 on ``x1`` once
+    ``ee_delta`` follows the squash.
+    """
+    problem = _mixed(name)
+    spec = CASES[name][0]
+    sr = jaxgsa.morris.sample(
+        problem, 30, seed=2, truncation_quantile=0.05, method=method, verbose=False
+    )
+    X = np.asarray(sr.samples)
+    Y = jnp.asarray(5.0 * marginals.host_cdf(spec, X[:, 0]) + 3.0 * X[:, 1])
+    res = jaxgsa.morris.analyze(sr, Y, verbose=False)
+    assert isinstance(res, MorrisResult)
+    np.testing.assert_allclose(np.asarray(res.mu_star)[:2], [5.0, 3.0], rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(res.mu_star)[2], 0.0, atol=1e-9)
+    with pytest.raises(ValueError, match="finite uniform bounds"):
+        res.to_physical_units()
+
+
+def test_morris_does_not_squash_bounded_families():
+    """A large q would pull the ends to the 0.1 and 0.9 quantiles if applied."""
+    for name in ("triangular", "beta"):
+        dist = CASES[name][1]
+        sr = jaxgsa.morris.sample(_mixed(name), 20, seed=1, truncation_quantile=0.1, verbose=False)
+        x0 = np.asarray(sr.samples)[:, 0]
+        # The ends are the unit clip's quantiles, not the squash's.
+        np.testing.assert_allclose(
+            [x0.min(), x0.max()], dist.ppf([1e-12, 1 - 1e-12]), rtol=1e-6, atol=1e-9
+        )
+
+
+@pytest.mark.parametrize("name", FAMILIES)
+def test_sobol_to_morris_warns_for_open_tails_only(name):
+    samples = jaxgsa.sobol.sample(_mixed(name), 256, verbose=False)
+    open_tail = name in ("lognormal", "weibull")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        samples.to_morris(verbose=False)
+    hits = [w for w in caught if "unbounded marginals" in str(w.message)]
+    assert len(hits) == int(open_tail)
+    if open_tail:
+        assert f"({name})" in str(hits[0].message)
+        assert "truncate_gaussians" not in str(hits[0].message)

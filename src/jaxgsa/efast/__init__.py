@@ -27,6 +27,7 @@ from jaxgsa._core.registry import MethodSpec as _MethodSpec
 from jaxgsa._core.registry import register as _register
 from jaxgsa.efast._analyze import EFASTIndices, analyze, indices
 from jaxgsa.efast._result import EFASTResult
+from jaxgsa.efast._sampling import REFUSED_MARGINALS as _REFUSED_MARGINALS
 from jaxgsa.efast._sampling import EFASTSamples, sample
 
 __all__ = [
@@ -51,5 +52,7 @@ _SPEC = _register(
         # transform, so it cannot be dropped at all: removing a point does not
         # shrink the sample, it changes what the estimator computes.
         invalid_unit=_InvalidUnit.CURVE,
+        # Lognormal and Weibull bias S1 low; triangular and beta are accepted.
+        refused_marginals=_REFUSED_MARGINALS,
     )
 )

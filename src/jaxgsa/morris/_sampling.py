@@ -21,6 +21,7 @@ References:
 
 from __future__ import annotations
 
+import math
 import warnings
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Mapping, overload
@@ -40,7 +41,7 @@ from jaxgsa._core.sampling import (
 )
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa._core.warning_types import JaxgsaWarning
-from jaxgsa.problem import GaussianSpec, LognormalSpec, Problem, WeibullSpec
+from jaxgsa.problem import _CONTINUOUS_FAMILY_SPECS, GaussianSpec, Problem
 
 # Offset between the Sobol' draws used for the radial base points (a) and the
 # auxiliary points (b). Reusing draw i for both would give delta = 0.
@@ -504,7 +505,10 @@ def _squash_open_sides(
     bounded, so they never move. A Gaussian marginal with an explicit ``low``
     is bounded below, and one with an explicit ``high`` is bounded above. A
     two-sided truncated Gaussian therefore gets no squash at all. Truncating it
-    again would silently narrow the input model the user declared.
+    again would silently narrow the input model the user declared. The other
+    families read their sides off ``spec.support()``: lognormal and Weibull
+    are closed below at 0 and open above, so only their upper side moves;
+    triangular and beta are closed on both sides and never move.
 
     The squash is an affine map on each dimension, so it also rescales the step
     that each elementary effect actually takes. The function multiplies
@@ -523,22 +527,17 @@ def _squash_open_sides(
     """
     q = truncation_quantile
     for idx, spec in enumerate(problem.input_specs):
-        if isinstance(spec, LognormalSpec | WeibullSpec):
-            # Open upper tail: without a squash the design would sit at the
-            # 1 - 1e-12 quantile and mu_star would have no fixed scale. The
-            # upper-side squash for these families is not implemented yet.
-            raise TypeError(
-                f"unsupported marginal {type(spec).__name__} in jaxgsa.morris.sample "
-                f"(parameter {problem.names[idx]!r}): its support is open above. "
-                "Use jaxgsa.sobol or a given-data method for this input."
-            )
-        # shortcut: Gaussian is the only open-tailed family today; extend when one is added
-        # Only a Gaussian marginal can be unbounded. Uniform and categorical
-        # marginals are bounded, so they never move.
-        if not isinstance(spec, GaussianSpec):
+        if isinstance(spec, GaussianSpec):
+            low, high = spec.low, spec.high
+        elif isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
+            # Lognormal and Weibull are closed below (ppf(0) = 0) and open
+            # above; triangular and beta are closed on both sides.
+            low, high = spec.support()
+        else:
+            # Uniform and categorical marginals are bounded and never move.
             continue
-        lo_target = 0.0 if spec.low is not None else q
-        hi_target = 1.0 if spec.high is not None else 1.0 - q
+        lo_target = q if low is None or math.isinf(low) else 0.0
+        hi_target = 1.0 - q if high is None or math.isinf(high) else 1.0
         scale = hi_target - lo_target
         if scale == 1.0:  # both sides already bounded, so nothing to squash
             continue
@@ -598,9 +597,12 @@ def sample(
     therefore pulled in by ``q = truncation_quantile`` before the transform. A
     side that the problem already bounds with an explicit ``low`` or ``high``
     is left alone, so a two-sided truncated Gaussian is sampled exactly as
-    declared. Elementary effects use the step the design really takes, so the
-    squash does not bias them. :meth:`MorrisResult.to_physical_units` is
-    unavailable for Gaussian problems because the transform is nonlinear.
+    declared. Lognormal and Weibull marginals are closed below at 0 and open
+    above, so only their upper side is pulled in. Triangular and beta
+    marginals are bounded and are not pulled in. Elementary effects use the
+    step the design really takes, so the squash does not bias them.
+    :meth:`MorrisResult.to_physical_units` is unavailable for every
+    non-uniform problem because the transform is nonlinear.
 
     On an unbounded marginal ``mu_star`` has no ``q -> 0`` limit. The design
     always includes unit levels 0 and 1 exactly. A smaller ``q`` therefore
@@ -611,7 +613,8 @@ def sample(
     if you want one bounded input model that every method shares.
 
     Args:
-        problem: Problem definition with uniform and/or Gaussian marginals.
+        problem: Problem definition with continuous marginals (uniform,
+            Gaussian, lognormal, Weibull, triangular or beta).
         n_trajectories: Number of trajectories r (>= 2). Each one contributes
             one elementary effect per parameter, so r is the sample size behind
             every screening measure. More trajectories tighten the mu_star
@@ -634,12 +637,14 @@ def sample(
             :meth:`MorrisSamples.downsample`. A reused ``np.random.Generator``
             advances its state between calls, which breaks that nesting.
         truncation_quantile: Tail probability ``q`` removed from each open side
-            of every Gaussian marginal's grid (default 1e-4, probing the
-            0.01%-99.99% quantile range). At this default the grid drops 0.29%
+            of every open-tailed marginal's grid (default 1e-4, probing the
+            0.01%-99.99% quantile range). For a Gaussian, the grid drops 0.29%
             of the marginal variance and 5.0% of its fourth moment. The former
             default of 5e-3 dropped 7.5% and 24%, and it visibly perturbed
             rankings. Sides that the marginal already bounds with ``low`` or
-            ``high`` are not squashed. Ignored for uniform marginals.
+            ``high`` are not squashed. Lognormal and Weibull marginals lose
+            ``q`` from their upper side only. Ignored for uniform, triangular
+            and beta marginals.
         verbose: If ``True`` (default), print a short summary that includes how
             many duplicate rows were removed.
 

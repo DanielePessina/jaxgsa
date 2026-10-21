@@ -38,14 +38,19 @@ Problem.from_dict(
 )
 ```
 
-`from_dict` takes any mix of uniform, Gaussian, and categorical marginals.
+`from_dict` takes any mix of uniform, Gaussian, categorical, lognormal,
+Weibull, triangular and beta marginals.
 Parameter order follows the dict's insertion order, so the dict order is the
 model's column order.
 
 Each value in `params` may be a `(low, high)` tuple, one of the spec
-dataclasses (`UniformSpec`, `GaussianSpec`, `CategoricalSpec`), or the
+dataclasses (`UniformSpec`, `GaussianSpec`, `CategoricalSpec`,
+`LognormalSpec`, `WeibullSpec`, `TriangularSpec`, `BetaSpec`), or the
 matching plain dict (`UniformInputSpec`, `GaussianInputSpec`,
-`CategoricalInputSpec`). The dict form is JSON-expressible, which is what
+`CategoricalInputSpec`, `LognormalInputSpec`, `WeibullInputSpec`,
+`TriangularInputSpec`, `BetaInputSpec`). The
+[non-uniform inputs example](/examples/non-uniform-inputs#lognormal-weibull-triangular-and-beta-inputs)
+gives the SciPy equivalent of each new family. The dict form is JSON-expressible, which is what
 lets a design save and reload itself.
 
 ```python

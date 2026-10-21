@@ -23,7 +23,7 @@ method actually does.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
 
@@ -62,6 +62,15 @@ class MethodSpec:
             no traceable core to export. Recorded here rather than left as an
             absence so the exemption is a declaration that gets checked, not
             a gap someone has to notice.
+        refused_marginals: The marginal families the method refuses, keyed by
+            family tag (``spec.dist``: ``"lognormal"``, ``"weibull"``,
+            ``"triangular"``, ``"beta"``), each with the one-sentence reason
+            the refusal states. Empty, the default, means the method accepts
+            every continuous family. A mapping rather than one capability
+            because the answer differs per family: ``efast`` accepts the
+            bounded triangular and beta families but refuses the open-tailed
+            lognormal and Weibull ones. Uniform and Gaussian marginals are
+            not listed: every method accepts them.
         invalid_unit: The block of data the method treats as indivisible when
             dropping non-finite values, or ``None`` when the method delegates
             to a backend and has no unit of its own. Dropping half a Saltelli
@@ -78,6 +87,7 @@ class MethodSpec:
     bootstrap: str | None
     invalid_unit: InvalidUnit | None
     pure_core: bool = True
+    refused_marginals: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
     @property
     def is_design_based(self) -> bool:

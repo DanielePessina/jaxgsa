@@ -82,6 +82,7 @@ from jaxgsa._core.validation import (
     _promote_with_zero_stats,
     _raise_categorical_analysis,
     _raise_correlated_analysis,
+    _raise_refused_marginals,
     _validate_output,
     _validate_x,
     _warn_zero_variance_slices,
@@ -273,13 +274,14 @@ def gates(
     problem: Problem,
     *,
     method: str,
-    check: tuple[str, ...] = ("correlation", "categorical"),
+    check: tuple[str, ...] = ("correlation", "categorical", "marginal"),
 ) -> None:
     """Refuse a problem the method has declared it cannot handle.
 
-    The two capability questions are answered by the method's registry
-    record, not by an argument at the call site. A method therefore cannot
-    claim one thing in the registry and do another here.
+    The three capability questions (correlation, categorical inputs, refused
+    marginal families) are answered by the method's registry record, not by
+    an argument at the call site. A method therefore cannot claim one thing
+    in the registry and do another here.
 
     Args:
         spec: The calling method's registry record.
@@ -294,12 +296,17 @@ def gates(
 
     Raises:
         ValueError: If the problem trips a capability the spec refuses. A
-            problem that trips both gets the combined message.
+            problem that is both correlated and categorical gets the combined
+            message. The marginal check runs last.
     """
     if "correlation" in check and spec.correlation == "refuses":
         _raise_correlated_analysis(problem, method)
     if "categorical" in check and spec.categorical == "refuses":
         _raise_categorical_analysis(problem, method)
+    if "marginal" in check:
+        _raise_refused_marginals(
+            problem, method, spec.refused_marginals, design=spec.is_design_based
+        )
 
 
 @dataclass(frozen=True)
