@@ -152,12 +152,8 @@ def _get_fused_scalar_indices(D: int, calc_second_order: bool, estimator: str):
         # path: this exact-equality reduction is fused into the same device
         # executable as the gather and estimator.
         constant = jnp.all(Y3 == Y3[0], axis=0)
-        A_flat, AB_flat, BA_flat, B_flat = _separate_flattened(Y3, D, calc_second_order)
         S1, ST, S2 = _point_indices_3d(
-            A_flat,
-            AB_flat,
-            BA_flat,
-            B_flat,
+            _SeparatedSlices(Y3, D, calc_second_order),
             T=1,
             K=1,
             D=D,
@@ -304,6 +300,101 @@ def _get_separate_flatten(D: int, calc_second_order: bool):
     return jax.jit(fn)
 
 
+@lru_cache(maxsize=32)
+def _get_chunk_front(D: int, calc_second_order: bool, width: int):
+    """Build the jitted slice-standardize-split-flatten for one chunk width.
+
+    The chunk start is a traced scalar, so every chunk of the same width
+    shares one executable. Slicing inside the executable lets XLA read the
+    columns straight out of ``Y`` instead of an eager copy of them.
+
+    Args:
+        D: Number of input parameters.
+        calc_second_order: Whether the layout includes the BA blocks.
+        width: Number of output slices in the chunk.
+
+    Returns:
+        A jitted function of ``(Y3, start)`` returning the flattened blocks of
+        slices ``start : start + width``.
+    """
+
+    def fn(Y3: Array, start: Array) -> tuple[Array, Array, Array | None, Array]:
+        rows, T, K = Y3.shape
+        cols = jax.lax.dynamic_slice_in_dim(Y3.reshape(rows, T * K), start, width, axis=1)
+        A, AB, BA, B = _separate_output_values(cols.reshape(rows, width, 1), D, calc_second_order)
+        return _flatten_slices(A, AB, BA, B)
+
+    return jax.jit(fn)
+
+
+class _SeparatedSlices:
+    """Lazy per-chunk front half: standardize, split and flatten one slice chunk.
+
+    The whole-array front half materialises the standardized copy and the
+    four flattened blocks next to ``Y``, about three times ``Y`` before any
+    kernel runs, and keeps one more copy alive for the whole analysis. This
+    object takes the slices a chunk at a time instead. Each output slice is
+    standardized on its own, so a chunk of columns gives the same values as
+    the same columns of the whole array, and only one chunk's working copy
+    exists at a time.
+
+    Attributes:
+        total: Number of output slices ``T * K``.
+        base_n: Base sample size ``N``.
+        dtype: Dtype of the flattened blocks.
+        calc_second_order: Whether the layout includes the BA blocks.
+    """
+
+    def __init__(self, Y: Array, D: int, calc_second_order: bool) -> None:
+        """Wrap a promoted ``(N * step, T, K)`` array.
+
+        Args:
+            Y: Expanded outputs promoted to ``(N * step, T, K)``.
+            D: Number of input parameters.
+            calc_second_order: Whether the layout includes the BA blocks.
+
+        Raises:
+            ValueError: If the row count is not a multiple of the Saltelli
+                group size (raised while tracing the front half).
+        """
+        self._D = D
+        self.calc_second_order = calc_second_order
+        self._rows = Y.shape[0]
+        self.total = Y.shape[1] * Y.shape[2]
+        self._Y = Y
+        probe = jax.ShapeDtypeStruct((self._rows, 1, 1), Y.dtype)
+        a, _, _, _ = jax.eval_shape(_get_separate_flatten(D, calc_second_order), probe)
+        self.base_n = a.shape[1]
+        self.dtype = a.dtype
+
+    def chunk(self, start: int, end: int, width: int) -> tuple[Array, Array, Array | None, Array]:
+        """Return the flattened blocks of slices ``start:end``, padded to ``width``.
+
+        Args:
+            start: First slice of the chunk.
+            end: One past the last slice of the chunk.
+            width: Slice count to pad the chunk to, so the kernel traces once.
+
+        Returns:
+            ``(A, AB, BA, B)`` with shapes ``(width, N)``, ``(width, N, D)``,
+            ``(width, N, D)`` and ``(width, N)``; ``BA`` is ``None`` without
+            second order. Lanes past ``end - start`` are zero padding.
+        """
+        if start == 0 and end == self.total:
+            A, AB, BA, B = _separate_flattened(self._Y, self._D, self.calc_second_order)
+        else:
+            # The slice happens inside the executable, so the only new buffers
+            # are one chunk's blocks, never a copy of the whole ``Y``.
+            front = _get_chunk_front(self._D, self.calc_second_order, end - start)
+            A, AB, BA, B = front(self._Y, start)
+        return (
+            pad_slice_axis(A, width),
+            pad_slice_axis(AB, width),
+            None if BA is None else pad_slice_axis(BA, width),
+            pad_slice_axis(B, width),
+        )
+
+
 def _symmetrize_s2(S2: Array) -> Array:
     """Average the upper and lower triangles of a raw S2 matrix.
 
@@ -417,10 +508,7 @@ def _flatten_slices(
 
 
 def _point_indices_3d(
-    A_flat: Array,
-    AB_flat: Array,
-    BA_flat: Array | None,
-    B_flat: Array,
+    slices: _SeparatedSlices,
     *,
     T: int,
     K: int,
@@ -442,11 +530,9 @@ def _point_indices_3d(
     which avoids the dispatch and traces a simpler graph.
 
     Args:
-        A_flat: Outputs from sample matrix A, shape ``(S, N)``.
-        AB_flat: Outputs from the AB cross-matrices, shape ``(S, N, D)``.
-        BA_flat: Outputs from the BA cross-matrices, shape ``(S, N, D)``, or
-            ``None`` when second order is off.
-        B_flat: Outputs from sample matrix B, shape ``(S, N)``.
+        slices: Lazy front half over the promoted outputs. It standardizes,
+            splits and flattens one chunk of slices at a time, so only a
+            chunk's working copy of ``Y`` exists, never a full one.
         T: Number of time steps in the promoted layout.
         K: Number of output variables in the promoted layout.
         D: Number of input parameters.
@@ -469,22 +555,23 @@ def _point_indices_3d(
     Raises:
         ValueError: If ``slice_chunk_size`` is below 1.
     """
-    calc_second_order = BA_flat is not None
+    calc_second_order = slices.calc_second_order
     total = T * K
     # Sizes the automatic width, and refuses an explicit width below 1. Both
     # happen before the scalar shortcut so every path validates the argument.
     cs = resolve_point_chunk_size(
         slice_chunk_size,
         total,
-        A_flat.shape[1],
+        slices.base_n,
         D,
         calc_second_order,
-        A_flat.dtype.itemsize,
+        slices.dtype.itemsize,
     )
 
     if is_scalar:
         # Scalar path (T*K=1): call the fused kernel directly on 1-D arrays.
         # This avoids vmap dispatch overhead and produces a simpler XLA graph.
+        A_flat, AB_flat, BA_flat, B_flat = slices.chunk(0, 1, 1)
         a, b, ab = A_flat[0], B_flat[0], AB_flat[0]
         if calc_second_order:
             assert BA_flat is not None
@@ -501,18 +588,13 @@ def _point_indices_3d(
     # instead of once more for a ragged tail. The padded lanes are separate
     # vmap lanes and are dropped before anything reads them.
     if calc_second_order:
-        assert BA_flat is not None
         batched = _get_batched_kernel(True, estimator)
         s1_parts, st_parts, s2_parts = [], [], []
         for start in range(0, total, cs):
             end = min(start + cs, total)
             actual = end - start
-            s1, st, s2 = batched(
-                pad_slice_axis(A_flat[start:end], cs),
-                pad_slice_axis(AB_flat[start:end], cs),
-                pad_slice_axis(BA_flat[start:end], cs),
-                pad_slice_axis(B_flat[start:end], cs),
-            )
+            A_c, AB_c, BA_c, B_c = slices.chunk(start, end, cs)
+            s1, st, s2 = batched(A_c, AB_c, BA_c, B_c)
             s1_parts.append(s1[:actual])
             st_parts.append(st[:actual])
             s2_parts.append(s2[:actual])
@@ -526,11 +608,8 @@ def _point_indices_3d(
         for start in range(0, total, cs):
             end = min(start + cs, total)
             actual = end - start
-            s1, st = batched(
-                pad_slice_axis(A_flat[start:end], cs),
-                pad_slice_axis(AB_flat[start:end], cs),
-                pad_slice_axis(B_flat[start:end], cs),
-            )
+            A_c, AB_c, _, B_c = slices.chunk(start, end, cs)
+            s1, st = batched(A_c, AB_c, B_c)
             s1_parts.append(s1[:actual])
             st_parts.append(st[:actual])
 
@@ -607,13 +686,8 @@ def _indices_from_expanded(
     Y, layout = _prepare_Y(Y)
     _, T, K = Y.shape
 
-    A_flat, AB_flat, BA_flat, B_flat = _separate_flattened(Y, D, calc_second_order)
-
     S1_out, ST_out, S2_out = _point_indices_3d(
-        A_flat,
-        AB_flat,
-        BA_flat,
-        B_flat,
+        _SeparatedSlices(Y, D, calc_second_order),
         T=T,
         K=K,
         D=D,
@@ -835,8 +909,8 @@ def _analyze_bootstrap(
     calc_second_order = samples.calc_second_order
 
     _, T, K = Y.shape
-    A_flat, AB_flat, BA_flat, B_flat = _separate_flattened(Y, D, calc_second_order)
-    base_n = A_flat.shape[1]
+    slices = _SeparatedSlices(Y, D, calc_second_order)
+    base_n = slices.base_n
     total = T * K
 
     # One key per draw: draw r depends on draw_keys[r] alone, so the chunk
@@ -845,10 +919,7 @@ def _analyze_bootstrap(
     draw_keys = resample_keys(key, n_bootstrap)
 
     S1_out, ST_out, S2_raw = _point_indices_3d(
-        A_flat,
-        AB_flat,
-        BA_flat,
-        B_flat,
+        slices,
         T=T,
         K=K,
         D=D,
@@ -863,7 +934,7 @@ def _analyze_bootstrap(
         base_n,
         D,
         calc_second_order,
-        A_flat.dtype.itemsize,
+        slices.dtype.itemsize,
         n_bootstrap=n_bootstrap,
     )
 
@@ -876,7 +947,7 @@ def _analyze_bootstrap(
         base_n,
         D,
         calc_second_order,
-        A_flat.dtype.itemsize,
+        slices.dtype.itemsize,
         cs,
     )
 
@@ -895,10 +966,7 @@ def _analyze_bootstrap(
     for start in range(0, total, cs):
         end = min(start + cs, total)
         actual = end - start
-        A_chunk = pad_slice_axis(A_flat[start:end], cs)
-        AB_chunk = pad_slice_axis(AB_flat[start:end], cs)
-        B_chunk = pad_slice_axis(B_flat[start:end], cs)
-        BA_chunk = None if BA_flat is None else pad_slice_axis(BA_flat[start:end], cs)
+        A_chunk, AB_chunk, BA_chunk, B_chunk = slices.chunk(start, end, cs)
         s1_chunk, st_chunk, s2_chunk = _bootstrap_indices(
             draw_keys,
             A_chunk,
