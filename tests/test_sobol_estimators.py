@@ -5,11 +5,12 @@ Verification tiers, per the project's oracle policy.
 * **T0, closed form.** Ishigami and Sobol-G have analytical ``S1`` and
   ``ST``. Every estimator must converge to them, because that is the only
   claim they all share. ``test_ishigami_end_to_end`` and ``test_sobol_g``.
-* **T2, permissive library.** OpenTURNS implements Saltelli, Jansen,
-  Martinez and Mauntz-Kucherenko, and its numbers are pinned here from
+* **T2, permissive-licence library.** OpenTURNS implements Saltelli,
+  Jansen, Martinez and Mauntz-Kucherenko. Its numbers are recorded here from
   ``scripts/oracles/openturns_sobol_estimators.py``, because OpenTURNS is
-  not a jaxgsa dependency. The live SALib parity check for the default
-  scheme is in ``scripts/oracles/external_checks.py``.
+  not a jaxgsa dependency. A recorded value from a T2 library is still T2.
+  The live SALib parity check for the default scheme is in
+  ``scripts/oracles/external_checks.py``.
 * **Structural.** Two of the claims in the estimator docstrings are exact,
   not statistical: Jansen's total order can never be negative, and
   Azzini-Rosati can never report ``S1 > ST``. Those are checked on samples
@@ -255,7 +256,12 @@ OPENTURNS_ISHIGAMI = {
 
 
 class TestOpenTurnsOracle:
-    """T2. OpenTURNS' four estimators, pinned because it is not a dependency."""
+    """T2 (permissive-licence library, recorded values): OpenTURNS 1.27.
+
+    The values in ``OPENTURNS_ISHIGAMI`` come from
+    ``scripts/oracles/openturns_sobol_estimators.py`` (run 2026-08-21). They
+    are recorded because OpenTURNS is not a jaxgsa dependency.
+    """
 
     @staticmethod
     def _design():

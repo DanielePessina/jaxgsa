@@ -94,7 +94,7 @@ class TestSobolGHSIC:
 
 
 class TestAgainstNumpyVStatistic:
-    """Tier T1 (reference implementation): ``analyze`` against plain NumPy.
+    """Tier T4 (independent re-implementation): ``analyze`` against plain NumPy.
 
     The oracle below builds every kernel from scratch in float64 NumPy. It
     uses the median heuristic with the strict upper-triangle median, the
@@ -251,12 +251,12 @@ class TestMedianBandwidth:
 
     @pytest.mark.parametrize("n", [4, 5, 6, 257])
     def test_quantile_equals_upper_triangle_median(self, n):
-        """Tier T1 (reference implementation): the index-adjusted quantile.
+        """Tier T4 (independent re-implementation): the index-adjusted quantile.
 
         The oracle is ``jnp.median(dists_sq[jnp.triu_indices(n, k=1)])``: the
         previous implementation of the median heuristic, re-expressed here as
-        an explicit strict-upper-triangle median. That is a reference
-        implementation, not a closed form, so this is T1 and not T0. It is
+        an explicit strict-upper-triangle median. That is an independent
+        re-implementation, not a closed form, so this is T4 and not T0. It is
         still the strongest check in this file: it computes the same quantity
         a completely different way, over four sample sizes.
 
@@ -279,7 +279,7 @@ class TestMedianBandwidth:
     )
     @pytest.mark.parametrize("x64", [False, True], ids=["f32", "f64"])
     def test_pairwise_selection_matches_the_sorting_quantile_bit_for_bit(self, n, kind, x64):
-        """Tier T1 (reference implementation): no matrix, same order statistic.
+        """Tier T4 (independent re-implementation): no matrix, same order statistic.
 
         ``_pairwise_quantile_by_selection`` finds the median-heuristic order
         statistic from the sorted sample alone. The oracle is
@@ -310,7 +310,7 @@ class TestMedianBandwidth:
         "poison", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"]
     )
     def test_pairwise_selection_is_nan_for_non_finite_input(self, poison):
-        """Tier T1 (reference implementation): non-finite input gives NaN, as the matrix does.
+        """Tier T4 (independent re-implementation): non-finite input gives NaN, as the matrix does.
 
         ``inf - inf`` on the diagonal puts a NaN in the distance matrix, so
         the reference returns NaN for any infinity as well as for NaN.
@@ -324,7 +324,7 @@ class TestMedianBandwidth:
 
     @pytest.mark.slow
     def test_half_integer_position_matches_the_sorting_quantile(self):
-        """Tier T1 (reference implementation): the plan dtype is the default float.
+        """Tier T4 (independent re-implementation): the plan dtype is the default float.
 
         ``jnp.quantile`` computes the target position ``q * (n - 1)`` in the
         dtype ``q`` promotes to -- the default float dtype -- and casts only
@@ -381,7 +381,7 @@ class TestMedianBandwidth:
 
     @pytest.mark.slow
     def test_float32_median_survives_more_than_two_to_the_31_pairs(self):
-        """Tier T1 (reference implementation): no 32-bit overflow in the pair count.
+        """Tier T4 (independent re-implementation): no 32-bit overflow in the pair count.
 
         The selection counts all ``N^2`` pairs. Without x64 that count once
         lived in ``int32``, which overflows past ``N = 46,340``, and the

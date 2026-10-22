@@ -66,7 +66,11 @@ As a text citation:
 > Sensitivity Analysis in JAX*. Zenodo.
 > https://doi.org/10.5281/zenodo.22099117
 
-This DOI is the concept DOI. It always resolves to the latest version.
+This DOI is the concept DOI. Use it to cite jaxgsa in general. It always
+resolves to the latest version.
+
+For reproducible work, cite the version you ran. Each release has its own
+version DOI. Find it on the Zenodo record of that release.
 
 ## Where to go next
 

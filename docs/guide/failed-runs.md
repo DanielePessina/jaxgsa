@@ -32,7 +32,7 @@ import numpy as np
 import jaxgsa
 from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-design = jaxgsa.sobol.sample(PROBLEM, n_samples=256, seed=0, verbose=False)
+design = jaxgsa.sobol.sample(PROBLEM, n_samples=8192, seed=0, verbose=False)
 Y = np.array(evaluate(design.samples))
 Y[3] = np.nan  # one model run failed
 
@@ -42,6 +42,18 @@ print("groups dropped:", result.invalid.n_invalid, "of", result.invalid.n_units)
 print("runs to investigate:", result.invalid.bad_row_indices)
 print("S1:", result.S1)
 ```
+
+Output (the drop also raises a `JaxgsaWarning` that names the dropped group):
+
+```text
+InvalidReport(policy='drop', unit='Saltelli group', n_invalid=1/1024, sources=('Y',), unit_indices=[0])
+groups dropped: 1 of 1024
+runs to investigate: (3,)
+S1: [0.32233477 0.43617576 0.00138994]
+```
+
+The exact Ishigami values are S1 = [0.314, 0.442, 0.0]. One dropped group out
+of 1024 leaves the estimate close to them.
 
 ## The InvalidReport
 

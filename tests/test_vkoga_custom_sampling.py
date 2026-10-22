@@ -177,7 +177,7 @@ def test_custom_gaussian_copula_matches_the_built_in_copula(budget) -> None:
     """A hand-written Gaussian-copula sampler agrees with the built-in copula.
 
     The two paths share the estimator but not the conditional algebra, so this
-    is a T1 cross-check of :class:`CustomDraws` against
+    is a T4 cross-check of :class:`CustomDraws` against
     :class:`GaussianDraws` on a correlated, non-additive model. The default
     tier compares one seed (worst gap 0.02 at this budget); the full budget
     compares the means within the seed-to-seed spread.

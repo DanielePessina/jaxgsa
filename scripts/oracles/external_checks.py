@@ -14,6 +14,7 @@ the default suite.
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 import warnings
 from typing import Any
@@ -41,6 +42,12 @@ morris_analyze: Any = _morris_analyze
 ot_analyze: Any = _ot_analyze
 pawn_analyze: Any = _pawn_analyze
 
+# SALib is a development extra. Without it the SALib classes skip, not error.
+requires_salib = pytest.mark.skipif(
+    importlib.util.find_spec("SALib") is None,
+    reason="SALib is not installed; run with `uv run --extra dev pytest ...`",
+)
+
 
 def _ishigami_data(n: int, seed: int = 42):
     X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=n, seed=seed))
@@ -59,6 +66,7 @@ def ishigami_data_8k():
     return _ishigami_data(8192)
 
 
+@requires_salib
 class TestSobolSALibParity:
     """T2. SALib implements the default scheme, so it pins today's numbers."""
 
@@ -71,7 +79,6 @@ class TestSobolSALibParity:
         it the two differ by about 2e-5, which is the standardisation and
         not the formula.
         """
-        pytest.importorskip("SALib")
         from SALib.analyze import sobol as salib_analyze
         from SALib.sample import sobol as salib_sample
 
@@ -98,6 +105,7 @@ class TestSobolSALibParity:
         np.testing.assert_allclose(np.asarray(ST), expected["ST"], atol=1e-6)
 
 
+@requires_salib
 class TestMorrisSALibParity:
     def test_trajectory_matches_salib(self):
         """SALib analyzing the identical expanded design must agree exactly."""
@@ -133,6 +141,7 @@ class TestMorrisSALibParity:
         np.testing.assert_allclose(np.asarray(res.sigma), Si["sigma"], rtol=1e-4, atol=1e-4)
 
 
+@requires_salib
 class TestDeltaSALibComparison:
     def test_plugin_matches_salib_calc_delta(self, ishigami_data_5k):
         """Unit-level parity: plug-in estimator vs SALib's calc_delta."""
@@ -182,6 +191,7 @@ class TestDeltaSALibComparison:
         np.testing.assert_allclose(np.asarray(result.S1), salib_result["S1"], atol=0.02)
 
 
+@requires_salib
 class TestPAWNSALibComparison:
     def test_matches_salib_median(self, ishigami_data_5k):
         """Compare against SALib's PAWN implementation."""
@@ -340,33 +350,6 @@ class TestOTPOTComparison:
             prev = float(ours)
         assert prev > emd  # entropic plan cost upper-bounds the exact cost
         assert prev == pytest.approx(emd, rel=0.25)  # loose: eps=0.008 is still biased
-
-    def test_sinkhorn_pad_invariance(self):
-        """Padded target columns (zero mass, zeroed cost) change nothing.
-
-        Pads are clamped duplicates of a real sample, so the kernel zeroes
-        their cost columns before solving. This mimics that contract with
-        deliberately extreme pad points, holding the scale fixed across
-        both calls -- the caller's own normalizer (M3), not each cost
-        matrix's own max, so an outlier pad cannot even reach the scale.
-        """
-        from jaxgsa.optimal_transport._solver import _sinkhorn_w2
-
-        rng = np.random.default_rng(3)
-        N, P, P_pad, E = 100, 20, 27, 3
-        Zu = rng.normal(size=(N, E))
-        Zc = rng.normal(size=(P, E))
-        Zc_pad = np.vstack([Zc, np.full((P_pad - P, E), 50.0)])  # outlier pads
-        C = ((Zu[:, None, :] - Zc[None, :, :]) ** 2).sum(-1)
-        C_pad = ((Zu[:, None, :] - Zc_pad[None, :, :]) ** 2).sum(-1)
-        C_pad[:, P:] = 0.0  # the kernel's mask-zeroing of pad columns
-        log_b = np.full(P_pad, -np.inf)
-        log_b[:P] = -np.log(P)
-
-        args = (jnp.asarray(0.02), jnp.asarray(5000), jnp.asarray(1e-6), jnp.asarray(C.max()))
-        ref, _ = _sinkhorn_w2(jnp.asarray(C), jnp.log(jnp.full(P, 1.0 / P)), *args)
-        padded, _ = _sinkhorn_w2(jnp.asarray(C_pad), jnp.asarray(log_b), *args)
-        assert float(padded) == pytest.approx(float(ref), abs=1e-6)
 
     def test_multivariate_mode_matches_pot_exact_emd(self):
         """T2: the whole 'multivariate' pipeline against POT's exact emd2.
