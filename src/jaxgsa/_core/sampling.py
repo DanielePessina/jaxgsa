@@ -460,7 +460,9 @@ def _validate_theta(problem: Problem, theta: Theta) -> None:
             )
 
 
-def beta_unit_quantiles(problem: Problem, samples_unit: np.ndarray) -> dict[int, np.ndarray]:
+def beta_unit_quantiles(
+    problem: Problem, samples_unit: Array | np.ndarray
+) -> dict[int, np.ndarray]:
     """Compute the standard-beta quantiles of every beta column, once, on the host.
 
     The beta inverse CDF has no JAX implementation. Its standard quantiles
@@ -470,12 +472,28 @@ def beta_unit_quantiles(problem: Problem, samples_unit: np.ndarray) -> dict[int,
 
     Args:
         problem: Problem whose beta parameters are read.
-        samples_unit: Concrete unit-cube samples, shape ``(N, D)``.
+        samples_unit: Unit-cube samples, shape ``(N, D)``. Must be concrete
+            when the problem has a beta parameter.
 
     Returns:
         ``betaincinv(a, b, u)`` in float64, keyed by column index, for each
         beta column. Empty when the problem has no beta parameter.
+
+    Raises:
+        ValueError: If the problem has a beta parameter and ``samples_unit``
+            is traced.
     """
+    beta = [
+        name
+        for name, spec in zip(problem.names, problem.input_specs)
+        if isinstance(spec, BetaSpec)
+    ]
+    if beta and isinstance(samples_unit, jax.core.Tracer):
+        raise ValueError(
+            f"Parameter {beta[0]!r} is beta-distributed; its inverse CDF is computed "
+            "on the host, so the unit design must be a concrete array, not a "
+            "traced one"
+        )
     quantiles: dict[int, np.ndarray] = {}
     for idx, spec in enumerate(problem.input_specs):
         if isinstance(spec, BetaSpec):
@@ -524,18 +542,7 @@ def _jax_transform_samples(
         _validate_theta(problem, theta)
 
     if unit_quantiles is None:
-        beta = [
-            name
-            for name, spec in zip(problem.names, problem.input_specs)
-            if isinstance(spec, BetaSpec)
-        ]
-        if beta and isinstance(samples_unit, jax.core.Tracer):
-            raise ValueError(
-                f"Parameter {beta[0]!r} is beta-distributed; its inverse CDF is computed "
-                "on the host, so the unit design must be a concrete array, not a "
-                "traced one"
-            )
-        unit_quantiles = beta_unit_quantiles(problem, np.asarray(samples_unit)) if beta else {}
+        unit_quantiles = beta_unit_quantiles(problem, samples_unit)
 
     samples_unit = jnp.asarray(samples_unit)
     columns = []

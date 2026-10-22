@@ -15,7 +15,7 @@
 - `dgsm` refuses all four new families with a `ValueError`. A lognormal input has no finite Poincare constant. A Weibull input has none when `shape < 1`, and jaxgsa does not compute one for any shape yet. Triangular and beta inputs have finite constants, but jaxgsa does not compute them yet.
 - `efast` refuses lognormal and Weibull inputs with a `ValueError`. A long tail makes S1 biased low, and more samples do not remove the bias. Against an exact S1 of 0.53, eFAST gave 0.36 for `LognormalSpec(0, 1)` and 0.45 for `WeibullSpec(0.8, 1)`.
 - `hdmr` refuses lognormal and Weibull inputs with a `ValueError`. So does `shapley` with `backend="hdmr"`, in `analyze` and `indices`. A long tail makes S1 biased low, and more samples do not remove the bias. On `Y = a + b` with `b` uniform, HDMR gave S1 = 0.79 at N = 2000 and 0.67 at N = 8000 for `LognormalSpec(0, 1)`, against an exact 0.98. Triangular and beta inputs are accepted: they are as accurate as a Gaussian input.
-- `hdmr.indices` now applies the same registry gates as `hdmr.analyze`.
+- `hdmr.indices` now applies the same input checks as `hdmr.analyze`.
 - Each refusal message gives the reason and lists the methods that accept the family.
 
 ## 1.2.1 (2026-10-22)

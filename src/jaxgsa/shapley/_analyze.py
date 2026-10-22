@@ -171,7 +171,12 @@ def _raise_refused_hdmr_backend_marginals(problem: "Problem", method: str) -> No
     """
     from jaxgsa.hdmr import _SPEC as _HDMR_SPEC
 
-    gates(_HDMR_SPEC, problem, method=f"{method} with backend='hdmr'", check=("marginal",))
+    try:
+        gates(_HDMR_SPEC, problem, method=f"{method} with backend='hdmr'", check=("marginal",))
+    except ValueError as exc:
+        # The alternatives list names jaxgsa.shapley itself, which accepts
+        # these families only through its PCE backend.
+        raise ValueError(f"{exc} For jaxgsa.shapley, pass backend='pce'.") from None
 
 
 def _indices_3d(

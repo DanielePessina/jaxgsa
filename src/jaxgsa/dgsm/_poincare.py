@@ -80,7 +80,10 @@ def _refuse_family(spec: InputSpec, method: str) -> None:
     if spec.dist in REFUSED_MARGINALS:
         raise ValueError(
             refused_marginal_message(
-                method, "cannot use this marginal", {spec.dist: ()}, REFUSED_MARGINALS
+                method,
+                "cannot compute a value for this marginal",
+                {spec.dist: ()},
+                REFUSED_MARGINALS,
             )
         )
 

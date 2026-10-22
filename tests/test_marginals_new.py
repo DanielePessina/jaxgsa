@@ -9,6 +9,7 @@ save/load round trips.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import warnings
 from typing import Any
@@ -438,6 +439,21 @@ def test_hdmr_refuses_heavy_tailed_families(name):
         accepting = message.split("instead:")[1]
         assert "jaxgsa.hdmr" not in accepting
         assert "jaxgsa.pce" in accepting
+        if "backend='hdmr'" in method:
+            assert message.endswith("For jaxgsa.shapley, pass backend='pce'.")
+
+
+def test_transform_of_a_traced_beta_design_gives_the_host_error():
+    """A traced design with a beta input names the host inverse CDF."""
+    samples = jaxgsa.sobol.sample(
+        _problem("beta"), base_n=16, calc_second_order=False, seed=0, verbose=False
+    )
+
+    def physical(unit: jax.Array) -> jax.Array:
+        return dataclasses.replace(samples, unit=unit).transform()
+
+    with pytest.raises(ValueError, match="concrete array, not a traced one"):
+        jax.jit(physical)(jnp.asarray(samples.unit))
 
 
 @pytest.mark.parametrize("name", ["lognormal", "weibull"])
