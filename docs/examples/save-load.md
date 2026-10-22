@@ -296,7 +296,7 @@ except Exception as exc:
 ```
 
 ```
-ValueError Y has 4096 rows but the design has 2048; evaluate the model once per row of design.samples
+ValueError Y has 4096 rows but the design has 2048; evaluate the model once per row of design.samples, in order
 ```
 
 A same-size mismatch does not. If you redraw with a different seed and get a

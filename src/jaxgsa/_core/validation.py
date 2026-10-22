@@ -168,7 +168,7 @@ def row_count_message(
         )
     return (
         f"Y has {n_rows} rows but the design has {n_expected}{detail}; "
-        f"evaluate the model once per row of {expected_from}"
+        f"evaluate the model once per row of {expected_from}, in order"
     )
 
 
