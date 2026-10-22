@@ -8,6 +8,7 @@ on:
       - "docs/**"
       - "web/**"
       - "README.md"
+      - "pyproject.toml"
   workflow_dispatch:
 
 permissions:

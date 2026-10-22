@@ -43,7 +43,7 @@ print("runs to investigate:", result.invalid.bad_row_indices)
 print("S1:", result.S1)
 ```
 
-Output (the drop also raises a `JaxgsaWarning` that names the dropped group):
+Output (the drop also emits a `JaxgsaWarning` that names the dropped group):
 
 ```text
 InvalidReport(policy='drop', unit='Saltelli group', n_invalid=1/1024, sources=('Y',), unit_indices=[0])
