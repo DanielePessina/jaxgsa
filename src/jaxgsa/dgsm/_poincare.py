@@ -32,8 +32,8 @@ from types import MappingProxyType
 import numpy as np
 from scipy.stats import truncnorm
 
+from jaxgsa._core.validation import refused_marginal_message
 from jaxgsa.problem import (
-    _CONTINUOUS_FAMILY_SPECS,
     CategoricalSpec,
     GaussianSpec,
     InputSpec,
@@ -63,12 +63,25 @@ REFUSED_MARGINALS: Mapping[str, str] = MappingProxyType(
 """The marginal families DGSM refuses, with the reason, for its registry record."""
 
 
-def _refuse_family(spec: InputSpec) -> None:
-    """Raise the DGSM refusal for a lognormal, Weibull, triangular or beta spec."""
-    if isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
+def _refuse_family(spec: InputSpec, method: str) -> None:
+    """Raise the DGSM refusal for a marginal family the DGSM record refuses.
+
+    The message is the one ``dgsm.analyze`` gives for a whole problem
+    (:func:`jaxgsa._core.validation.refused_marginal_message`), built from the
+    same reasons, so the two refusals read the same.
+
+    Args:
+        spec: Marginal spec of one parameter.
+        method: Fully qualified function name for the message.
+
+    Raises:
+        ValueError: If ``spec`` is lognormal, Weibull, triangular or beta.
+    """
+    if spec.dist in REFUSED_MARGINALS:
         raise ValueError(
-            f"jaxgsa.dgsm does not support {spec.dist} marginals "
-            f"({type(spec).__name__}). {REFUSED_MARGINALS[spec.dist]}"
+            refused_marginal_message(
+                method, "cannot use this marginal", {spec.dist: ()}, REFUSED_MARGINALS
+            )
         )
 
 
@@ -88,7 +101,7 @@ def poincare_constant(spec: InputSpec) -> float:
             constant, lognormal, Weibull, triangular or beta, which
             ``jaxgsa.dgsm`` does not support, or of an unknown type.
     """
-    _refuse_family(spec)
+    _refuse_family(spec, "jaxgsa.dgsm.poincare_constant")
     if isinstance(spec, UniformSpec):
         return (spec.high - spec.low) ** 2 / math.pi**2
     if isinstance(spec, GaussianSpec):
@@ -318,7 +331,7 @@ def marginal_variance(spec: InputSpec) -> float:
             variance meaningful to the bounds, or if the distribution type is
             unknown.
     """
-    _refuse_family(spec)
+    _refuse_family(spec, "jaxgsa.dgsm.marginal_variance")
     if isinstance(spec, UniformSpec):
         return (spec.high - spec.low) ** 2 / 12.0
     if isinstance(spec, GaussianSpec):

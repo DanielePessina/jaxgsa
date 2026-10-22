@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
-from collections.abc import Sequence
+from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, Literal, NotRequired, TypeAlias, TypedDict
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Literal,
+    NotRequired,
+    Self,
+    TypeAlias,
+    TypedDict,
+    cast,
+)
 
+import jax.core
+import jax.numpy as jnp
+import jax.scipy.special as jax_special
 import numpy as np
+from jax import Array
+from scipy import special
 
 if TYPE_CHECKING:
     import numpy.typing as npt
@@ -106,13 +123,14 @@ class BetaInputSpec(TypedDict):
 
     Pass to :meth:`Problem.from_dict` as
     ``{"dist": "beta", "a": 2.0, "b": 5.0, "low": 0.0, "high": 1.0}``.
+    ``low`` and ``high`` default to 0 and 1, as in :class:`BetaSpec`.
     """
 
     dist: Literal["beta"]
     a: float
     b: float
-    low: float
-    high: float
+    low: NotRequired[float]
+    high: NotRequired[float]
 
 
 # Hashable canonical storage for a validated latent correlation matrix.
@@ -123,15 +141,12 @@ _PROB_SUM_TOL = 1e-3
 
 # Accepted keys of a dict input spec, per declared ``"dist"``. Anything else
 # in the dict is a typo or a distribution mix-up, and silently ignoring it
-# would drop a parameter the user believes they declared.
+# would drop a parameter the user believes they declared. The continuous
+# families add their own keys, from their ``fields``, below their classes.
 _INPUT_SPEC_KEYS: dict[str, frozenset[str]] = {
     "uniform": frozenset({"dist", "low", "high"}),
     "gaussian": frozenset({"dist", "mean", "variance", "low", "high"}),
     "categorical": frozenset({"dist", "probs", "labels"}),
-    "lognormal": frozenset({"dist", "mu", "sigma"}),
-    "weibull": frozenset({"dist", "shape", "scale"}),
-    "triangular": frozenset({"dist", "low", "mode", "high"}),
-    "beta": frozenset({"dist", "a", "b", "low", "high"}),
 }
 
 # A correlation entry that touches a categorical parameter counts as a real
@@ -159,6 +174,8 @@ class UniformSpec:
 
     #: Distribution tag, matching the ``"dist"`` key of the dict input form.
     dist: ClassVar[Literal["uniform"]] = "uniform"
+    #: Family name as error messages print it.
+    display_name: ClassVar[str] = "uniform"
 
     def __post_init__(self) -> None:
         """Coerce the bounds to Python floats and check their order.
@@ -178,6 +195,10 @@ class UniformSpec:
         # `not <` instead of `>=` to also catch NaN (NaN comparisons are always False).
         if not self.low < self.high:
             raise ValueError(f"Uniform input requires low < high, got {(self.low, self.high)!r}")
+
+    def support(self) -> tuple[float, float]:
+        """Return the support ``(low, high)``."""
+        return (self.low, self.high)
 
 
 @dataclass(frozen=True)
@@ -215,6 +236,8 @@ class GaussianSpec:
 
     #: Distribution tag, matching the ``"dist"`` key of the dict input form.
     dist: ClassVar[Literal["gaussian"]] = "gaussian"
+    #: Family name as error messages print it.
+    display_name: ClassVar[str] = "Gaussian"
 
     def __post_init__(self) -> None:
         """Coerce the parameters to Python floats and validate them.
@@ -247,6 +270,13 @@ class GaussianSpec:
                 f"Truncated Gaussian input requires low < high, got {(self.low, self.high)!r}"
             )
 
+    def support(self) -> tuple[float, float]:
+        """Return the support, with ``-inf`` or ``inf`` on an open side."""
+        return (
+            -math.inf if self.low is None else self.low,
+            math.inf if self.high is None else self.high,
+        )
+
 
 @dataclass(frozen=True)
 class CategoricalSpec:
@@ -275,6 +305,8 @@ class CategoricalSpec:
 
     #: Distribution tag, matching the ``"dist"`` key of the dict input form.
     dist: ClassVar[Literal["categorical"]] = "categorical"
+    #: Family name as error messages print it.
+    display_name: ClassVar[str] = "categorical"
 
     def __post_init__(self) -> None:
         """Normalize the probabilities and labels into validated tuples.
@@ -315,6 +347,10 @@ class CategoricalSpec:
             raise ValueError(f"Categorical labels must be unique, got {label_values!r}")
         object.__setattr__(self, "labels", label_values)
 
+    def support(self) -> tuple[float, float]:
+        """Return the range of the level codes, ``(0, L - 1)``."""
+        return (0.0, float(len(self.probs) - 1))
+
 
 def _finite_float(value: float, family: str, field_name: str) -> float:
     """Coerce a spec parameter to a finite Python float.
@@ -341,6 +377,14 @@ def _finite_float(value: float, family: str, field_name: str) -> float:
 def _positive_float(value: float, family: str, field_name: str) -> float:
     """Coerce a spec parameter to a finite, strictly positive Python float.
 
+    Args:
+        value: The parameter as given.
+        family: Family name for the message, such as ``"Weibull"``.
+        field_name: Parameter name for the message.
+
+    Returns:
+        ``value`` as a Python float.
+
     Raises:
         ValueError: If the value is not finite or not above 0.
     """
@@ -350,8 +394,172 @@ def _positive_float(value: float, family: str, field_name: str) -> float:
     return result
 
 
+def _triangular_c(low: Any, mode: Any, high: Any) -> Any:
+    """Return the relative mode position ``(mode - low) / (high - low)``."""
+    return (mode - low) / (high - low)
+
+
+def _triangular_cdf_unit(xp: Any, z: Any, c: Any) -> Any:
+    """Triangular CDF on the unit support, for ``z`` already in ``[0, 1]``.
+
+    The degenerate modes ``c = 0`` and ``c = 1`` are allowed, so neither
+    branch divides by its own width unguarded; the untaken branch reads a
+    width of 1 (double-where), which also keeps its gradient finite.
+
+    Args:
+        xp: Array namespace, ``numpy`` or ``jax.numpy``.
+        z: Values on the unit support.
+        c: Relative mode position in ``[0, 1]``.
+
+    Returns:
+        CDF values in ``[0, 1]``.
+    """
+    left_ok = c > 0
+    right_ok = c < 1
+    c_left = xp.where(left_ok, c, 1.0)
+    c_right = xp.where(right_ok, 1.0 - c, 1.0)
+    left = z * z / c_left
+    right = 1.0 - (1.0 - z) * (1.0 - z) / c_right
+    return xp.where(z < c, left, right)
+
+
+def _bounded_jax_cdf(z: Array, unit_cdf: Array) -> Array:
+    """Keep an out-of-support signal for a family on ``[low, high]``.
+
+    Args:
+        z: Values rescaled onto the unit support, ``(x - low) / (high - low)``.
+        unit_cdf: The CDF evaluated at ``z`` clipped into ``[0, 1]``.
+
+    Returns:
+        ``unit_cdf`` where ``z`` is inside ``[0, 1]``, and ``z`` itself (which
+        lies outside ``[0, 1]``) everywhere else.
+    """
+    inside = (z >= 0) & (z <= 1)
+    return jnp.where(inside, unit_cdf, z)
+
+
+class _ContinuousFamily(ABC):
+    """Behaviour the lognormal, Weibull, triangular and beta specs share.
+
+    Each family owns its own maths, so callers dispatch on the spec and never
+    on its type:
+
+    * :meth:`ppf` and :meth:`cdf`: the host inverse CDF and CDF in float64
+      NumPy/SciPy. They build every stored design and invert it.
+    * :meth:`jax_cdf`: a JAX CDF with broadcastable per-column parameters. The
+      given-data methods and PCE use it to map inputs onto ``[0, 1]``.
+    * :meth:`jax_ppf`: a JAX inverse CDF, differentiable in the distribution
+      parameters. :meth:`jaxgsa.sobol.SobolSamples.transform` uses it.
+
+    Callers clip the unit coordinate before an inverse CDF, as they do for the
+    Gaussian family. The SciPy parameter mapping is in each class docstring.
+    """
+
+    #: Distribution tag, matching the ``"dist"`` key of the dict input form.
+    dist: ClassVar[str]
+    #: Family name as error messages print it, such as ``"Weibull"``.
+    display_name: ClassVar[str]
+    #: Parameter names, in dict-form order and the order :meth:`jax_cdf` takes.
+    fields: ClassVar[tuple[str, ...]]
+    #: The fields :meth:`jax_ppf` can differentiate, and so ``theta`` may set.
+    theta_fields: ClassVar[frozenset[str]]
+
+    def params(self) -> tuple[float, ...]:
+        """Return the parameters in :attr:`fields` order, as Python floats."""
+        return tuple(float(getattr(self, name)) for name in self.fields)
+
+    @classmethod
+    def from_dict(cls, spec: Mapping[str, Any]) -> Self:
+        """Build the spec from its dict form.
+
+        Args:
+            spec: The dict form, with a ``"dist"`` key and the family's
+                fields. A field with a default may be left out.
+
+        Returns:
+            The validated spec.
+
+        Raises:
+            KeyError: Naming the first required field that ``spec`` lacks.
+            ValueError: If a parameter fails the family's own validation.
+        """
+        required = [
+            f.name
+            for f in dataclasses.fields(cast(Any, cls))
+            if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
+        ]
+        for name in required:
+            if name not in spec:
+                raise KeyError(name)
+        return cls(**{name: spec[name] for name in cls.fields if name in spec})
+
+    @abstractmethod
+    def support(self) -> tuple[float, float]:
+        """Return the support ``(low, high)``, with ``math.inf`` for an open side."""
+
+    @abstractmethod
+    def ppf(self, u: np.ndarray) -> np.ndarray:
+        """Map clipped unit-interval values through the inverse CDF, in float64.
+
+        Args:
+            u: Unit-interval values, already clipped off 0 and 1.
+
+        Returns:
+            Physical values, same shape as ``u``, dtype float64.
+        """
+
+    @abstractmethod
+    def cdf(self, x: np.ndarray) -> np.ndarray:
+        """Map physical values through the CDF, in float64.
+
+        Values outside the support map to 0 or 1.
+
+        Args:
+            x: Physical values.
+
+        Returns:
+            CDF values in ``[0, 1]``, same shape as ``x``, dtype float64.
+        """
+
+    @staticmethod
+    @abstractmethod
+    def jax_cdf(x: Array, params: tuple[Any, ...]) -> Array:
+        """Map physical values through the CDF on device, keeping an out-of-support signal.
+
+        A value inside the support maps into ``[0, 1]``. A value outside it
+        maps outside ``[0, 1]``, as a uniform column does, so callers such as
+        PAWN can drop it instead of folding it into an edge bin. The caller
+        clips the in-range values off 0 and 1.
+
+        Args:
+            x: Physical values, any shape.
+            params: Parameters in :attr:`fields` order, each a scalar or an
+                array that broadcasts against ``x`` (one value per column).
+
+        Returns:
+            Array of the same shape as ``x``.
+        """
+
+    @abstractmethod
+    def jax_ppf(
+        self, u: Array, fields: Mapping[str, Any], unit_quantiles: np.ndarray | None = None
+    ) -> Array:
+        """Map clipped unit-interval values through the inverse CDF, differentiably.
+
+        Args:
+            u: Unit-interval values, already clipped off 0 and 1.
+            fields: Parameter overrides by field name. Values may be tracers.
+                A field it does not name keeps the spec's own value.
+            unit_quantiles: Host-computed standard quantiles of ``u``. Only
+                :class:`BetaSpec` reads them; see :meth:`BetaSpec.jax_ppf`.
+
+        Returns:
+            Physical values, same shape as ``u``.
+        """
+
+
 @dataclass(frozen=True)
-class LognormalSpec:
+class LognormalSpec(_ContinuousFamily):
     """Lognormal marginal distribution: ``log(X) ~ N(mu, sigma**2)``.
 
     This is SciPy's ``lognorm(s=sigma, scale=exp(mu))``. The support is
@@ -370,6 +578,10 @@ class LognormalSpec:
 
     #: Distribution tag, matching the ``"dist"`` key of the dict input form.
     dist: ClassVar[Literal["lognormal"]] = "lognormal"
+    #: Family name as error messages print it.
+    display_name: ClassVar[str] = "lognormal"
+    fields: ClassVar[tuple[str, ...]] = ("mu", "sigma")
+    theta_fields: ClassVar[frozenset[str]] = frozenset(fields)
 
     def __post_init__(self) -> None:
         """Coerce the parameters to Python floats and validate them.
@@ -385,9 +597,43 @@ class LognormalSpec:
         """Return the support ``[0, inf)``."""
         return (0.0, math.inf)
 
+    def to_dict(self) -> LognormalInputSpec:
+        """Return the JSON-friendly dict form."""
+        return LognormalInputSpec(dist="lognormal", mu=self.mu, sigma=self.sigma)
+
+    def ppf(self, u: np.ndarray) -> np.ndarray:
+        """Inverse CDF in float64. See :meth:`_ContinuousFamily.ppf`."""
+        u = np.asarray(u, dtype=np.float64)
+        return np.exp(self.mu + self.sigma * special.ndtri(u))
+
+    def cdf(self, x: np.ndarray) -> np.ndarray:
+        """CDF in float64. See :meth:`_ContinuousFamily.cdf`."""
+        x = np.asarray(x, dtype=np.float64)
+        positive = x > 0
+        safe = np.where(positive, x, 1.0)
+        return np.where(positive, special.ndtr((np.log(safe) - self.mu) / self.sigma), 0.0)
+
+    @staticmethod
+    def jax_cdf(x: Array, params: tuple[Any, ...]) -> Array:
+        """JAX CDF. See :meth:`_ContinuousFamily.jax_cdf`."""
+        mu, sigma = params
+        positive = x > 0
+        safe = jnp.where(positive, x, 1.0)
+        u = jax_special.ndtr((jnp.log(safe) - mu) / sigma)
+        # x == 0 is the closed end of the support (CDF 0); x < 0 is outside.
+        return jnp.where(positive, u, jnp.where(x == 0, 0.0, x))
+
+    def jax_ppf(
+        self, u: Array, fields: Mapping[str, Any], unit_quantiles: np.ndarray | None = None
+    ) -> Array:
+        """Closed-form inverse CDF, differentiable in ``mu`` and ``sigma``."""
+        mu = fields.get("mu", self.mu)
+        sigma = fields.get("sigma", self.sigma)
+        return jnp.exp(mu + sigma * jax_special.ndtri(u))
+
 
 @dataclass(frozen=True)
-class WeibullSpec:
+class WeibullSpec(_ContinuousFamily):
     """Weibull marginal distribution with CDF ``1 - exp(-(x / scale)**shape)``.
 
     This is SciPy's ``weibull_min(c=shape, scale=scale)``. The support is
@@ -403,6 +649,10 @@ class WeibullSpec:
 
     #: Distribution tag, matching the ``"dist"`` key of the dict input form.
     dist: ClassVar[Literal["weibull"]] = "weibull"
+    #: Family name as error messages print it.
+    display_name: ClassVar[str] = "Weibull"
+    fields: ClassVar[tuple[str, ...]] = ("shape", "scale")
+    theta_fields: ClassVar[frozenset[str]] = frozenset(fields)
 
     def __post_init__(self) -> None:
         """Coerce the parameters to Python floats and validate them.
@@ -417,9 +667,42 @@ class WeibullSpec:
         """Return the support ``[0, inf)``."""
         return (0.0, math.inf)
 
+    def to_dict(self) -> WeibullInputSpec:
+        """Return the JSON-friendly dict form."""
+        return WeibullInputSpec(dist="weibull", shape=self.shape, scale=self.scale)
+
+    def ppf(self, u: np.ndarray) -> np.ndarray:
+        """Inverse CDF in float64. See :meth:`_ContinuousFamily.ppf`."""
+        u = np.asarray(u, dtype=np.float64)
+        # log1p, not log(1 - u): near u = 0 the plain form loses every digit.
+        return self.scale * (-np.log1p(-u)) ** (1.0 / self.shape)
+
+    def cdf(self, x: np.ndarray) -> np.ndarray:
+        """CDF in float64. See :meth:`_ContinuousFamily.cdf`."""
+        x = np.asarray(x, dtype=np.float64)
+        t = np.maximum(x, 0.0) / self.scale
+        return -np.expm1(-(t**self.shape))
+
+    @staticmethod
+    def jax_cdf(x: Array, params: tuple[Any, ...]) -> Array:
+        """JAX CDF. See :meth:`_ContinuousFamily.jax_cdf`."""
+        shape, scale = params
+        inside = x >= 0
+        t = jnp.where(inside, x, 0.0) / scale
+        u = -jnp.expm1(-(t**shape))
+        return jnp.where(inside, u, x)
+
+    def jax_ppf(
+        self, u: Array, fields: Mapping[str, Any], unit_quantiles: np.ndarray | None = None
+    ) -> Array:
+        """Closed-form inverse CDF, differentiable in ``shape`` and ``scale``."""
+        shape = fields.get("shape", self.shape)
+        scale = fields.get("scale", self.scale)
+        return scale * (-jnp.log1p(-u)) ** (1.0 / shape)
+
 
 @dataclass(frozen=True)
-class TriangularSpec:
+class TriangularSpec(_ContinuousFamily):
     """Triangular marginal distribution on ``[low, high]`` with peak at ``mode``.
 
     This is SciPy's ``triang(c=(mode - low) / (high - low), loc=low,
@@ -438,6 +721,10 @@ class TriangularSpec:
 
     #: Distribution tag, matching the ``"dist"`` key of the dict input form.
     dist: ClassVar[Literal["triangular"]] = "triangular"
+    #: Family name as error messages print it.
+    display_name: ClassVar[str] = "triangular"
+    fields: ClassVar[tuple[str, ...]] = ("low", "mode", "high")
+    theta_fields: ClassVar[frozenset[str]] = frozenset(fields)
 
     def __post_init__(self) -> None:
         """Coerce the parameters to Python floats and validate them.
@@ -464,9 +751,56 @@ class TriangularSpec:
         """Return the support ``(low, high)``."""
         return (self.low, self.high)
 
+    def to_dict(self) -> TriangularInputSpec:
+        """Return the JSON-friendly dict form."""
+        return TriangularInputSpec(dist="triangular", low=self.low, mode=self.mode, high=self.high)
+
+    def ppf(self, u: np.ndarray) -> np.ndarray:
+        """Inverse CDF in float64. See :meth:`_ContinuousFamily.ppf`."""
+        u = np.asarray(u, dtype=np.float64)
+        width = self.high - self.low
+        c = _triangular_c(self.low, self.mode, self.high)
+        left = self.low + np.sqrt(u * width * (self.mode - self.low))
+        right = self.high - np.sqrt((1.0 - u) * width * (self.high - self.mode))
+        return np.where(u < c, left, right)
+
+    def cdf(self, x: np.ndarray) -> np.ndarray:
+        """CDF in float64. See :meth:`_ContinuousFamily.cdf`."""
+        x = np.asarray(x, dtype=np.float64)
+        z = np.clip((x - self.low) / (self.high - self.low), 0.0, 1.0)
+        c = _triangular_c(self.low, self.mode, self.high)
+        return np.asarray(_triangular_cdf_unit(np, z, c))
+
+    @staticmethod
+    def jax_cdf(x: Array, params: tuple[Any, ...]) -> Array:
+        """JAX CDF. See :meth:`_ContinuousFamily.jax_cdf`."""
+        low, mode, high = params
+        z = (x - low) / (high - low)
+        zc = jnp.clip(z, 0.0, 1.0)
+        return _bounded_jax_cdf(z, _triangular_cdf_unit(jnp, zc, _triangular_c(low, mode, high)))
+
+    def jax_ppf(
+        self, u: Array, fields: Mapping[str, Any], unit_quantiles: np.ndarray | None = None
+    ) -> Array:
+        """Closed-form inverse CDF, differentiable in ``low``, ``mode`` and ``high``."""
+        low = fields.get("low", self.low)
+        mode = fields.get("mode", self.mode)
+        high = fields.get("high", self.high)
+        width = high - low
+        c = _triangular_c(low, mode, high)
+        # Double-where: both branches run everywhere, and the sqrt of a
+        # non-positive argument in the untaken branch would poison the
+        # gradient with 0 * inf. Clamp each argument before the sqrt.
+        tiny = jnp.finfo(u.dtype).tiny
+        left_arg = jnp.maximum(u * width * (mode - low), tiny)
+        right_arg = jnp.maximum((1.0 - u) * width * (high - mode), tiny)
+        left = low + jnp.sqrt(left_arg)
+        right = high - jnp.sqrt(right_arg)
+        return jnp.where(u < c, left, right)
+
 
 @dataclass(frozen=True)
-class BetaSpec:
+class BetaSpec(_ContinuousFamily):
     """Beta marginal distribution, rescaled to ``[low, high]``.
 
     This is SciPy's ``beta(a, b, loc=low, scale=high - low)``. The defaults
@@ -486,6 +820,14 @@ class BetaSpec:
 
     #: Distribution tag, matching the ``"dist"`` key of the dict input form.
     dist: ClassVar[Literal["beta"]] = "beta"
+    #: Family name as error messages print it.
+    display_name: ClassVar[str] = "beta"
+    fields: ClassVar[tuple[str, ...]] = ("a", "b", "low", "high")
+    # The shape parameters a and b are fixed: JAX has no betaincinv, and
+    # jax.scipy.special.betainc has no gradient in a or b. The inverse CDF is
+    # therefore computed on the host and only the affine map onto
+    # [low, high] is traced.
+    theta_fields: ClassVar[frozenset[str]] = frozenset({"low", "high"})
 
     def __post_init__(self) -> None:
         """Coerce the parameters to Python floats and validate them.
@@ -505,6 +847,66 @@ class BetaSpec:
         """Return the support ``(low, high)``."""
         return (self.low, self.high)
 
+    def to_dict(self) -> BetaInputSpec:
+        """Return the JSON-friendly dict form."""
+        return BetaInputSpec(dist="beta", a=self.a, b=self.b, low=self.low, high=self.high)
+
+    def unit_quantiles(self, u: np.ndarray) -> np.ndarray:
+        """Return the standard-beta quantiles ``betaincinv(a, b, u)`` in float64.
+
+        Args:
+            u: Unit-interval values, already clipped off 0 and 1.
+
+        Returns:
+            Quantiles on ``[0, 1]``, same shape as ``u``.
+        """
+        return special.betaincinv(self.a, self.b, np.asarray(u, dtype=np.float64))
+
+    def ppf(self, u: np.ndarray) -> np.ndarray:
+        """Inverse CDF in float64. See :meth:`_ContinuousFamily.ppf`."""
+        return self.low + (self.high - self.low) * self.unit_quantiles(u)
+
+    def cdf(self, x: np.ndarray) -> np.ndarray:
+        """CDF in float64. See :meth:`_ContinuousFamily.cdf`."""
+        x = np.asarray(x, dtype=np.float64)
+        z = np.clip((x - self.low) / (self.high - self.low), 0.0, 1.0)
+        return special.betainc(self.a, self.b, z)
+
+    @staticmethod
+    def jax_cdf(x: Array, params: tuple[Any, ...]) -> Array:
+        """JAX CDF. See :meth:`_ContinuousFamily.jax_cdf`."""
+        a, b, low, high = params
+        z = (x - low) / (high - low)
+        zc = jnp.clip(z, 0.0, 1.0)
+        u = jax_special.betainc(jnp.asarray(a, zc.dtype), jnp.asarray(b, zc.dtype), zc)
+        return _bounded_jax_cdf(z, u)
+
+    def jax_ppf(
+        self, u: Array, fields: Mapping[str, Any], unit_quantiles: np.ndarray | None = None
+    ) -> Array:
+        """Inverse CDF, differentiable in ``low`` and ``high`` only.
+
+        The beta inverse CDF has no JAX implementation, so the standard
+        quantiles ``z = betaincinv(a, b, u)`` come from the host. The result
+        ``low + (high - low) * z`` is then differentiable in ``low`` and
+        ``high``. Pass ``unit_quantiles`` (from :meth:`unit_quantiles`) to
+        reuse quantiles computed once per design. Without it they are computed
+        here, which needs a concrete ``u``.
+
+        Raises:
+            ValueError: If ``unit_quantiles`` is missing and ``u`` is traced.
+        """
+        if unit_quantiles is None:
+            if isinstance(u, jax.core.Tracer):
+                raise ValueError(
+                    "a beta inverse CDF needs its standard quantiles computed on the "
+                    "host, so the unit values must be a concrete array, not a traced one"
+                )
+            unit_quantiles = self.unit_quantiles(np.asarray(u))
+        low = fields.get("low", self.low)
+        high = fields.get("high", self.high)
+        return low + (high - low) * jnp.asarray(unit_quantiles, dtype=u.dtype)
+
 
 # Canonical stored form of one parameter's marginal. This is what
 # `Problem.input_specs` returns, and what every internal consumer reads.
@@ -518,10 +920,20 @@ InputSpec: TypeAlias = (
     | BetaSpec
 )
 
-# The four continuous families added in 1.3. They share one code path in the
-# samplers and transforms (``jaxgsa._core.marginals``).
+# The four continuous families added in 1.3. Each owns its maths (see
+# ``_ContinuousFamily``), so the samplers and transforms share one branch for
+# all four.
 ContinuousFamilySpec: TypeAlias = LognormalSpec | WeibullSpec | TriangularSpec | BetaSpec
 _CONTINUOUS_FAMILY_SPECS = (LognormalSpec, WeibullSpec, TriangularSpec, BetaSpec)
+_INPUT_SPEC_KEYS.update(
+    {cls.dist: frozenset({"dist", *cls.fields}) for cls in _CONTINUOUS_FAMILY_SPECS}
+)
+
+# Spec class of each continuous family, by its ``dist`` tag. The one source of
+# the family's display name and class name in error messages.
+_FAMILY_BY_DIST: dict[str, type[ContinuousFamilySpec]] = {
+    cls.dist: cls for cls in _CONTINUOUS_FAMILY_SPECS
+}
 
 # Public-facing input union -- users pass one of these per parameter.
 InputSpecValue: TypeAlias = (
@@ -599,14 +1011,9 @@ def _normalize_input_spec(spec: InputSpecValue) -> InputSpec:
                 tuple(spec["probs"]),
                 labels=() if labels is None else tuple(str(label) for label in labels),
             )
-        if spec["dist"] == "lognormal":
-            return LognormalSpec(spec["mu"], spec["sigma"])
-        if spec["dist"] == "weibull":
-            return WeibullSpec(spec["shape"], spec["scale"])
-        if spec["dist"] == "triangular":
-            return TriangularSpec(spec["low"], spec["mode"], spec["high"])
-        if spec["dist"] == "beta":
-            return BetaSpec(spec["a"], spec["b"], spec["low"], spec["high"])
+        family = _FAMILY_BY_DIST.get(spec["dist"])
+        if family is not None:
+            return family.from_dict(spec)
     except KeyError as exc:
         raise ValueError(
             f"{spec['dist']!r} input spec dict {spec!r} is missing {exc.args[0]!r}"
@@ -754,23 +1161,16 @@ def _normalized_input_to_dict(
     | BetaInputSpec
 ):
     """Convert a canonical input spec into a JSON-friendly mapping."""
-    if isinstance(spec, LognormalSpec):
-        return LognormalInputSpec(dist="lognormal", mu=spec.mu, sigma=spec.sigma)
-    if isinstance(spec, WeibullSpec):
-        return WeibullInputSpec(dist="weibull", shape=spec.shape, scale=spec.scale)
-    if isinstance(spec, TriangularSpec):
-        return TriangularInputSpec(dist="triangular", low=spec.low, mode=spec.mode, high=spec.high)
-    if isinstance(spec, BetaSpec):
-        return BetaInputSpec(dist="beta", a=spec.a, b=spec.b, low=spec.low, high=spec.high)
+    if isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
+        return spec.to_dict()
     if isinstance(spec, UniformSpec):
         return UniformInputSpec(dist="uniform", low=spec.low, high=spec.high)
     if isinstance(spec, CategoricalSpec):
         label_list: list[str | int | float] = list(spec.labels)
         return CategoricalInputSpec(dist="categorical", probs=list(spec.probs), labels=label_list)
 
-    if not isinstance(spec, GaussianSpec):
-        raise TypeError(f"unsupported marginal {type(spec).__name__}")
-    # Reconstruct the TypedDict for JSON serialization (used by SobolSamples.save).
+    # Only GaussianSpec is left. Reconstruct the TypedDict for JSON
+    # serialization (used by SobolSamples.save).
     payload: GaussianInputSpec = GaussianInputSpec(
         dist="gaussian",
         mean=spec.mean,

@@ -23,7 +23,6 @@ from jax import Array
 from jax.scipy.special import ndtr, ndtri
 from scipy.stats import norm, truncnorm
 
-from jaxgsa._core import marginals
 from jaxgsa._core.precision import unit_clip_bounds
 from jaxgsa.problem import (
     _CONTINUOUS_FAMILY_SPECS,
@@ -265,9 +264,7 @@ def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray
             # CDFs are infinite at u = 1, and it is harmless for the bounded
             # triangular and beta families.
             clipped = np.clip(samples_unit[:, idx], UNIT_CLIP, 1.0 - UNIT_CLIP)
-            transformed[:, idx] = marginals.host_ppf(spec, clipped)
-        else:
-            raise TypeError(f"unsupported marginal {type(spec).__name__}")
+            transformed[:, idx] = spec.ppf(clipped)
 
     return transformed
 
@@ -297,14 +294,9 @@ def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray
 _THETA_FIELDS: dict[str, frozenset[str]] = {
     "uniform": frozenset({"low", "high"}),
     "gaussian": frozenset({"mean", "variance", "low", "high"}),
-    "lognormal": frozenset({"mu", "sigma"}),
-    "weibull": frozenset({"shape", "scale"}),
-    "triangular": frozenset({"low", "mode", "high"}),
-    # The beta shape parameters a and b are fixed: JAX has no betaincinv,
-    # and jax.scipy.special.betainc has no gradient in a or b. The inverse
-    # CDF is therefore computed on the host and only the affine map onto
-    # [low, high] is traced. See _validate_theta for the refusal.
-    "beta": frozenset({"low", "high"}),
+    # Each continuous family declares its own. The beta shape parameters a
+    # and b are not among them; see _validate_theta for the refusal.
+    **{cls.dist: cls.theta_fields for cls in _CONTINUOUS_FAMILY_SPECS},
 }
 
 
@@ -468,8 +460,37 @@ def _validate_theta(problem: Problem, theta: Theta) -> None:
             )
 
 
+def beta_unit_quantiles(problem: Problem, samples_unit: np.ndarray) -> dict[int, np.ndarray]:
+    """Compute the standard-beta quantiles of every beta column, once, on the host.
+
+    The beta inverse CDF has no JAX implementation. Its standard quantiles
+    depend only on the unit design and the fixed shape parameters, so a
+    design computes them once and passes them to every
+    :func:`_jax_transform_samples` call.
+
+    Args:
+        problem: Problem whose beta parameters are read.
+        samples_unit: Concrete unit-cube samples, shape ``(N, D)``.
+
+    Returns:
+        ``betaincinv(a, b, u)`` in float64, keyed by column index, for each
+        beta column. Empty when the problem has no beta parameter.
+    """
+    quantiles: dict[int, np.ndarray] = {}
+    for idx, spec in enumerate(problem.input_specs):
+        if isinstance(spec, BetaSpec):
+            unit_column = np.clip(
+                np.asarray(samples_unit[:, idx], dtype=np.float64), UNIT_CLIP, 1.0 - UNIT_CLIP
+            )
+            quantiles[idx] = spec.unit_quantiles(unit_column)
+    return quantiles
+
+
 def _jax_transform_samples(
-    problem: Problem, samples_unit: Array | np.ndarray, theta: Theta | None = None
+    problem: Problem,
+    samples_unit: Array | np.ndarray,
+    theta: Theta | None = None,
+    unit_quantiles: Mapping[int, np.ndarray] | None = None,
 ) -> Array:
     """Transform unit-cube samples into declared marginals, differentiably.
 
@@ -483,36 +504,38 @@ def _jax_transform_samples(
         samples_unit: Unit-cube samples, shape ``(N, D)``.
         theta: Optional overrides keyed by parameter name, then field name.
             ``None`` means "use the problem's own values throughout".
+        unit_quantiles: The beta columns' standard quantiles, from
+            :func:`beta_unit_quantiles` on the same ``samples_unit``. A design
+            computes them once and passes them on every call. ``None``
+            computes them here, which needs a concrete ``samples_unit``.
 
     Returns:
         Samples in physical units, shape ``(N, D)``.
 
     Raises:
-        ValueError: If any parameter is categorical, or if ``theta`` names an
-            unknown parameter or field.
+        ValueError: If any parameter is categorical, if ``theta`` names an
+            unknown parameter or field, or if the problem has a beta
+            parameter, ``unit_quantiles`` is ``None`` and ``samples_unit`` is
+            traced.
     """
     if theta is None:
         theta = {}
     else:
         _validate_theta(problem, theta)
 
-    # The beta inverse CDF has no JAX implementation. Its standard quantiles
-    # depend only on the unit design and the fixed shape parameters, so they
-    # are computed once on the host, in float64, before anything is traced.
-    beta_z: dict[int, np.ndarray] = {}
-    for idx, (name, spec) in enumerate(zip(problem.names, problem.input_specs)):
-        if not isinstance(spec, BetaSpec):
-            continue
-        if isinstance(samples_unit, jax.core.Tracer):
+    if unit_quantiles is None:
+        beta = [
+            name
+            for name, spec in zip(problem.names, problem.input_specs)
+            if isinstance(spec, BetaSpec)
+        ]
+        if beta and isinstance(samples_unit, jax.core.Tracer):
             raise ValueError(
-                f"Parameter {name!r} is beta-distributed; its inverse CDF is computed "
+                f"Parameter {beta[0]!r} is beta-distributed; its inverse CDF is computed "
                 "on the host, so the unit design must be a concrete array, not a "
                 "traced one"
             )
-        unit_column = np.clip(
-            np.asarray(samples_unit[:, idx], dtype=np.float64), UNIT_CLIP, 1.0 - UNIT_CLIP
-        )
-        beta_z[idx] = marginals.beta_unit_quantiles(spec, unit_column)
+        unit_quantiles = beta_unit_quantiles(problem, np.asarray(samples_unit)) if beta else {}
 
     samples_unit = jnp.asarray(samples_unit)
     columns = []
@@ -546,15 +569,12 @@ def _jax_transform_samples(
             # Weibull inverse CDFs are infinite at u = 1.
             clip_lo, clip_hi = unit_clip_bounds(UNIT_CLIP, unit_column.dtype)
             columns.append(
-                marginals.jax_ppf(
-                    spec,
+                spec.jax_ppf(
                     jnp.clip(unit_column, clip_lo, clip_hi),
-                    dict(fields),
-                    beta_z=beta_z.get(idx),
+                    fields,
+                    unit_quantiles=unit_quantiles.get(idx),
                 )
             )
-        else:
-            raise TypeError(f"unsupported marginal {type(spec).__name__}")
 
     return jnp.stack(columns, axis=1)
 
@@ -628,9 +648,7 @@ def _inverse_transform_samples(problem: Problem, samples_physical: np.ndarray) -
                 high=spec.high,
             )
         elif isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
-            unit[:, idx] = marginals.host_cdf(spec, samples_physical[:, idx])
-        else:
-            raise TypeError(f"unsupported marginal {type(spec).__name__}")
+            unit[:, idx] = spec.cdf(samples_physical[:, idx])
 
     return unit
 

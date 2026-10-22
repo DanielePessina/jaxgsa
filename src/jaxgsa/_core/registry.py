@@ -70,7 +70,9 @@ class MethodSpec:
             because the answer differs per family: ``efast`` accepts the
             bounded triangular and beta families but refuses the open-tailed
             lognormal and Weibull ones. Uniform and Gaussian marginals are
-            not listed: every method accepts them.
+            not listed: every method accepts them. The field is left out of
+            the hash (a mapping is not hashable), so a spec stays usable as a
+            dict key or set member.
         invalid_unit: The block of data the method treats as indivisible when
             dropping non-finite values, or ``None`` when the method delegates
             to a backend and has no unit of its own. Dropping half a Saltelli
@@ -87,7 +89,11 @@ class MethodSpec:
     bootstrap: str | None
     invalid_unit: InvalidUnit | None
     pure_core: bool = True
-    refused_marginals: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    # Left out of the hash: a mapping proxy is not hashable. Equality still
+    # compares it, and equal specs then still hash equal, as they must.
+    refused_marginals: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({}), hash=False
+    )
 
     @property
     def is_design_based(self) -> bool:

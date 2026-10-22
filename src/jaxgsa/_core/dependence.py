@@ -44,16 +44,10 @@ from jaxgsa._core.copula import (
 )
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa.problem import (
-    _CONTINUOUS_FAMILY_SPECS,
-    BetaSpec,
     CategoricalSpec,
     GaussianSpec,
     InputSpec,
-    LognormalSpec,
     Problem,
-    TriangularSpec,
-    UniformSpec,
-    WeibullSpec,
 )
 
 # Keeps the probit and the marginal inverse CDFs finite at exact 0 and 1.
@@ -194,18 +188,9 @@ def _check_support(
     high = np.full(len(input_specs), np.inf)
     levels: dict[int, int] = {}
     for i, spec in enumerate(input_specs):
+        low[i], high[i] = spec.support()
         if isinstance(spec, CategoricalSpec):
-            low[i], high[i] = 0.0, len(spec.probs) - 1
             levels[i] = len(spec.probs)
-        elif isinstance(spec, UniformSpec | GaussianSpec):
-            if spec.low is not None:
-                low[i] = spec.low
-            if spec.high is not None:
-                high[i] = spec.high
-        elif isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
-            low[i], high[i] = spec.support()
-        else:
-            raise TypeError(f"unsupported marginal {type(spec).__name__}")
     continuous = [i for i in range(len(input_specs)) if i not in levels]
     if continuous:
         lo, hi = low[continuous], high[continuous]
@@ -237,20 +222,8 @@ def _check_support(
         support = f"categorical, integer codes 0 to {levels[i] - 1}"
     else:
         wrong = (column < low[i]) | (column > high[i])
-        if isinstance(spec, UniformSpec):
-            kind = "uniform"
-        elif isinstance(spec, GaussianSpec):
-            kind = "truncated Gaussian"
-        elif isinstance(spec, LognormalSpec):
-            kind = "lognormal"
-        elif isinstance(spec, WeibullSpec):
-            kind = "Weibull"
-        elif isinstance(spec, TriangularSpec):
-            kind = "triangular"
-        elif isinstance(spec, BetaSpec):
-            kind = "beta"
-        else:
-            raise TypeError(f"unsupported marginal {type(spec).__name__}")
+        # An unbounded Gaussian cannot get here, so a Gaussian is truncated.
+        kind = "truncated Gaussian" if isinstance(spec, GaussianSpec) else spec.display_name
         support = f"{kind} on [{low[i]:g}, {high[i]:g}]"
     first = int(np.flatnonzero(wrong)[0])
     raise ValueError(

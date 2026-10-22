@@ -476,15 +476,6 @@ def _raise_categorical_analysis(problem: Problem, method: str) -> None:
     _raise_unsupported(problem, method, kind="categorical", design=False)
 
 
-# Display name and spec class of each continuous family a method may refuse.
-_MARGINAL_FAMILIES: dict[str, tuple[str, str]] = {
-    "lognormal": ("lognormal", "LognormalSpec"),
-    "weibull": ("Weibull", "WeibullSpec"),
-    "triangular": ("triangular", "TriangularSpec"),
-    "beta": ("beta", "BetaSpec"),
-}
-
-
 def _marginal_tolerant_methods(families: Sequence[str]) -> str:
     """Name every registered method that accepts all of ``families``.
 
@@ -513,6 +504,56 @@ def _marginal_tolerant_methods(families: Sequence[str]) -> str:
     return listed
 
 
+def refused_marginal_message(
+    method: str,
+    lead: str,
+    hits: Mapping[str, Sequence[str]],
+    refused: Mapping[str, str],
+) -> str:
+    """Build the refusal text for marginal families a method refuses.
+
+    This is the one source of the message. :func:`_raise_refused_marginals`
+    and the DGSM per-marginal helpers both call it, so the wording cannot
+    drift between the problem-level and the marginal-level refusal.
+
+    Args:
+        method: Fully qualified sampler or analyzer name.
+        lead: What the method cannot do, such as ``"cannot analyze this
+            problem"``.
+        hits: Each refused family tag the input uses, with the names of the
+            parameters that use it. An empty name list leaves the names out,
+            for a refusal of one bare marginal.
+        refused: The method's ``MethodSpec.refused_marginals``: family tag to
+            the reason for the refusal.
+
+    Returns:
+        The message. It names each refused family and its spec class, states
+        each reason once, and lists the methods that accept every refused
+        family the input uses.
+    """
+    from jaxgsa.problem import _FAMILY_BY_DIST
+
+    def label(family: str) -> str:
+        cls = _FAMILY_BY_DIST.get(family)
+        return family if cls is None else cls.display_name
+
+    def described(family: str, names: Sequence[str]) -> str:
+        cls = _FAMILY_BY_DIST.get(family)
+        what = f"{label(family)} ({family if cls is None else cls.__name__})"
+        return f"parameters {list(names)} are {what}" if names else what
+
+    found = "; ".join(described(family, names) for family, names in hits.items())
+    # Two families can share one reason; state it once.
+    reasons = " ".join(dict.fromkeys(refused[family] for family in hits))
+    names_ = [label(f) for f in hits]
+    labels = ", ".join(names_[:-1]) + " and " + names_[-1] if len(names_) > 1 else names_[0]
+    return (
+        f"{method} {lead}. It does not support these marginals: {found}. "
+        f"{reasons} Use a method that accepts {labels} "
+        f"inputs instead: {_marginal_tolerant_methods(tuple(hits))}."
+    )
+
+
 def _raise_refused_marginals(
     problem: Problem, method: str, refused: Mapping[str, str], *, design: bool
 ) -> None:
@@ -527,9 +568,8 @@ def _raise_refused_marginals(
             Selects the wording only.
 
     Raises:
-        ValueError: If any parameter uses a refused family. The message names
-            each refused family, its parameters and the reason, and lists the
-            methods that accept every refused family the problem uses.
+        ValueError: If any parameter uses a refused family. The message comes
+            from :func:`refused_marginal_message`.
     """
     if not refused:
         return
@@ -539,21 +579,8 @@ def _raise_refused_marginals(
             hits.setdefault(spec.dist, []).append(name)
     if not hits:
         return
-    found = "; ".join(
-        f"parameters {names} are {_MARGINAL_FAMILIES.get(family, (family, family))[0]} "
-        f"({_MARGINAL_FAMILIES.get(family, (family, family))[1]})"
-        for family, names in hits.items()
-    )
-    # Two families can share one reason; state it once.
-    reasons = " ".join(dict.fromkeys(refused[family] for family in hits))
-    names_ = [_MARGINAL_FAMILIES.get(f, (f, f))[0] for f in hits]
-    labels = ", ".join(names_[:-1]) + " and " + names_[-1] if len(names_) > 1 else names_[0]
     lead = "cannot build a design for this problem" if design else "cannot analyze this problem"
-    raise ValueError(
-        f"{method} {lead}. It does not support these marginals: {found}. "
-        f"{reasons} Use a method that accepts {labels} "
-        f"inputs instead: {_marginal_tolerant_methods(tuple(hits))}."
-    )
+    raise ValueError(refused_marginal_message(method, lead, hits, refused))
 
 
 def _dims_and_coords(

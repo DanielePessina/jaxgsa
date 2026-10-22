@@ -199,8 +199,6 @@ def _map_by_column(
             cols.append(2.0 * family_cdf_block(X[:, d : d + 1], [spec])[:, 0] - 1.0)
             input_types.append("uniform")
             continue
-        if not isinstance(spec, GaussianSpec):
-            raise TypeError(f"unsupported marginal {type(spec).__name__}")
 
         centre, scale, family = _gaussian_standardisation(spec, order)
         cols.append((X[:, d] - centre) / scale)
@@ -255,8 +253,6 @@ def _map_by_group(
             families.setdefault(spec.dist, []).append((d, spec))
             input_types[d] = "uniform"
             continue
-        if not isinstance(spec, GaussianSpec):
-            raise TypeError(f"unsupported marginal {type(spec).__name__}")
 
         centre, scale, family = _gaussian_standardisation(spec, order)
         standard.append(d)

@@ -153,6 +153,27 @@ def _pce_allocation(
     return shapley_from_variances(normalized, membership)
 
 
+def _raise_refused_hdmr_backend_marginals(problem: "Problem", method: str) -> None:
+    """Reject the HDMR backend for a marginal family that HDMR refuses.
+
+    The refusal is per backend, as for a correlation: the PCE backend accepts
+    every continuous family, so the Shapley record declares none. The HDMR
+    backend fits the same surrogate as :func:`jaxgsa.hdmr.analyze`, so it
+    reads the HDMR record and states the same reason.
+
+    Args:
+        problem: Problem the allocation was requested for.
+        method: Fully qualified entry-point name for the error message.
+
+    Raises:
+        ValueError: If ``problem`` has a parameter whose family the HDMR
+            record refuses (lognormal or Weibull).
+    """
+    from jaxgsa.hdmr import _SPEC as _HDMR_SPEC
+
+    gates(_HDMR_SPEC, problem, method=f"{method} with backend='hdmr'", check=("marginal",))
+
+
 def _indices_3d(
     problem: "Problem",
     X: Array,
@@ -275,9 +296,10 @@ def indices(
     Raises:
         ValueError: If ``backend`` is unknown, ``include_correlative`` is
             asked for with the PCE backend, ``problem`` has a categorical
-            parameter (either backend), or ``problem.correlation`` declares a
-            dependence structure with the PCE backend — exactly the refusals
-            :func:`analyze` makes.
+            parameter (either backend), ``problem.correlation`` declares a
+            dependence structure with the PCE backend, or ``problem`` has a
+            lognormal or Weibull parameter with the HDMR backend — exactly
+            the refusals :func:`analyze` makes.
     """
     from jaxgsa.shapley import _SPEC
 
@@ -296,6 +318,8 @@ def indices(
     )
     if backend == "pce":
         _raise_correlated_pce_backend(problem, "jaxgsa.shapley.indices")
+    else:
+        _raise_refused_hdmr_backend_marginals(problem, "jaxgsa.shapley.indices")
     Y_3d, layout = _prepare_Y(Y)
     Sh, S1, ST = _indices_3d(
         problem,
@@ -473,8 +497,10 @@ def analyze(
             ``backend="hdmr"`` with ``include_correlative=True``),
             ``problem`` has categorical parameters (both backends fit a
             smooth surrogate over the inputs, which is undefined for
-            unordered level codes), or the underlying ``analyze`` rejects
-            its inputs.
+            unordered level codes), ``problem`` has a lognormal or Weibull
+            parameter with the HDMR backend (the open tail biases the HDMR
+            fit; the PCE backend accepts them), or the underlying
+            ``analyze`` rejects its inputs.
         TypeError: If ``backend_kwargs`` contains a keyword the selected
             backend's ``analyze`` does not accept.
 
@@ -552,6 +578,7 @@ def analyze(
         # already read both diagnostics off this fit and warned about them.
         result = pce_result.shapley()
     elif backend == "hdmr":
+        _raise_refused_hdmr_backend_marginals(problem, "jaxgsa.shapley.analyze")
         from jaxgsa.hdmr import analyze as analyze_hdmr
 
         # The warning for a correlated problem with include_correlative=False

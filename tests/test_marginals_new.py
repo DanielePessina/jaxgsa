@@ -21,7 +21,6 @@ from scipy import stats
 
 import jaxgsa
 from jaxgsa import BetaSpec, LognormalSpec, Problem, TriangularSpec, WeibullSpec
-from jaxgsa._core import marginals
 from jaxgsa._core.sampling import _inverse_transform_samples, _transform_samples
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa.efast import EFASTResult
@@ -77,9 +76,9 @@ def _problem(name: str, n: int = 1) -> Problem:
 @pytest.mark.parametrize("name", FAMILIES)
 def test_host_ppf_and_cdf_match_scipy(name):
     spec, dist, _, _ = CASES[name]
-    x = marginals.host_ppf(spec, U_GRID)
+    x = spec.ppf(U_GRID)
     np.testing.assert_allclose(x, dist.ppf(U_GRID), rtol=1e-10)
-    np.testing.assert_allclose(marginals.host_cdf(spec, x), dist.cdf(x), rtol=1e-10, atol=1e-15)
+    np.testing.assert_allclose(spec.cdf(x), dist.cdf(x), rtol=1e-10, atol=1e-15)
     # The problem-level transform and its inverse round-trip the grid.
     problem = _problem(name)
     xs = _transform_samples(problem, U_GRID[:, None])
@@ -161,6 +160,62 @@ def test_beta_transform_refuses_shape_parameters():
     for field in ("a", "b"):
         with pytest.raises(ValueError, match="beta shape parameter"):
             samples.transform({"x0": {field: 2.0}})
+
+
+def test_beta_transform_computes_its_quantiles_once_and_jits(monkeypatch):
+    """The host betaincinv runs once per design, not once per transform call."""
+    from scipy import special
+
+    problem = Problem.from_dict({"x0": BetaSpec(2.0, 5.0, -1.0, 2.0), "x1": (0.0, 1.0)})
+    samples = jaxgsa.sobol.sample(problem, base_n=32, seed=4, verbose=False)
+    calls = {"n": 0}
+    real = special.betaincinv
+
+    def counted(*args):
+        calls["n"] += 1
+        return real(*args)
+
+    monkeypatch.setattr(special, "betaincinv", counted)
+    with jax.enable_x64():
+        eager = samples.transform()
+        jitted = jax.jit(lambda th: samples.transform({"x0": th}))
+        theta = {"low": jnp.asarray(-1.0), "high": jnp.asarray(2.0)}
+        np.testing.assert_allclose(np.asarray(jitted(theta)), samples.samples, rtol=1e-10)
+        np.testing.assert_allclose(np.asarray(eager), samples.samples, rtol=1e-10)
+
+        # d/d(high) of sum(x0) is sum(z) and d/d(low) is sum(1 - z), with z
+        # the standard-beta quantile of the column.
+        def total(th):
+            return jnp.sum(samples.transform({"x0": th})[:, 0])
+
+        grads = jax.jit(jax.grad(total))(theta)
+        z = (samples.samples[:, 0] + 1.0) / 3.0
+        np.testing.assert_allclose(float(grads["high"]), z.sum(), rtol=1e-8)
+        np.testing.assert_allclose(float(grads["low"]), (1.0 - z).sum(), rtol=1e-8)
+    assert calls["n"] == 1
+
+
+def test_beta_dict_form_defaults_its_bounds_like_the_class():
+    from_dict = Problem.from_dict({"x": {"dist": "beta", "a": 2, "b": 5}}).input_specs[0]
+    assert from_dict == BetaSpec(2, 5)
+    assert from_dict.support() == (0.0, 1.0)
+    no_b: Any = {"dist": "beta", "a": 2}
+    with pytest.raises(ValueError, match="missing 'b'"):
+        Problem.from_dict({"x": no_b})
+
+
+def test_dgsm_marginal_refusal_matches_the_problem_refusal():
+    """poincare_constant and dgsm.analyze state the same reason and alternatives."""
+    spec = CASES["lognormal"][0]
+    with pytest.raises(ValueError) as single:
+        jaxgsa.dgsm.poincare_constant(spec)
+    problem = _mixed("lognormal")
+    X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, 32, seed=0))
+    with pytest.raises(ValueError) as whole:
+        jaxgsa.dgsm.analyze(problem, X, fn=_point_model, verbose=False)
+    tail = str(whole.value).split("It does not support these marginals: ")[1].split(". ", 1)[1]
+    assert str(single.value).endswith(tail)
+    assert str(single.value).startswith("jaxgsa.dgsm.poincare_constant")
 
 
 @pytest.mark.parametrize("name", FAMILIES)
@@ -248,7 +303,7 @@ def test_degenerate_triangular_modes_are_accepted():
     for mode, c in ((0.0, 0.0), (2.0, 1.0)):
         spec = TriangularSpec(0.0, mode, 2.0)
         dist = stats.triang(c=c, loc=0.0, scale=2.0)
-        np.testing.assert_allclose(marginals.host_ppf(spec, U_GRID), dist.ppf(U_GRID), rtol=1e-10)
+        np.testing.assert_allclose(spec.ppf(U_GRID), dist.ppf(U_GRID), rtol=1e-10)
         samples = jaxgsa.sobol.sample(Problem.from_dict({"t": spec}), base_n=16, verbose=False)
         with jax.enable_x64():
             grads = jax.grad(
@@ -353,6 +408,54 @@ def test_efast_accepts_bounded_families(name):
     assert np.all(np.isfinite(np.asarray(result.S1)))
 
 
+def _hdmr_entry_points(problem: Problem) -> dict[str, Any]:
+    """Every public route that runs the HDMR fit, on cheap settings."""
+    X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, 320, seed=0))
+    Y = X[:, 0] + X[:, 1] + X[:, 2]
+    return {
+        "jaxgsa.hdmr.analyze": lambda: jaxgsa.hdmr.analyze(
+            problem, X, Y, order=1, max_iter=3, verbose=False
+        ),
+        "jaxgsa.hdmr.indices": lambda: jaxgsa.hdmr.indices(problem, X, Y, order=1, max_iter=3),
+        "jaxgsa.shapley.analyze with backend='hdmr'": lambda: jaxgsa.shapley.analyze(
+            problem, X, Y, backend="hdmr", order=1, max_iter=3, verbose=False
+        ),
+        "jaxgsa.shapley.indices with backend='hdmr'": lambda: jaxgsa.shapley.indices(
+            problem, X, Y, backend="hdmr", order=1, max_iter=3
+        ),
+    }
+
+
+@pytest.mark.parametrize("name", ["lognormal", "weibull"])
+def test_hdmr_refuses_heavy_tailed_families(name):
+    """HDMR and the HDMR-backed Shapley route refuse an open-tailed input."""
+    for method, call in _hdmr_entry_points(_mixed(name)).items():
+        with pytest.raises(ValueError, match=type(CASES[name][0]).__name__) as info:
+            call()
+        message = str(info.value)
+        assert message.startswith(method), (method, message)
+        assert "biased low" in message
+        accepting = message.split("instead:")[1]
+        assert "jaxgsa.hdmr" not in accepting
+        assert "jaxgsa.pce" in accepting
+
+
+@pytest.mark.parametrize("name", ["lognormal", "weibull"])
+def test_shapley_pce_backend_still_accepts_heavy_tailed_families(name):
+    problem = _mixed(name)
+    X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, 256, seed=0))
+    result = jaxgsa.shapley.analyze(problem, X, X[:, 0] + X[:, 1], order=2, verbose=False)
+    assert isinstance(result, jaxgsa.shapley.ShapleyResult)
+    assert np.all(np.isfinite(np.asarray(result.Sh)))
+
+
+@pytest.mark.parametrize("name", ["triangular", "beta"])
+def test_hdmr_accepts_bounded_families(name):
+    for method, call in _hdmr_entry_points(_mixed(name)).items():
+        # Every route returns an object with a per-parameter ST.
+        assert np.all(np.isfinite(np.asarray(call().ST))), method
+
+
 @pytest.mark.parametrize("name", ["lognormal", "weibull"])
 def test_morris_squashes_only_the_open_upper_side(name):
     spec, dist, _, _ = CASES[name]
@@ -381,7 +484,7 @@ def test_morris_effects_use_the_squashed_step(name, method):
         problem, 30, seed=2, truncation_quantile=0.05, method=method, verbose=False
     )
     X = np.asarray(sr.samples)
-    Y = jnp.asarray(5.0 * marginals.host_cdf(spec, X[:, 0]) + 3.0 * X[:, 1])
+    Y = jnp.asarray(5.0 * spec.cdf(X[:, 0]) + 3.0 * X[:, 1])
     res = jaxgsa.morris.analyze(sr, Y, verbose=False)
     assert isinstance(res, MorrisResult)
     np.testing.assert_allclose(np.asarray(res.mu_star)[:2], [5.0, 3.0], rtol=1e-6)

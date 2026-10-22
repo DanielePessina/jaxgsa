@@ -136,3 +136,78 @@ def test_irregular_result_stacks_channels() -> None:
         ds = result.to_dataset()
         expected = ds[f"{name}_S1"].transpose(f"time_{name}", "param").values.ravel()
         np.testing.assert_allclose(part["S1"].to_numpy(), expected, rtol=1e-6)
+
+
+def test_param_frame_uses_the_dims_of_every_kept_variable() -> None:
+    """A later variable with more dimensions than the first one still fits.
+
+    The index takes every dimension any kept variable has. A variable that
+    lacks a dimension is repeated along it.
+    """
+    from jaxgsa._core.result import param_frame
+
+    names = ["x1", "x2", "x3"]
+    ds = xr.Dataset(
+        {
+            "a": (("param",), np.array([0.1, 0.2, 0.3])),
+            "b": (("time", "output", "param"), np.arange(12.0).reshape(2, 2, 3)),
+        },
+        coords={"param": names, "time": [0.0, 1.0], "output": ["u", "v"]},
+    )
+    df = param_frame(ds)
+    assert list(df.index.names) == ["time", "output", "param"]
+    assert list(df.columns) == ["a", "b"]
+    assert len(df) == 2 * 2 * 3
+    np.testing.assert_allclose(df["b"].to_numpy(), np.arange(12.0), rtol=1e-12)
+    np.testing.assert_allclose(df["a"].to_numpy(), np.tile([0.1, 0.2, 0.3], 4), rtol=1e-12)
+    np.testing.assert_allclose(df.loc[(1.0, "v", "x2"), "b"], 10.0, rtol=1e-12)
+
+
+def _rank_channel(Y: np.ndarray) -> Any:
+    """One regular rank result on three uniform inputs, for a hand-built IrregularResult."""
+    from jaxgsa import rank
+
+    problem = jaxgsa.Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0), "x3": (0.0, 1.0)})
+    rng = np.random.default_rng(1)
+    X = rng.uniform(size=(Y.shape[0], 3))
+    Y = Y + X[:, :1].reshape((-1,) + (1,) * (Y.ndim - 1))
+    return problem, rank.analyze(problem, jnp.asarray(X), jnp.asarray(Y), verbose=False)
+
+
+def test_irregular_to_pandas_aligns_a_channel_without_time() -> None:
+    """A channel with no ``time`` axis still stacks under the shared levels."""
+    rng = np.random.default_rng(0)
+    problem, timed = _rank_channel(rng.normal(size=(200, 2, 1)))
+    _, flat = _rank_channel(rng.normal(size=(200,)))
+    result = IrregularResult(
+        channels={"a": timed, "b": flat},
+        times={"a": jnp.array([0.0, 1.0]), "b": jnp.array([0.0])},
+        problem=problem,
+    )
+    df = result.to_pandas()
+    assert list(df.index.names) == ["output", "time", "param"]
+    assert len(df) == 2 * 3 + 3
+    assert df.xs("b", level="output").index.get_level_values("time").isna().all()
+    np.testing.assert_allclose(
+        df.xs("b", level="output")["S1"].to_numpy(), np.asarray(flat.S1), rtol=1e-6
+    )
+
+
+def test_irregular_to_pandas_keeps_several_outputs_of_a_channel() -> None:
+    """A channel with more than one output keeps them on a ``channel_output`` level."""
+    rng = np.random.default_rng(0)
+    problem, single = _rank_channel(rng.normal(size=(200, 2, 1)))
+    _, double = _rank_channel(rng.normal(size=(200, 2, 2)))
+    result = IrregularResult(
+        channels={"a": single, "b": double},
+        times={"a": jnp.array([0.0, 1.0]), "b": jnp.array([0.0, 1.0])},
+        problem=problem,
+    )
+    df = result.to_pandas()
+    assert list(df.index.names) == ["output", "time", "channel_output", "param"]
+    assert len(df) == 2 * 3 + 2 * 2 * 3
+    assert df.xs("a", level="output").index.get_level_values("channel_output").isna().all()
+    part = df.xs("b", level="output")
+    assert part.index.get_level_values("channel_output").nunique() == 2
+    expected = np.asarray(double.S1).ravel()  # (T, K, D) in time, output, param order
+    np.testing.assert_allclose(part["S1"].to_numpy(), expected, rtol=1e-6)

@@ -41,7 +41,7 @@ from jaxgsa._core.sampling import (
 )
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa._core.warning_types import JaxgsaWarning
-from jaxgsa.problem import _CONTINUOUS_FAMILY_SPECS, GaussianSpec, Problem
+from jaxgsa.problem import Problem
 
 # Offset between the Sobol' draws used for the radial base points (a) and the
 # auxiliary points (b). Reusing draw i for both would give delta = 0.
@@ -527,17 +527,12 @@ def _squash_open_sides(
     """
     q = truncation_quantile
     for idx, spec in enumerate(problem.input_specs):
-        if isinstance(spec, GaussianSpec):
-            low, high = spec.low, spec.high
-        elif isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
-            # Lognormal and Weibull are closed below (ppf(0) = 0) and open
-            # above; triangular and beta are closed on both sides.
-            low, high = spec.support()
-        else:
-            # Uniform and categorical marginals are bounded and never move.
-            continue
-        lo_target = q if low is None or math.isinf(low) else 0.0
-        hi_target = 1.0 - q if high is None or math.isinf(high) else 1.0
+        # An open side has an infinite end. Uniform, categorical, triangular
+        # and beta marginals are bounded and never move. Lognormal and
+        # Weibull are closed below (ppf(0) = 0) and open above.
+        low, high = spec.support()
+        lo_target = q if math.isinf(low) else 0.0
+        hi_target = 1.0 - q if math.isinf(high) else 1.0
         scale = hi_target - lo_target
         if scale == 1.0:  # both sides already bounded, so nothing to squash
             continue

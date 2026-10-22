@@ -303,17 +303,25 @@ class TestTheSpecsAreTrue:
         """The refusal list is closed: a new entry is a decision, not drift.
 
         dgsm has no Poincare constant for any of the four families in 1.3.
-        eFAST reads S1 biased low on the heavy-tailed lognormal and Weibull.
+        eFAST and HDMR read S1 biased low on the heavy-tailed lognormal and
+        Weibull.
         """
         declared = {s.name: set(s.refused_marginals) for s in ALL_SPECS if s.refused_marginals}
         assert declared == {
             "dgsm": {"lognormal", "weibull", "triangular", "beta"},
             "efast": {"lognormal", "weibull"},
+            "hdmr": {"lognormal", "weibull"},
         }
         for spec in ALL_SPECS:
             for family, reason in spec.refused_marginals.items():
                 assert family in FAMILIES, (spec.name, family)
                 assert reason.strip(), (spec.name, family)
+
+    @pytest.mark.parametrize("spec", ALL_SPECS, ids=SPEC_IDS)
+    def test_every_spec_is_hashable(self, spec):
+        """A frozen spec must hash, so it can key a dict or sit in a set."""
+        assert hash(spec) == hash(spec)
+        assert {spec: spec.name}[spec] == spec.name
 
     def test_the_bootstrap_claim_matches_the_signature(self):
         """A method claims a bootstrap exactly when it offers the full interval controls.

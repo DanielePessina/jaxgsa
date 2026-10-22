@@ -296,6 +296,12 @@ class IrregularResult:
         ``output``, ``time`` and ``param``. Each channel keeps its own time
         values; no channel is padded onto another channel's grid.
 
+        Channels need not share their index levels. A channel with no
+        ``time`` axis gets a ``time`` level of missing values, so every
+        channel stacks under the same levels. A channel with more than one
+        output keeps them on a ``channel_output`` level, because ``output``
+        already names the channel.
+
         Returns:
             A :class:`pandas.DataFrame` with one row per channel, time point
             and input. ``DataFrame.attrs`` holds the first channel's
@@ -306,10 +312,30 @@ class IrregularResult:
         frames = []
         for name, res in self.channels.items():
             ds = res.to_dataset(time_coords=np.asarray(self.times[name]))
-            if "output" in ds.dims:
+            if "output" in ds.dims and ds.sizes["output"] == 1:
                 ds = ds.squeeze("output", drop=True)
-            frames.append(param_frame(ds))
-        merged = pd.concat(frames, keys=list(self.channels), names=["output"])
+            frame = param_frame(ds)
+            if "output" in frame.index.names:
+                frame.index = frame.index.rename({"output": "channel_output"})
+            frames.append(frame)
+        # Union of the level names in first-seen order, with param kept last
+        # as in the regular to_pandas. pd.concat needs every frame on the same
+        # levels, in the same order.
+        levels: list[str] = []
+        for frame in frames:
+            levels.extend(n for n in frame.index.names if n is not None and n not in levels)
+        levels = [n for n in levels if n != "param"] + ["param"]
+        aligned = []
+        for frame in frames:
+            missing = [n for n in levels if n not in frame.index.names]
+            if missing:
+                frame = frame.assign(**{n: np.nan for n in missing}).set_index(
+                    missing, append=True
+                )
+            if list(frame.index.names) != levels:
+                frame = frame.reorder_levels(levels)
+            aligned.append(frame)
+        merged = pd.concat(aligned, keys=list(self.channels), names=["output"])
         merged.attrs = dict(frames[0].attrs)
         return merged
 

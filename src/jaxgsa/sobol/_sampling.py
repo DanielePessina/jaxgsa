@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 import warnings
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, Mapping, NamedTuple, overload
 
 import numpy as np
@@ -37,6 +38,7 @@ from jaxgsa._core.sampling import (
     _power_of_2_error,
     _stable_unique_rows,
     _transform_samples,
+    beta_unit_quantiles,
     check_budget_choice,
     check_seed,
     check_seed_scramble,
@@ -44,9 +46,7 @@ from jaxgsa._core.sampling import (
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import (
-    _CONTINUOUS_FAMILY_SPECS,
     CategoricalSpec,
-    GaussianSpec,
     Problem,
     _categorical_dims,
 )
@@ -159,7 +159,8 @@ class SobolSamples(UniqueDesignSamples):
         triangular (``low``, ``mode``, ``high``) inputs are closed forms in JAX
         and differentiate in every field. A beta input differentiates in
         ``low`` and ``high`` only: its standard quantiles are computed once on
-        the host, so ``theta`` naming ``a`` or ``b`` raises ``ValueError``.
+        the host once per design and reused on every call, so ``theta``
+        naming ``a`` or ``b`` raises ``ValueError``.
 
         Tier T4 (behavioural contract): the returned array must reproduce
         :attr:`samples` when ``theta`` is ``None``, and its Jacobian with
@@ -210,7 +211,22 @@ class SobolSamples(UniqueDesignSamples):
                 "re-transformed. Only a design returned by jaxgsa.sobol.sample has "
                 "one; a hand-built design does not."
             )
-        return _jax_transform_samples(self.problem, self.unit, theta)
+        return _jax_transform_samples(
+            self.problem, self.unit, theta, unit_quantiles=self._beta_unit_quantiles
+        )
+
+    @cached_property
+    def _beta_unit_quantiles(self) -> dict[int, np.ndarray]:
+        """The beta columns' standard quantiles of :attr:`unit`, computed once.
+
+        JAX has no beta inverse CDF, so :meth:`transform` reads these host
+        values instead of calling SciPy on every call. Only ``low`` and
+        ``high`` of a beta input are traced. Empty for a problem with no beta
+        parameter. Requires :attr:`unit`, which :meth:`transform` checks
+        first.
+        """
+        assert self.unit is not None
+        return beta_unit_quantiles(self.problem, self.unit)
 
     @overload
     def downsample(self, base_n: int) -> SobolSamples: ...
@@ -622,14 +638,7 @@ def _warn_unbounded_marginals(problem: Problem) -> None:
     """
     unbounded: dict[str, list[str]] = {}
     for name, spec in zip(problem.names, problem.input_specs, strict=True):
-        if isinstance(spec, GaussianSpec):
-            is_open = spec.low is None or spec.high is None
-        elif isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
-            low, high = spec.support()
-            is_open = math.isinf(low) or math.isinf(high)
-        else:  # uniform and categorical marginals are bounded
-            is_open = False
-        if is_open:
+        if any(math.isinf(side) for side in spec.support()):
             unbounded.setdefault(spec.dist, []).append(name)
     if not unbounded:
         return

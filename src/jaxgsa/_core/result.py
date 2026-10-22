@@ -178,8 +178,10 @@ def _attr_value(value: Any) -> Any:
     return str(value)
 
 
-_FRAME_DIMS = frozenset({"time", "output", "param"})
-"""The dimensions a variable may have to appear in :func:`param_frame`."""
+_FRAME_DIM_ORDER = ("time", "output", "param")
+"""The dimensions a variable may have to appear in :func:`param_frame`, in index order."""
+
+_FRAME_DIMS = frozenset(_FRAME_DIM_ORDER)
 
 _BOUND_SUFFIXES = ("_lower", "_upper")
 
@@ -195,8 +197,9 @@ def param_frame(ds: xr.Dataset) -> pd.DataFrame:
 
     The columns keep the dataset's variable names. Each point estimate is
     followed by its ``*_lower`` and ``*_upper`` bounds when the dataset has
-    them. The index has one level per kept dimension, in the variables' own
-    order, so ``param`` is the last level.
+    them. The index has one level per dimension that any kept variable has,
+    in the order ``time``, ``output``, ``param``. So ``param`` is the last
+    level. A variable that lacks a dimension is repeated along it.
 
     Args:
         ds: A dataset produced by a result's ``to_dataset``.
@@ -225,8 +228,9 @@ def param_frame(ds: xr.Dataset) -> pd.DataFrame:
             continue
         columns.append(name)
         columns.extend(f"{name}{sfx}" for sfx in _BOUND_SUFFIXES if f"{name}{sfx}" in bounds)
-    dims = ds[kept[0]].dims
-    frame = ds[columns].to_dataframe(dim_order=list(dims))
+    present = {dim for name in kept for dim in ds[name].dims}
+    dims = [dim for dim in _FRAME_DIM_ORDER if dim in present]
+    frame = ds[columns].to_dataframe(dim_order=dims)
     frame = frame[columns]
     frame.attrs = dict(ds.attrs)
     return frame

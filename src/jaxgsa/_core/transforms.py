@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
 from jax.scipy.special import ndtr
 
-from jaxgsa._core import marginals
 from jaxgsa._core.precision import unit_clip_bounds
 from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa.problem import (
     _CONTINUOUS_FAMILY_SPECS,
     CategoricalSpec,
     ContinuousFamilySpec,
-    GaussianSpec,
     Problem,
     UniformSpec,
 )
@@ -107,7 +106,7 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
       out-of-range signal and drops the sample. Clipping the column would
       hide the caller's mistake instead.
     * A lognormal, Weibull, triangular or beta column goes through its own
-      CDF (:func:`jaxgsa._core.marginals.jax_cdf`) and is treated like a
+      CDF (the spec's ``jax_cdf``) and is treated like a
       Gaussian one: in-range values are clipped off 0 and 1, and a sample
       outside the support maps outside ``[0, 1]`` and is left alone.
 
@@ -179,8 +178,6 @@ def _cdf_by_column(X: Array, problem: Problem) -> Array:
         if isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
             cols.append(family_cdf_block(X[:, d : d + 1], [spec])[:, 0])
             continue
-        if not isinstance(spec, GaussianSpec):
-            raise TypeError(f"unsupported marginal {type(spec).__name__}")
         # math.sqrt, not float(jnp.sqrt(...)): inside a trace jnp.sqrt returns a
         # tracer even for a Python-float input, so float() on it raises. The
         # variance is a plain float on the spec, so no JAX op is needed at all,
@@ -260,8 +257,6 @@ def _cdf_by_group(X: Array, problem: Problem) -> Array:
         if isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
             families.setdefault(spec.dist, []).append((d, spec))
             continue
-        if not isinstance(spec, GaussianSpec):
-            raise TypeError(f"unsupported marginal {type(spec).__name__}")
         # math.sqrt, not float(jnp.sqrt(...)): inside a trace jnp.sqrt returns a
         # tracer even for a Python-float input, so float() on it raises. The
         # variance is a plain float on the spec, so no JAX op is needed at all,
@@ -315,6 +310,23 @@ def _cdf_by_group(X: Array, problem: Problem) -> Array:
     return _in_column_order(parts, D)
 
 
+def _stacked_params(specs: list[ContinuousFamilySpec], dtype: Any) -> tuple[Array, ...]:
+    """Stack the parameters of same-family specs into per-column arrays.
+
+    The values are gathered in float64 on the host and cast to ``dtype``,
+    which is what a Python-float operand becomes inside a single-column op.
+
+    Args:
+        specs: Specs of one family, one per column.
+        dtype: Target dtype of the columns.
+
+    Returns:
+        One array of shape ``(len(specs),)`` per family parameter.
+    """
+    values = np.asarray([spec.params() for spec in specs], dtype=np.float64)
+    return tuple(jnp.asarray(values[:, j], dtype=dtype) for j in range(values.shape[1]))
+
+
 def family_cdf_block(X_block: Array, specs: list[ContinuousFamilySpec]) -> Array:
     """Map columns of one lognormal, Weibull, triangular or beta family to ``[0, 1]``.
 
@@ -336,7 +348,7 @@ def family_cdf_block(X_block: Array, specs: list[ContinuousFamilySpec]) -> Array
         else jnp.result_type(X_block.dtype, float)
     )
     X_block = X_block.astype(dtype)
-    u = marginals.jax_cdf(specs[0].dist, X_block, marginals.stacked_params(specs, dtype))
+    u = type(specs[0]).jax_cdf(X_block, _stacked_params(specs, dtype))
     clip_lo, clip_hi = unit_clip_bounds(UNIT_CLIP, dtype)
     in_range = (u >= 0.0) & (u <= 1.0)
     return jnp.where(in_range, jnp.clip(u, clip_lo, clip_hi), u)

@@ -313,10 +313,11 @@ latent Gaussian variables (with `correlation_type="spearman"`, the rank
 dependence). It does not set the Pearson correlation of the physical inputs.
 For skewed marginals the two can differ a lot.
 
-Two methods refuse some of these families. `jaxgsa.dgsm` refuses all four,
-because it has no Poincare constant for them. `jaxgsa.efast` refuses lognormal
-and Weibull inputs, because a long upper tail biases its `S1` low. It
-accepts triangular and beta inputs. The error message lists the methods that
+Three methods refuse some of these families. `jaxgsa.dgsm` refuses all four,
+because it has no Poincare constant for them. `jaxgsa.efast` and
+`jaxgsa.hdmr` refuse lognormal and Weibull inputs, because a long upper tail
+biases their `S1` low. Shapley with `backend="hdmr"` refuses them for the same
+reason. These methods accept triangular and beta inputs. The error message lists the methods that
 accept the family. `jaxgsa.morris.sample` pulls in only the open upper side of
 a lognormal or Weibull input, by `truncation_quantile`. PCE and the PCE-backed
 Shapley analysis map these inputs through their CDF onto Legendre polynomials,
