@@ -195,9 +195,10 @@ The `analyze()` report has these parts:
 
 If you use jaxgsa in research, cite the version you ran and the paper for
 your sensitivity method (see the [Sobol' references](/api/sobol#references)
-for this tutorial's estimators). Use the
+for this tutorial's estimators). To cite jaxgsa in general, use the
 concept DOI
 [10.5281/zenodo.22099117](https://doi.org/10.5281/zenodo.22099117).
-It always resolves to the latest version.
+It always resolves to the latest version. For reproducibility, cite the
+version DOI instead. Find it on the Zenodo record of the release you ran.
 See [`CITATION.cff`](https://github.com/DanielePessina/jaxgsa/blob/master/CITATION.cff)
 and the [methods guide](/guide/methods).

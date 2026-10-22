@@ -135,6 +135,41 @@ def to_device(a: object) -> Array:
     return jnp.asarray(a)
 
 
+def row_count_message(
+    n_rows: int,
+    n_expected: int,
+    expected_from: str = "X",
+    detail: str = "",
+) -> str:
+    """Build the "wrong number of Y rows" error text.
+
+    This is the one source of the message. ``_validate_output`` and the
+    design-based methods that check the row count themselves (such as eFAST)
+    all call it, so the wording cannot drift between methods.
+
+    Args:
+        n_rows: The number of rows ``Y`` actually has.
+        n_expected: The number of rows ``Y`` must have.
+        expected_from: What fixes ``n_expected``. ``"X"`` means the caller's
+            input matrix. Any other value names the design attribute to
+            evaluate, such as ``"design.samples"``.
+        detail: Optional text placed after the expected count, such as how
+            the design arrives at that count. Include a leading space.
+
+    Returns:
+        The error text, naming both the mismatch and how to fix it.
+    """
+    if expected_from == "X":
+        return (
+            f"Y has {n_rows} rows but X has {n_expected}{detail}; "
+            "pass one row of Y for each row of X, as (N,), (N, K), or (N, T, K)"
+        )
+    return (
+        f"Y has {n_rows} rows but the design has {n_expected}{detail}; "
+        f"evaluate the model once per row of {expected_from}"
+    )
+
+
 def _validate_output(
     Y: Array,
     n_expected: int | None,
@@ -168,15 +203,7 @@ def _validate_output(
     if Y.shape[0] == 0:
         raise ValueError("Y must have at least one row, got 0")
     if n_expected is not None and Y.shape[0] != n_expected:
-        if expected_from == "X":
-            raise ValueError(
-                f"Y has {Y.shape[0]} rows but X has {n_expected}; "
-                "pass one row of Y for each row of X, as (N,), (N, K), or (N, T, K)"
-            )
-        raise ValueError(
-            f"Y has {Y.shape[0]} rows but the design has {n_expected}; "
-            f"evaluate the model once per row of {expected_from}"
-        )
+        raise ValueError(row_count_message(int(Y.shape[0]), n_expected, expected_from))
     if problem is not None and problem.output_names is not None:
         n_outputs = 1 if Y.ndim == 1 else Y.shape[-1]
         if len(problem.output_names) != n_outputs:

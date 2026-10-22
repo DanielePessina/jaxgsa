@@ -144,6 +144,19 @@ def test_morris_row_count_error_names_the_design(problem: Problem) -> None:
         jaxgsa.morris.analyze(samples, jnp.zeros(n + 2), verbose=False)
 
 
+@pytest.mark.parametrize("entry", ["indices", "analyze"])
+def test_efast_row_count_error_names_the_design(problem: Problem, entry: str) -> None:
+    design = jaxgsa.efast.sample(problem, 129, seed=0)
+    n = design.n_runs
+    fn = getattr(jaxgsa.efast, entry)
+    kwargs = {"verbose": False} if entry == "analyze" else {}
+    pattern = rf"the design has {n} \(n_runs = n_per_curve \* D"
+    with pytest.raises(ValueError, match=pattern) as info:
+        fn(design, jnp.zeros(n + 5), **kwargs)
+    assert "evaluate the model once per row of design.samples" in str(info.value)
+    assert "samples.samples" not in str(info.value)
+
+
 def test_given_data_row_count_error_still_names_x(problem: Problem) -> None:
     X = jaxgsa.sampling.monte_carlo(problem, 64, seed=0)
     with pytest.raises(ValueError, match="Y has 60 rows but X has 64"):

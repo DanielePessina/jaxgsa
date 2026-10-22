@@ -15,8 +15,10 @@ libraries on demand. It is outside the default test collection.
 Because of that, every oracle-derived literal in the suite carries a provenance
 block in the test docstring. The block names five things:
 
-1. the tier (T0 closed form, T1 recorded external literal, T2 external library
-   at test time, T4 internal consistency only),
+1. the tier (T0 closed form, T1 numbers published in a paper, T2
+   permissive-licence library, run at test time or recorded by a script
+   here, T3 copyleft library run in a separate process, T4 internal
+   consistency only),
 2. the oracle,
 3. its exact version,
 4. the date it was run,
@@ -67,9 +69,11 @@ jaxgsa with it at run time. It covers:
 - SALib Morris parity on the same expanded design.
 - SALib `delta`: the plug-in estimator and the bias-corrected end-to-end values.
 - PAWN against SALib's median, and against `scipy.stats.ks_2samp` on tied outputs.
-- Optimal transport against POT: the 1-D W2 semantics, per-bin W2, the Sinkhorn
-  solver, the multivariate pipeline against exact `emd2`, the Ishigami `x1`
-  index and the quantile-rank split.
+- Optimal transport against POT: the W2 convention of `ot.wasserstein_1d`,
+  per-bin W2, the Sinkhorn solver, and the multivariate pipeline against exact
+  `emd2`.
+
+The SALib and POT tests skip when the library is not installed.
 
 The file name does not match `test_*.py`, so `uv run pytest` does not collect
 it. CI does not run it. Run it by hand:

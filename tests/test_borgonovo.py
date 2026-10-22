@@ -509,7 +509,7 @@ class TestDeltaXarray:
 
 class TestPlischkeHeuristic:
     def test_matches_reference_class_counts(self):
-        """Tier T2 (external library): class counts of the Plischke heuristic.
+        """Tier T2 (permissive-licence library, recorded values): Plischke class counts.
 
         Provenance:
 

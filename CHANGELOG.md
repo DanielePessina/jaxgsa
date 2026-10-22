@@ -1,12 +1,12 @@
 # Changelog
 
-## 1.2.1 (unreleased)
+## 1.2.1 (2026-10-22)
 
 ### Documentation
 
 - README: a "Capabilities" table replaces "Choose a method". It lists which methods support each capability, with a link to an example. It does not recommend a method.
 - New guide pages: "Sensitivity indices from existing data", "Failed model runs", "Differentiable Sobol indices in JAX" and "Sobol indices on GPU". The GPU page says the published benchmarks are CPU only.
-- New "Validation" page: each method's reference checks, their tier and tolerance, and the test file.
+- New "Validation" page: each method's reference checks, their tier and tolerance, and the test file. The page, `scripts/oracles/README.md` and the test docstrings now use the same T0 to T4 tiers.
 - Tests: the OpenTURNS Sobol estimator values and the SALib delta class counts are back in the suite as saved values. Live comparisons against SALib, SciPy and POT moved to `scripts/oracles/external_checks.py`, outside the default pytest run (`uv run --extra dev pytest scripts/oracles/external_checks.py`, about 20 s).
 - Concepts: why an S1 estimate can come out slightly above ST. The studio's Sobol result card says the same.
 - Getting started: a field-by-field guide to the verbose output.
@@ -15,9 +15,9 @@
 ### Fixed
 
 - Zenodo labelled every deposit from 1.1.0 to 1.2.0 as version 1.1.0, because `.zenodo.json` pinned the version. The field is gone, so Zenodo now takes the version from the release tag.
-- The shape error for a wrong number of output rows now says `design.samples`, as the docs do.
-- Getting started: the bootstrap example runs on its own. The page explains why the lower bound of a near-zero index can fall below zero. The citation uses the concept DOI, which always resolves to the latest version.
-- Studio: the footer shows the current version. At phone width the low and high fields are no longer cut off. Each input field, select and table header has an accessible name. The hero button says "Run the demo", because the run takes under a second.
+- The shape error for a wrong number of output rows now says `design.samples`, as the docs do. eFAST now uses the same shared message.
+- Getting started: the bootstrap example runs on its own. The page explains why the lower bound of a near-zero index can fall below zero. The citation uses the concept DOI, which always resolves to the latest version. For reproducibility, the page says to cite the version DOI of the release you ran.
+- Studio: the footer shows the current version. The build reads it from `pyproject.toml`, so it cannot fall behind. At phone width the low and high fields are no longer cut off. Each input field, select and table header has an accessible name. The hero button says "Run the demo", because the run takes under a second.
 
 ## 1.2.0 (2026-10-21)
 

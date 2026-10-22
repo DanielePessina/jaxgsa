@@ -422,7 +422,7 @@ class TestOTPointCloud:
 
     @pytest.mark.slow
     def test_multivariate_matches_pot_sinkhorn(self):
-        """Tier T1 (reference implementation): the point-cloud index against POT.
+        """Tier T2 (permissive-licence library): the point-cloud index against POT.
 
         The oracle rebuilds the multivariate index from POT's log-domain
         Sinkhorn solver on a 64-point, two-output cloud. Class ``m`` of a
@@ -1156,7 +1156,7 @@ class TestS1AndAboveDummy:
         )
 
     def test_s1_agrees_with_borgonovo_s1(self, ishigami_xy_4k, ot_ishigami):
-        """Tier T2 (cross-estimator): both given-data S1 estimates coincide."""
+        """Tier T4 (cross-estimator): both given-data S1 estimates coincide."""
         X, Y = ishigami_xy_4k
         delta_result = jaxgsa.borgonovo.analyze(ishigami.PROBLEM, X, Y)
         np.testing.assert_allclose(

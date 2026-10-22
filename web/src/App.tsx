@@ -34,7 +34,6 @@ import {
   rowsFromProblem,
   type ProblemRow,
 } from "@/site/problemRows";
-import { version } from "../package.json";
 import type { ProblemSpec } from "@/jaxgsa/sampling";
 
 function InstallCommand({ command }: { command: string }) {
@@ -724,7 +723,7 @@ export default function App() {
             <Badge variant="outline" className="font-mono text-xs">
               WASM · f64
             </Badge>
-            <span className="font-mono text-xs">jaxgsa {version} reference</span>
+            <span className="font-mono text-xs">jaxgsa {__JAXGSA_VERSION__} reference</span>
           </span>
         </div>
       </footer>
