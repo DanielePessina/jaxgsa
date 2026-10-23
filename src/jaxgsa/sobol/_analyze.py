@@ -795,7 +795,7 @@ def _analyze_no_bootstrap(
 class SobolIndices(NamedTuple):
     """Sobol indices as plain arrays, returned by :func:`indices`.
 
-    Tuple unpacking works: ``S1, ST, S2 = indices(samples, Y)``.
+    Tuple unpacking works: ``S1, ST, S2 = indices(design, Y)``.
 
     Attributes:
         S1: First-order indices, the same array as ``SobolResult.S1``.
@@ -830,8 +830,8 @@ def indices(
     an index with respect to the input distribution parameters::
 
         def s1(theta):
-            Y = model(samples.transform(theta))
-            return jaxgsa.sobol.indices(samples, Y)[0]
+            Y = model(design.transform(theta))
+            return jaxgsa.sobol.indices(design, Y)[0]
 
         dS1_dtheta = jax.jacrev(s1)(theta)
 

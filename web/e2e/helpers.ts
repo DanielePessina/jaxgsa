@@ -114,7 +114,7 @@ export class Studio {
   }
 
   get demoButton(): Locator {
-    return this.page.getByRole("button", { name: "Run the 2-minute demo" });
+    return this.page.getByRole("button", { name: "Run the demo" });
   }
 
   get alerts(): Locator {

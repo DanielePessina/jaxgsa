@@ -37,10 +37,19 @@ that an input matters. [Sobol'](/api/sobol) and [eFAST](/api/efast) estimate the
 from planned model runs; [PCE](/api/pce) and [HDMR](/api/hdmr) can derive them
 from a fitted surrogate.
 
-Estimates from a finite number of runs can be noisy. Small negative estimates,
-or an estimated $S_1$ slightly above $S_T$, do not change the definitions.
-Check confidence intervals or increase the design before interpreting small
-differences. See the [Sobol' API](/api/sobol) for sampling requirements.
+Estimates from a finite number of runs can be noisy. Small negative estimates
+are possible for the same reason.
+
+### Why can $S_1$ come out above $S_T$?
+
+In theory, $S_T \ge S_1$ for every input. Each estimate has sampling error,
+and the two errors are not the same. For an input with few interactions, $S_1$
+and $S_T$ are almost equal. The estimate of $S_1$ can then fall slightly above
+the estimate of $S_T$. For example, estimates of 0.467 and 0.447 can come from true values
+that are nearly equal. This does not mean the definitions fail. Check the
+confidence intervals. If they overlap, treat the two values as equal. If the difference
+matters for your decision, increase $N$. See the
+[Sobol' API](/api/sobol) for sampling requirements.
 For a study of convergence and validation, see
 [Sarrazin, Pianosi & Wagener (2016)](#ref-sarrazin-2016).
 

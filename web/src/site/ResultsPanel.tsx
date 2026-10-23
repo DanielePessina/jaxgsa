@@ -37,6 +37,8 @@ function interpretation(result: AnalysisResult): string | null {
       return "PAWN is the largest KS gap between a parameter's conditioned and the overall output distribution. Higher means the parameter matters; 0 means no effect.";
     case "borgonovo":
       return "delta measures how much fixing a parameter shifts the whole output distribution. Higher means the parameter matters beyond variance; S1 is the usual variance share for comparison.";
+    case "sobol":
+      return "S1 is the variance share from one parameter alone. ST adds its interactions. In theory ST is at least S1; with noise, S1 can land slightly above ST, so check the intervals or raise N.";
     default:
       return null;
   }

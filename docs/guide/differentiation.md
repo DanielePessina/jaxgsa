@@ -127,7 +127,7 @@ def ishigami(X):
     return jnp.sin(x1) + 7.0 * jnp.sin(x2) ** 2 + 0.1 * x3**4 * jnp.sin(x1)
 
 
-samples = jaxgsa.sobol.sample(PROBLEM, n_samples=8192, seed=0)
+design = jaxgsa.sobol.sample(PROBLEM, n_samples=8192, seed=0)
 theta = {
     name: {"low": -np.pi, "high": np.pi}
     for name in PROBLEM.names
@@ -135,9 +135,9 @@ theta = {
 
 
 def first_order(parameters):
-    X = samples.transform(parameters)
+    X = design.transform(parameters)
     Y = ishigami(X)
-    S1 = jaxgsa.sobol.indices(samples, Y).S1
+    S1 = jaxgsa.sobol.indices(design, Y).S1
     return S1
 
 

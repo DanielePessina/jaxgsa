@@ -59,7 +59,7 @@ test.describe("keyboard", () => {
   }
 
   test("demo, run and download are reachable with Tab and Enter", async ({ studio, page }) => {
-    await tabTo(studio, /Run the 2-minute demo/);
+    await tabTo(studio, /Run the demo/);
     await page.keyboard.press("Enter");
     await expect(studio.resultCards).toHaveCount(5, { timeout: 120_000 });
     await expect(studio.stageButton("results")).toHaveAttribute("aria-current", "step");

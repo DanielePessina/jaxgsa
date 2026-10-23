@@ -8,9 +8,9 @@ Example::
 
     from jaxgsa import efast
 
-    samples = efast.sample(problem, n_per_curve=4096, seed=42)
-    Y = model(samples.samples)
-    result = efast.analyze(samples, Y)
+    design = efast.sample(problem, n_per_curve=4096, seed=42)
+    Y = model(design.samples)
+    result = efast.analyze(design, Y)
 
 ``efast.indices`` is the same estimator with no diagnostics, as a bare tuple
 of arrays that ``jit``, ``vmap`` and ``jacrev`` accept.

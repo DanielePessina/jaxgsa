@@ -2,7 +2,8 @@
 
 Provenance, as ``scripts/oracles/README.md`` requires:
 
-1. **Tier**: T2 (external library at test time).
+1. **Tier**: T2 (permissive-licence library). The test compares with values
+   this script recorded, so OpenTURNS is not needed at test time.
 2. **Oracle**: OpenTURNS' ``SaltelliSensitivityAlgorithm``,
    ``JansenSensitivityAlgorithm``, ``MartinezSensitivityAlgorithm`` and
    ``MauntzKucherenkoSensitivityAlgorithm``. It is BSD-licensed and

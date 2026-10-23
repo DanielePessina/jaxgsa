@@ -50,7 +50,7 @@ search curve sweeps each input continuously and an unordered level code has no
 continuous sweep.
 
 ```python
-samples = jaxgsa.efast.sample(problem, n_per_curve=1024, seed=0)
+design = jaxgsa.efast.sample(problem, n_per_curve=1024, seed=0)
 ```
 
 ```
@@ -71,10 +71,10 @@ jaxgsa.efast.sample: D=3, n_curves=3, n_per_curve=1024, n_runs=3072, M=4, omega_
 You can save and reload `EFASTSamples` like the other design classes:
 
 ```python
-samples.save("run.npz")
+design.save("run.npz")
 back = jaxgsa.efast.EFASTSamples.load("run.npz")
 back.n_per_curve, back.M            # 1024, 4
-np.array_equal(back.samples, samples.samples)   # True
+np.array_equal(back.samples, design.samples)   # True
 ```
 
 One compressed NPZ holds the sample matrix plus a JSON metadata blob with the
@@ -97,7 +97,7 @@ analyze(
 ) -> EFASTResult | IrregularResult
 ```
 
-`Y` holds the model output at each row of `samples.samples`, in that
+`Y` holds the model output at each row of `design.samples`, in that
 row order, as `(n_runs,)`, `(n_runs, K)` or `(n_runs, T, K)`.
 
 For output channels with different time grids, pass a ragged list or dict of
@@ -105,7 +105,7 @@ For output channels with different time grids, pass a ragged list or dict of
 grid. See [Irregular output grids](/examples/irregular-outputs).
 
 ```python
-result = jaxgsa.efast.analyze(samples, ishigami(samples.samples), verbose=False)
+result = jaxgsa.efast.analyze(design, ishigami(design.samples), verbose=False)
 
 result.S1       # Array([0.3077, 0.4414, 0.    ], dtype=float32)
 result.ST       # Array([0.5507, 0.4625, 0.2393], dtype=float32)

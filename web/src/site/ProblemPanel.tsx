@@ -74,17 +74,17 @@ export function ProblemPanel({
           <div className="overflow-x-auto">
             <table className="w-full border-collapse">
               <thead>
-                <tr className="border-b border-border">
-                  <th className="px-2 pb-2 text-left font-mono text-xs uppercase tracking-widest text-muted-foreground">
+                <tr className="border-b border-border max-sm:sr-only">
+                  <th scope="col" className="px-2 pb-2 text-left font-mono text-xs uppercase tracking-widest text-muted-foreground">
                     name
                   </th>
-                  <th className="px-2 pb-2 text-left font-mono text-xs uppercase tracking-widest text-muted-foreground">
+                  <th scope="col" className="px-2 pb-2 text-left font-mono text-xs uppercase tracking-widest text-muted-foreground">
                     distribution
                   </th>
-                  <th className="px-2 pb-2 text-left font-mono text-xs uppercase tracking-widest text-muted-foreground">
+                  <th scope="col" className="px-2 pb-2 text-left font-mono text-xs uppercase tracking-widest text-muted-foreground">
                     parameters
                   </th>
-                  <th className="w-10" />
+                  <th scope="col" className="w-10"><span className="sr-only">remove</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -92,10 +92,11 @@ export function ProblemPanel({
                   const err = rowErrors[i];
 
                   return (
-                    <tr key={i} className="border-b border-border/60">
+                    <tr key={i} className="border-b border-border/60 max-sm:flex max-sm:flex-wrap max-sm:items-center">
                       <td className="px-2 py-2">
                         <Input
                           value={row.name}
+                          aria-label={`Name of input ${i + 1}`}
                           placeholder="x1"
                           onChange={(e) => set(i, { name: e.target.value })}
                           className="w-24 font-mono"
@@ -109,7 +110,7 @@ export function ProblemPanel({
                             set(i, { dist: v as DistKind });
                           }}
                         >
-                          <SelectTrigger className="w-32 font-mono text-xs">
+                          <SelectTrigger aria-label={`Distribution of input ${i + 1}`} className="w-32 font-mono text-xs">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
@@ -122,11 +123,12 @@ export function ProblemPanel({
                           </SelectContent>
                         </Select>
                       </td>
-                      <td className="px-2 py-2">
+                      <td className="px-2 py-2 max-sm:order-last max-sm:basis-full">
                         {row.dist === "uniform" ? (
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
                             <Input
                               value={row.low}
+                            aria-label={`Lower bound of input ${i + 1}`}
                               placeholder="low"
                               onChange={(e) => set(i, { low: e.target.value })}
                               className="w-24 font-mono"
@@ -134,6 +136,7 @@ export function ProblemPanel({
                             <span className="font-mono text-xs text-muted-foreground">to</span>
                             <Input
                               value={row.high}
+                            aria-label={`Upper bound of input ${i + 1}`}
                               placeholder="high"
                               onChange={(e) => set(i, { high: e.target.value })}
                               className="w-24 font-mono"
@@ -143,24 +146,28 @@ export function ProblemPanel({
                           <div className="flex flex-wrap items-center gap-1.5">
                             <Input
                               value={row.mean}
+                            aria-label={`Mean of input ${i + 1}`}
                               placeholder="mean"
                               onChange={(e) => set(i, { mean: e.target.value })}
                               className="w-20 font-mono"
                             />
                             <Input
                               value={row.variance}
+                            aria-label={`Variance of input ${i + 1}`}
                               placeholder="variance"
                               onChange={(e) => set(i, { variance: e.target.value })}
                               className="w-24 font-mono"
                             />
                             <Input
                               value={row.gLow}
+                            aria-label={`Truncation lower bound (optional) of input ${i + 1}`}
                               placeholder="low (optional)"
                               onChange={(e) => set(i, { gLow: e.target.value })}
                               className="w-28 font-mono"
                             />
                             <Input
                               value={row.gHigh}
+                            aria-label={`Truncation upper bound (optional) of input ${i + 1}`}
                               placeholder="high (optional)"
                               onChange={(e) => set(i, { gHigh: e.target.value })}
                               className="w-28 font-mono"
@@ -225,6 +232,7 @@ export function ProblemPanel({
               load demo problem
             </span>
             <MonoSelect
+              aria-label="Demo problem"
               value={demoId}
               onChange={(v) => {
                 // SAFETY: MonoSelect options are generated exclusively from DEMOS.

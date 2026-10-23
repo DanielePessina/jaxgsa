@@ -51,7 +51,9 @@ export function MonoSelect({
   onChange,
   children,
   className = "",
+  "aria-label": ariaLabel,
 }: {
+  "aria-label"?: string;
   value: string;
   onChange: (v: string) => void;
   children: React.ReactNode;
@@ -59,6 +61,7 @@ export function MonoSelect({
 }) {
   return (
     <select
+      aria-label={ariaLabel}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       className={`rounded-sm border border-input bg-background px-2 py-1 font-mono text-xs ${className}`}
