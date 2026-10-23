@@ -15,8 +15,10 @@ from __future__ import annotations
 import json
 import math
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 import numpy as np
 
@@ -29,7 +31,11 @@ from jaxgsa._core.samples import (
     _save_target,
 )
 from jaxgsa._core.sampling import _transform_samples, check_seed
-from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
+from jaxgsa._core.validation import (
+    _raise_categorical_design,
+    _raise_correlated_design,
+    _raise_refused_marginals,
+)
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
 
@@ -363,6 +369,27 @@ def _assign_frequencies(D: int, assigned_max: int) -> np.ndarray:
     return np.floor(np.linspace(1, assigned_max, D - 1)).astype(np.int64)
 
 
+_OPEN_TAIL_REASON = (
+    "A lognormal or Weibull input has an open upper tail. A long tail spreads "
+    "the output variance past the M harmonics that eFAST reads, so S1 comes "
+    "out biased low, and more samples do not remove the bias. Measured "
+    "against an exact 0.53: 0.36 for LognormalSpec(0, 1) and 0.45 for "
+    "WeibullSpec(0.8, 1). Lighter tails, such as WeibullSpec(2, 1), show only "
+    "the bias a Gaussian input shows, but jaxgsa 1.3 refuses both families "
+    "whole rather than per parameter."
+)
+
+REFUSED_MARGINALS: Mapping[str, str] = MappingProxyType(
+    {"lognormal": _OPEN_TAIL_REASON, "weibull": _OPEN_TAIL_REASON}
+)
+"""The marginal families eFAST refuses, with the reason, for its registry record.
+
+Triangular and beta are bounded and accepted: their S1 bias at the default
+``M`` is the same as for a Gaussian input (measured 0.507 to 0.515 against an
+exact 0.533).
+"""
+
+
 def sample(
     problem: Problem,
     n_per_curve: int,
@@ -416,11 +443,13 @@ def sample(
             a dependence structure, and the search-curve design assumes
             independent inputs. ``problem`` has categorical parameters, and the
             search curve sweeps each input continuously, which has no meaning
-            for unordered level codes.
+            for unordered level codes. ``problem`` has a lognormal or Weibull
+            parameter, whose open upper tail can bias S1 low.
     """
     check_seed(seed, "jaxgsa.efast.sample")
     _raise_correlated_design(problem, "jaxgsa.efast.sample")
     _raise_categorical_design(problem, "jaxgsa.efast.sample")
+    _raise_refused_marginals(problem, "jaxgsa.efast.sample", REFUSED_MARGINALS, design=True)
     if M < 1:
         raise ValueError(f"M must be >= 1, got {M}")
 

@@ -29,6 +29,7 @@ from jaxgsa._core.invalid import InvalidUnit as _InvalidUnit
 from jaxgsa._core.registry import MethodSpec as _MethodSpec
 from jaxgsa._core.registry import register as _register
 from jaxgsa.dgsm._analyze import DGSMIndices, analyze, indices
+from jaxgsa.dgsm._poincare import REFUSED_MARGINALS as _REFUSED_MARGINALS
 from jaxgsa.dgsm._poincare import axis_constants, poincare_constant
 from jaxgsa.dgsm._result import DGSMResult
 
@@ -54,5 +55,6 @@ _SPEC = _register(
         categorical="refuses",
         bootstrap="n_bootstrap",
         invalid_unit=_InvalidUnit.ROW,
+        refused_marginals=_REFUSED_MARGINALS,
     )
 )

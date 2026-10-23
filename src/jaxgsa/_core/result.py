@@ -44,6 +44,7 @@ from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa._core.warning_types import JaxgsaWarning
 
 if TYPE_CHECKING:
+    import pandas as pd
     from jax import Array
 
     from jaxgsa.problem import Problem
@@ -175,6 +176,64 @@ def _attr_value(value: Any) -> Any:
     if array.ndim == 0 and array.dtype.kind in "iufc":
         return array.item()
     return str(value)
+
+
+_FRAME_DIM_ORDER = ("time", "output", "param")
+"""The dimensions a variable may have to appear in :func:`param_frame`, in index order."""
+
+_FRAME_DIMS = frozenset(_FRAME_DIM_ORDER)
+
+_BOUND_SUFFIXES = ("_lower", "_upper")
+
+
+def param_frame(ds: xr.Dataset) -> pd.DataFrame:
+    """Turn the per-parameter variables of a result dataset into a tidy table.
+
+    A variable is kept when it has a ``param`` dimension and no other
+    dimension than ``time`` and ``output``. That keeps one value per input
+    (per output and time point) and leaves out the pair matrices (``S2``,
+    on ``param_i``/``param_j``), HDMR's ``term`` arrays, Kucherenko's
+    ``subset`` arrays and the per-output scalars such as ``variance``.
+
+    The columns keep the dataset's variable names. Each point estimate is
+    followed by its ``*_lower`` and ``*_upper`` bounds when the dataset has
+    them. The index has one level per dimension that any kept variable has,
+    in the order ``time``, ``output``, ``param``. So ``param`` is the last
+    level. A variable that lacks a dimension is repeated along it.
+
+    Args:
+        ds: A dataset produced by a result's ``to_dataset``.
+
+    Returns:
+        A :class:`pandas.DataFrame` indexed by ``param`` (and ``time`` and
+        ``output`` when the result has them). ``DataFrame.attrs`` holds a
+        copy of the dataset attributes.
+
+    Raises:
+        ValueError: If no variable in ``ds`` has a ``param`` dimension.
+    """
+    kept = [
+        str(name)
+        for name, var in ds.data_vars.items()
+        if "param" in var.dims and set(var.dims) <= _FRAME_DIMS
+    ]
+    if not kept:
+        raise ValueError(
+            "this result has no per-parameter variable to put in a table; use to_dataset() instead"
+        )
+    bounds = {name for name in kept if name.endswith(_BOUND_SUFFIXES)}
+    columns: list[str] = []
+    for name in kept:
+        if name in bounds and name.removesuffix("_lower").removesuffix("_upper") in kept:
+            continue
+        columns.append(name)
+        columns.extend(f"{name}{sfx}" for sfx in _BOUND_SUFFIXES if f"{name}{sfx}" in bounds)
+    present = {dim for name in kept for dim in ds[name].dims}
+    dims = [dim for dim in _FRAME_DIM_ORDER if dim in present]
+    frame = ds[columns].to_dataframe(dim_order=dims)
+    frame = frame[columns]
+    frame.attrs = dict(ds.attrs)
+    return frame
 
 
 @dataclass(frozen=True)
@@ -413,6 +472,36 @@ class SchemaResult:
             _name_axes(spec)
 
         return xr.Dataset(data_vars, coords=coords, attrs=self._dataset_attrs())
+
+    def to_pandas(self, time_coords: np.ndarray | list | None = None) -> pd.DataFrame:
+        """Convert the per-parameter indices to a tidy pandas DataFrame.
+
+        The table is built from :meth:`to_dataset`. It has one row per
+        input, labelled with ``problem.names`` on an index level called
+        ``param``. A result with several outputs or time points adds
+        ``output`` and ``time`` index levels in front of ``param``.
+
+        There is one column per index, named as in the dataset, and each
+        index is followed by its ``*_lower`` and ``*_upper`` confidence
+        bounds when the result has them.
+
+        Variables without a single ``param`` axis are not in the table:
+        second-order matrices such as ``S2``, HDMR's per-term arrays,
+        Kucherenko's subset arrays and per-output scalars such as
+        ``variance``. Read those from the dataset, for example
+        ``result.to_dataset()["S2"].to_pandas()`` for a scalar output. An
+        HDMR table therefore has only ``ST``; its first-order values are
+        ``result.S1``.
+
+        Args:
+            time_coords: Coordinate values for the time dimension of a
+                time-resolved result. Defaults to integer indices.
+
+        Returns:
+            A :class:`pandas.DataFrame`. ``DataFrame.attrs`` holds the same
+            provenance attributes as the dataset.
+        """
+        return param_frame(self.to_dataset(time_coords))
 
     def __repr__(self) -> str:
         """Return a one-line summary: field shapes, then provenance.

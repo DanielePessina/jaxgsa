@@ -16,6 +16,7 @@ import math
 from typing import Any, Mapping, TypeAlias
 
 import jax
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
@@ -23,7 +24,14 @@ from jax.scipy.special import ndtr, ndtri
 from scipy.stats import norm, truncnorm
 
 from jaxgsa._core.precision import unit_clip_bounds
-from jaxgsa.problem import CategoricalSpec, Problem, UniformSpec
+from jaxgsa.problem import (
+    _CONTINUOUS_FAMILY_SPECS,
+    BetaSpec,
+    CategoricalSpec,
+    GaussianSpec,
+    Problem,
+    UniformSpec,
+)
 
 
 def check_seed(seed: object, who: str) -> None:
@@ -243,7 +251,7 @@ def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray
             transformed[:, idx] = _transform_uniform(samples_unit[:, idx], spec.low, spec.high)
         elif isinstance(spec, CategoricalSpec):
             transformed[:, idx] = _transform_categorical(samples_unit[:, idx], spec.probs)
-        else:
+        elif isinstance(spec, GaussianSpec):
             transformed[:, idx] = _transform_gaussian(
                 samples_unit[:, idx],
                 spec.mean,
@@ -251,6 +259,12 @@ def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray
                 low=spec.low,
                 high=spec.high,
             )
+        elif isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
+            # Same clip as the Gaussian: the lognormal and Weibull inverse
+            # CDFs are infinite at u = 1, and it is harmless for the bounded
+            # triangular and beta families.
+            clipped = np.clip(samples_unit[:, idx], UNIT_CLIP, 1.0 - UNIT_CLIP)
+            transformed[:, idx] = spec.ppf(clipped)
 
     return transformed
 
@@ -280,6 +294,9 @@ def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray
 _THETA_FIELDS: dict[str, frozenset[str]] = {
     "uniform": frozenset({"low", "high"}),
     "gaussian": frozenset({"mean", "variance", "low", "high"}),
+    # Each continuous family declares its own. The beta shape parameters a
+    # and b are not among them; see _validate_theta for the refusal.
+    **{cls.dist: cls.theta_fields for cls in _CONTINUOUS_FAMILY_SPECS},
 }
 
 
@@ -417,6 +434,16 @@ def _validate_theta(problem: Problem, theta: Theta) -> None:
                 f"Known parameters: {list(problem.names)}"
             )
         dist = problem.input_specs[problem.names.index(name)].dist
+        if dist == "beta":
+            shape_fields = sorted(set(fields) & {"a", "b"})
+            if shape_fields:
+                raise ValueError(
+                    f"theta[{name!r}] sets the beta shape parameter(s) {shape_fields}, "
+                    "which transform() cannot differentiate: JAX has no inverse of the "
+                    "regularized incomplete beta function, and its betainc has no "
+                    "gradient in a or b. Only 'low' and 'high' of a beta input can "
+                    "be varied."
+                )
         allowed = _THETA_FIELDS.get(dist, frozenset())
         unknown = sorted(set(fields) - allowed)
         if unknown:
@@ -433,8 +460,55 @@ def _validate_theta(problem: Problem, theta: Theta) -> None:
             )
 
 
+def beta_unit_quantiles(
+    problem: Problem, samples_unit: Array | np.ndarray
+) -> dict[int, np.ndarray]:
+    """Compute the standard-beta quantiles of every beta column, once, on the host.
+
+    The beta inverse CDF has no JAX implementation. Its standard quantiles
+    depend only on the unit design and the fixed shape parameters, so a
+    design computes them once and passes them to every
+    :func:`_jax_transform_samples` call.
+
+    Args:
+        problem: Problem whose beta parameters are read.
+        samples_unit: Unit-cube samples, shape ``(N, D)``. Must be concrete
+            when the problem has a beta parameter.
+
+    Returns:
+        ``betaincinv(a, b, u)`` in float64, keyed by column index, for each
+        beta column. Empty when the problem has no beta parameter.
+
+    Raises:
+        ValueError: If the problem has a beta parameter and ``samples_unit``
+            is traced.
+    """
+    beta = [
+        name
+        for name, spec in zip(problem.names, problem.input_specs)
+        if isinstance(spec, BetaSpec)
+    ]
+    if beta and isinstance(samples_unit, jax.core.Tracer):
+        raise ValueError(
+            f"Parameter {beta[0]!r} is beta-distributed; its inverse CDF is computed "
+            "on the host, so the unit design must be a concrete array, not a "
+            "traced one"
+        )
+    quantiles: dict[int, np.ndarray] = {}
+    for idx, spec in enumerate(problem.input_specs):
+        if isinstance(spec, BetaSpec):
+            unit_column = np.clip(
+                np.asarray(samples_unit[:, idx], dtype=np.float64), UNIT_CLIP, 1.0 - UNIT_CLIP
+            )
+            quantiles[idx] = spec.unit_quantiles(unit_column)
+    return quantiles
+
+
 def _jax_transform_samples(
-    problem: Problem, samples_unit: Array | np.ndarray, theta: Theta | None = None
+    problem: Problem,
+    samples_unit: Array | np.ndarray,
+    theta: Theta | None = None,
+    unit_quantiles: Mapping[int, np.ndarray] | None = None,
 ) -> Array:
     """Transform unit-cube samples into declared marginals, differentiably.
 
@@ -448,18 +522,27 @@ def _jax_transform_samples(
         samples_unit: Unit-cube samples, shape ``(N, D)``.
         theta: Optional overrides keyed by parameter name, then field name.
             ``None`` means "use the problem's own values throughout".
+        unit_quantiles: The beta columns' standard quantiles, from
+            :func:`beta_unit_quantiles` on the same ``samples_unit``. A design
+            computes them once and passes them on every call. ``None``
+            computes them here, which needs a concrete ``samples_unit``.
 
     Returns:
         Samples in physical units, shape ``(N, D)``.
 
     Raises:
-        ValueError: If any parameter is categorical, or if ``theta`` names an
-            unknown parameter or field.
+        ValueError: If any parameter is categorical, if ``theta`` names an
+            unknown parameter or field, or if the problem has a beta
+            parameter, ``unit_quantiles`` is ``None`` and ``samples_unit`` is
+            traced.
     """
     if theta is None:
         theta = {}
     else:
         _validate_theta(problem, theta)
+
+    if unit_quantiles is None:
+        unit_quantiles = beta_unit_quantiles(problem, samples_unit)
 
     samples_unit = jnp.asarray(samples_unit)
     columns = []
@@ -477,7 +560,7 @@ def _jax_transform_samples(
                     unit_column, fields.get("low", spec.low), fields.get("high", spec.high)
                 )
             )
-        else:
+        elif isinstance(spec, GaussianSpec):
             columns.append(
                 _jax_transform_gaussian(
                     unit_column,
@@ -485,6 +568,18 @@ def _jax_transform_samples(
                     fields.get("variance", spec.variance),
                     low=fields.get("low", spec.low),
                     high=fields.get("high", spec.high),
+                )
+            )
+        elif isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
+            # Same clip as the Gaussian, brought inside the column dtype. The
+            # Weibull shape gradient is NaN at u = 0, and the lognormal and
+            # Weibull inverse CDFs are infinite at u = 1.
+            clip_lo, clip_hi = unit_clip_bounds(UNIT_CLIP, unit_column.dtype)
+            columns.append(
+                spec.jax_ppf(
+                    jnp.clip(unit_column, clip_lo, clip_hi),
+                    fields,
+                    unit_quantiles=unit_quantiles.get(idx),
                 )
             )
 
@@ -551,7 +646,7 @@ def _inverse_transform_samples(problem: Problem, samples_physical: np.ndarray) -
             unit[:, idx] = _inverse_transform_uniform(
                 samples_physical[:, idx], spec.low, spec.high
             )
-        else:
+        elif isinstance(spec, GaussianSpec):
             unit[:, idx] = _inverse_transform_gaussian(
                 samples_physical[:, idx],
                 spec.mean,
@@ -559,6 +654,8 @@ def _inverse_transform_samples(problem: Problem, samples_physical: np.ndarray) -
                 low=spec.low,
                 high=spec.high,
             )
+        elif isinstance(spec, _CONTINUOUS_FAMILY_SPECS):
+            unit[:, idx] = spec.cdf(samples_physical[:, idx])
 
     return unit
 

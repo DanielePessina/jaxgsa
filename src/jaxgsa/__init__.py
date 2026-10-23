@@ -25,14 +25,22 @@ from . import (
 from ._core.invalid import InvalidReport, InvalidUnit, OnInvalid
 from ._core.warning_types import JaxgsaWarning
 from .problem import (
+    BetaInputSpec,
+    BetaSpec,
     CategoricalInputSpec,
     CategoricalSpec,
     GaussianInputSpec,
     GaussianSpec,
     InputSpec,
+    LognormalInputSpec,
+    LognormalSpec,
     Problem,
+    TriangularInputSpec,
+    TriangularSpec,
     UniformInputSpec,
     UniformSpec,
+    WeibullInputSpec,
+    WeibullSpec,
 )
 
 try:
@@ -41,6 +49,8 @@ except PackageNotFoundError:  # running from a source tree without the package
     __version__ = "unknown"
 
 __all__ = [
+    "BetaInputSpec",
+    "BetaSpec",
     "CategoricalInputSpec",
     "CategoricalSpec",
     "GaussianInputSpec",
@@ -49,10 +59,16 @@ __all__ = [
     "InvalidReport",
     "InvalidUnit",
     "JaxgsaWarning",
+    "LognormalInputSpec",
+    "LognormalSpec",
     "OnInvalid",
     "Problem",
+    "TriangularInputSpec",
+    "TriangularSpec",
     "UniformInputSpec",
     "UniformSpec",
+    "WeibullInputSpec",
+    "WeibullSpec",
     "__version__",
     "benchmarks",
     "borgonovo",

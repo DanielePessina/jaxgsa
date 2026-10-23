@@ -8,8 +8,9 @@ it can also predict at new points and give Shapley effects.
 import itertools
 import math
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import lru_cache, partial
+from types import MappingProxyType
 from typing import Literal, NamedTuple, cast
 
 import jax
@@ -26,6 +27,7 @@ from jaxgsa._core.entry import (
     at_least,
     bootstrap_checks,
     check_scalars,
+    gates,
     positive_int,
     prepare,
     require,
@@ -80,6 +82,26 @@ _IRREGULAR_KWARGS = (
 # is a practical figure, not a computability limit: see :func:`_min_rows` for
 # the hard floor.
 _RELIABLE_ROWS = 300
+
+_OPEN_TAIL_REASON = (
+    "A lognormal or Weibull input has an open upper tail. HDMR fits each "
+    "component on the CDF scale of its input, where a long tail becomes a "
+    "steep rise near 1 that the few B-spline intervals cannot follow, so S1 "
+    "comes out biased low. More samples do not remove the bias. Measured on "
+    "Y = a + b with b uniform: S1 of a was 0.79 at N = 2000 and 0.67 at "
+    "N = 8000 for LognormalSpec(0, 1) against an exact 0.98, and 0.87 for "
+    "WeibullSpec(0.8, 1) against an exact 0.96."
+)
+
+REFUSED_MARGINALS: Mapping[str, str] = MappingProxyType(
+    {"lognormal": _OPEN_TAIL_REASON, "weibull": _OPEN_TAIL_REASON}
+)
+"""The marginal families HDMR refuses, with the reason, for its registry record.
+
+Triangular and beta are bounded and accepted: on the same model HDMR gave
+0.343 against an exact 0.345 (triangular) and 0.230 against 0.234 (beta) at
+N = 8000, the same accuracy as for a Gaussian input (0.918 against 0.923).
+"""
 
 
 def _order_message(order: int) -> str:
@@ -494,7 +516,9 @@ def analyze(
         ValueError: If ``X`` or ``Y`` violates the shared shape contract, or
             ``problem`` has categorical parameters. The B-spline component
             functions need an orderable axis, which an unordered level code
-            does not give. Also if ``on_invalid`` is not one of the three
+            does not give. Also if ``problem`` has a lognormal or Weibull
+            parameter: the open tail biases S1 low (see
+            :data:`REFUSED_MARGINALS`). Also if ``on_invalid`` is not one of the three
             policies, ``on_invalid="raise"`` (the default) and ``X`` or
             ``Y`` holds a non-finite value, or ``n_bootstrap > 0`` without a
             ``key``. Also if an input is constant, two inputs are equal in
@@ -914,8 +938,15 @@ def indices(
             ``order`` is not 1 or 2 (``order=3`` is refused: see above), ``max_iter``
             or ``n_intervals`` is below 1, ``ridge`` is negative, a chunk size is
             below 1, or ``problem`` has a categorical parameter, whose step
-            CDF has no unit-interval image.
+            CDF has no unit-interval image, or a lognormal or Weibull
+            parameter, whose open tail biases the fit (see
+            :data:`REFUSED_MARGINALS`).
     """
+    from jaxgsa.hdmr import _SPEC
+
+    # The same registry gates analyze applies in its preamble. problem is
+    # static host-side metadata, so they run at trace time.
+    gates(_SPEC, problem, method="jaxgsa.hdmr.indices")
     core = _hdmr_core(
         problem,
         X,

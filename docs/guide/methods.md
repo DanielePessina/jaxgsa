@@ -89,6 +89,10 @@ those sources alongside the software. For Sobol', use the
   to choose a definition before comparing results.
 - **Categorical inputs:** Sobol', PAWN, Borgonovo, and optimal transport accept
   unordered categories. See the [categorical example](/examples/categorical-inputs).
+- **Lognormal, Weibull, triangular, or beta inputs:** All methods except DGSM
+  accept them. eFAST, HDMR and the HDMR-backed Shapley analysis accept only
+  the triangular and beta families. See
+  [Non-uniform inputs](/examples/non-uniform-inputs#lognormal-weibull-triangular-and-beta-inputs).
 - **Gradients through an analysis:** This differs from DGSM's use of model
   derivatives. See [Differentiating sensitivity analyses](/guide/differentiation)
   for method-specific support.
@@ -101,22 +105,22 @@ those sources alongside the software. For Sobol', use the
 This is the compatibility reference for input types and confidence intervals.
 A cross means the method refuses that input type.
 
-| Method | Reports | Own design | Correlated | Categorical | Bootstrap CI |
-|---|---|:--:|:--:|:--:|---|
-| [`borgonovo`](/api/borgonovo) | $\delta$, $S_1$ | ✗ | ✓ § | ✓ | `n_bootstrap` |
-| [`dgsm`](/api/dgsm) | bounds on $S_T$ | ✗ | ✗ | ✗ | `n_bootstrap` |
-| [`efast`](/api/efast) | $S_1$, $S_T$ | ✓ | ✗ | ✗ | — |
-| [`hdmr`](/api/hdmr) | $S_a$ / $S_b$ / $S$ per term, surrogate | ✗ | ✓ † | ✗ | `n_bootstrap` |
-| [`hsic`](/api/hsic) | dependence measure | ✗ | ✓ § | ✗ | — |
-| [`kucherenko`](/api/kucherenko) | $S_1$, $S_T$ under dependence; Shapley and PME with `subsets="all"` | ✓ | ✓ | ✗ | `n_bootstrap` |
-| [`morris`](/api/morris) | $\mu^*$, $\sigma$ | ✓ | ✗ | ✗ | `n_bootstrap` |
-| [`optimal_transport`](/api/optimal-transport) | $W_2^2$ index, advective + diffusive | ✗ | ✓ § | ✓ | `n_bootstrap` |
-| [`pawn`](/api/pawn) | KS distance | ✗ | ✓ § | ✓ | `n_bootstrap` |
-| [`pce`](/api/pce) | $S_1$, $S_2$, $S_T$, surrogate | ✗ | ✗ | ✗ | `n_bootstrap` |
-| [`rank`](/api/rank) | $S_1$ by rank statistics | ✗ | ✓ § | ✗ | `n_bootstrap` |
-| [`shapley`](/api/shapley) | allocation summing to 1 | ✗ | ✗ ‡ | ✗ | `n_bootstrap` |
-| [`sobol`](/api/sobol) | $S_1$, $S_2$, $S_T$ | ✓ | ✗ | ✓ | `n_bootstrap` |
-| [`vkoga`](/api/vkoga) | $S_{TC}$, $S_{TU}$, $S_U$, $S_C$, $S_{IU}$, surrogate | ✗ | ✓ | ✗ | `n_bootstrap` |
+| Method | Reports | Own design | Correlated | Categorical | Lognormal, Weibull, triangular, beta | Bootstrap CI |
+|---|---|:--:|:--:|:--:|:--:|---|
+| [`borgonovo`](/api/borgonovo) | $\delta$, $S_1$ | ✗ | ✓ § | ✓ | ✓ | `n_bootstrap` |
+| [`dgsm`](/api/dgsm) | bounds on $S_T$ | ✗ | ✗ | ✗ | ✗ | `n_bootstrap` |
+| [`efast`](/api/efast) | $S_1$, $S_T$ | ✓ | ✗ | ✗ | triangular, beta ¶ | — |
+| [`hdmr`](/api/hdmr) | $S_a$ / $S_b$ / $S$ per term, surrogate | ✗ | ✓ † | ✗ | triangular, beta ¶ | `n_bootstrap` |
+| [`hsic`](/api/hsic) | dependence measure | ✗ | ✓ § | ✗ | ✓ | — |
+| [`kucherenko`](/api/kucherenko) | $S_1$, $S_T$ under dependence; Shapley and PME with `subsets="all"` | ✓ | ✓ | ✗ | ✓ | `n_bootstrap` |
+| [`morris`](/api/morris) | $\mu^*$, $\sigma$ | ✓ | ✗ | ✗ | ✓ | `n_bootstrap` |
+| [`optimal_transport`](/api/optimal-transport) | $W_2^2$ index, advective + diffusive | ✗ | ✓ § | ✓ | ✓ | `n_bootstrap` |
+| [`pawn`](/api/pawn) | KS distance | ✗ | ✓ § | ✓ | ✓ | `n_bootstrap` |
+| [`pce`](/api/pce) | $S_1$, $S_2$, $S_T$, surrogate | ✗ | ✗ | ✗ | ✓ ‖ | `n_bootstrap` |
+| [`rank`](/api/rank) | $S_1$ by rank statistics | ✗ | ✓ § | ✗ | ✓ | `n_bootstrap` |
+| [`shapley`](/api/shapley) | allocation summing to 1 | ✗ | ✗ ‡ | ✗ | ✓ ‖ | `n_bootstrap` |
+| [`sobol`](/api/sobol) | $S_1$, $S_2$, $S_T$ | ✓ | ✗ | ✓ | ✓ | `n_bootstrap` |
+| [`vkoga`](/api/vkoga) | $S_{TC}$, $S_{TU}$, $S_U$, $S_C$, $S_{IU}$, surrogate | ✗ | ✓ | ✗ | ✓ | `n_bootstrap` |
 
 † HDMR accepts dependent inputs through its ANCOVA decomposition. Its $S_T$
 is not a classical total-effect index under dependence.
@@ -127,6 +131,16 @@ correlative contribution in the allocation.
 
 § These measures include correlation-borne influence. A parameter may score
 above zero because it is correlated with a parameter used by the model.
+
+¶ eFAST and HDMR accept triangular and beta inputs. They refuse lognormal and
+Weibull inputs: a long upper tail biases $S_1$ low, and more samples do not
+remove the bias. DGSM refuses all four families, because it has no Poincare
+constant for them.
+
+‖ PCE, and Shapley with its default PCE backend, map these inputs through
+their CDF onto Legendre polynomials. This is correct but converges slower
+than a basis matched to the distribution. Shapley with `backend="hdmr"`
+refuses lognormal and Weibull inputs, as HDMR does.
 
 All methods support scalar, multi-output, and time-series outputs. Twelve
 methods offer bootstrap confidence intervals through `n_bootstrap`; eFAST has

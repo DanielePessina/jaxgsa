@@ -48,6 +48,20 @@ CATEGORICAL = jaxgsa.Problem.from_dict(
     }
 )
 
+# One problem per continuous family added in 1.3: the family under test in
+# the first column, uniforms elsewhere.
+NEW_FAMILY_SPECS = {
+    "lognormal": jaxgsa.LognormalSpec(0.0, 0.5),
+    "weibull": jaxgsa.WeibullSpec(2.0, 1.0),
+    "triangular": jaxgsa.TriangularSpec(0.0, 0.3, 1.0),
+    "beta": jaxgsa.BetaSpec(2.0, 3.0),
+}
+FAMILY_PROBLEMS = {
+    family: jaxgsa.Problem.from_dict({"a": spec, "b": (0.0, 1.0), "c": (0.0, 1.0)})
+    for family, spec in NEW_FAMILY_SPECS.items()
+}
+FAMILIES = list(NEW_FAMILY_SPECS)
+
 # Enough rows for each design-based sampler to get past its own size checks,
 # so a refusal we observe is the capability gate and not a size complaint.
 # eFAST needs 4 * M**2 * (D - 1) + 1 rows per curve.
@@ -276,6 +290,39 @@ class TestTheSpecsAreTrue:
             f"{'fired' if fired else 'did not fire'}"
         )
 
+    @pytest.mark.parametrize("family", FAMILIES)
+    @pytest.mark.parametrize("spec", ALL_SPECS, ids=SPEC_IDS)
+    def test_the_marginal_claim_matches_behaviour(self, spec, family):
+        fired = _gate_fires(spec, _invoke(spec, FAMILY_PROBLEMS[family]), "marginals")
+        assert fired == (family in spec.refused_marginals), (
+            f"{spec.name} declares refused_marginals={sorted(spec.refused_marginals)} "
+            f"but the gate {'fired' if fired else 'did not fire'} on a {family} input"
+        )
+
+    def test_the_marginal_refusals_are_the_decided_ones(self):
+        """The refusal list is closed: a new entry is a decision, not drift.
+
+        dgsm has no Poincare constant for any of the four families in 1.3.
+        eFAST and HDMR read S1 biased low on the heavy-tailed lognormal and
+        Weibull.
+        """
+        declared = {s.name: set(s.refused_marginals) for s in ALL_SPECS if s.refused_marginals}
+        assert declared == {
+            "dgsm": {"lognormal", "weibull", "triangular", "beta"},
+            "efast": {"lognormal", "weibull"},
+            "hdmr": {"lognormal", "weibull"},
+        }
+        for spec in ALL_SPECS:
+            for family, reason in spec.refused_marginals.items():
+                assert family in FAMILIES, (spec.name, family)
+                assert reason.strip(), (spec.name, family)
+
+    @pytest.mark.parametrize("spec", ALL_SPECS, ids=SPEC_IDS)
+    def test_every_spec_is_hashable(self, spec):
+        """A frozen spec must hash, so it can key a dict or sit in a set."""
+        assert hash(spec) == hash(spec)
+        assert {spec: spec.name}[spec] == spec.name
+
     def test_the_bootstrap_claim_matches_the_signature(self):
         """A method claims a bootstrap exactly when it offers the full interval controls.
 
@@ -339,6 +386,16 @@ class TestPureCoresShareTheGates:
         assert fired == (spec.categorical == "refuses"), (
             f"{spec.name}.indices: the spec declares categorical="
             f"{spec.categorical!r} but the gate {'fired' if fired else 'did not fire'}"
+        )
+
+    @pytest.mark.parametrize("family", FAMILIES)
+    @pytest.mark.parametrize("spec", CORE_SPECS, ids=CORE_IDS)
+    def test_the_marginal_claim_matches_core_behaviour(self, spec, family):
+        fired = _gate_fires(spec, _invoke_core(spec, FAMILY_PROBLEMS[family]), "marginals")
+        assert fired == (family in spec.refused_marginals), (
+            f"{spec.name}.indices: the spec declares refused_marginals="
+            f"{sorted(spec.refused_marginals)} but the gate "
+            f"{'fired' if fired else 'did not fire'} on a {family} input"
         )
 
     @pytest.mark.parametrize("spec", CORE_SPECS, ids=CORE_IDS)
