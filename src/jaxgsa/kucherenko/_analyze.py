@@ -72,6 +72,7 @@ from jaxgsa._core.result import CIInfo
 from jaxgsa._core.sampling import require_design
 from jaxgsa._core.validation import (
     _warn_zero_variance_slices,
+    _zero_variance_stats_of,
     as_key,
 )
 from jaxgsa.kucherenko._result import KucherenkoResult
@@ -698,16 +699,27 @@ def analyze(
     # cheap to hold for the one zero-variance warning over every slice.
     f_joint = joint_parts[0] if len(joint_parts) == 1 else np.concatenate(joint_parts, axis=1)
     del joint_parts
+    # One scan feeds the warning and the NaN mask below, so the slices the
+    # warning names are exactly the slices reported as NaN. The estimators'
+    # own ``variance > 0`` test misses a constant slice in float64: its mean
+    # rounds, so its variance is round-off (1e-31), not 0, and the indices
+    # came out as round-off ratios (0 for c = 0.1) instead of NaN.
+    zero_stats = _zero_variance_stats_of(cast(Array, f_joint))
+    zero_slices = np.asarray(zero_stats[0])  # (S,)
     _warn_zero_variance_slices(
         # Read on the host, like the rest of this module (see its docstring).
         cast(Array, f_joint.reshape((-1, *out_axes))),
         output_names=problem.output_names,
         method="jaxgsa.kucherenko.analyze",
         stacklevel=_user_stacklevel(),
+        zero_stats=zero_stats,
     )
     first_est, second_est, variance = (
         np.concatenate([part[i] for part in parts], axis=-1) for i in range(3)
     )
+    # (M, S) estimates: a flagged slice is NaN in every index, as warned.
+    first_est = np.where(zero_slices, np.nan, first_est)
+    second_est = np.where(zero_slices, np.nan, second_est)
     closed = subset_total = None
     singles = (1 << np.arange(D)) - 1
     if all_subsets:
@@ -733,6 +745,8 @@ def analyze(
         boot_first, boot_second = (
             np.concatenate([part[i] for part in boot_parts], axis=-1) for i in range(2)
         )  # (R, D or 2^D - 1, S)
+        boot_first = np.where(zero_slices, np.nan, boot_first)
+        boot_second = np.where(zero_slices, np.nan, boot_second)
         point = {"S1": _shape(S1), "ST": _shape(ST)}
         if all_subsets:
             assert closed is not None and subset_total is not None

@@ -50,6 +50,7 @@ import jax.numpy as jnp
 from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget, pad_rows, resolve_batch_size
+from jaxgsa._core.validation import _zero_variance_mask
 from jaxgsa.hdmr._engine import _build_B1, _build_B2, _build_B3, term_order_map
 
 # ---------------------------------------------------------------------------
@@ -1575,23 +1576,16 @@ def _get_finalize(n: int, n1: int, n2: int, m1: int, m2: int, m3: int, N: int):
         f_crits: Array,
     ) -> tuple[Array, Array, Array, Array, Array, Array]:
         acc_var_f, acc_cov_fy, acc_cov_fy0m, acc_ssr, acc_cross, acc_fsq, acc_res2 = acc
-        # A slice counts as zero-variance when it is numerically constant
-        # (max == min, which survives float32 where var == 0 does not) or when
-        # its variance is negligible against the machine epsilon of the
-        # working dtype relative to the slice's scale (max |Y|); below that
-        # the 1e-30 denominator floor turns the indices into finite garbage.
-        # Emit NaN (matching Sobol and the zero-variance warning) rather than
-        # silent zeros; the safe denominator only avoids the inf.
-        # The extremes must come from the real rows only: padded rows carry
-        # arbitrary values (zero by default, but a padded slot is required to
-        # be unobservable), so the infinities exclude them from both extremes.
-        eps = jnp.finfo(V_Y.dtype).eps
+        # A slice counts as zero-variance by the test the zero-variance
+        # warning makes (_zero_variance_mask: max == min, or a variance that
+        # underflows to 0), so every slice the warning names is NaN here and
+        # no other slice is. Emit NaN (matching Sobol and the warning) rather
+        # than silent zeros; the safe denominator only avoids the inf.
+        # Only the real rows count: padded rows carry arbitrary values, so
+        # they are replaced by the first row, which is always real. That
+        # leaves both extremes, and so the constant test, unchanged.
         keep = w[:, None] == 1
-        const = jnp.max(jnp.where(keep, Y, -jnp.inf), axis=0) == jnp.min(
-            jnp.where(keep, Y, jnp.inf), axis=0
-        )
-        scale = jnp.max(jnp.where(keep, jnp.abs(Y), 0.0), axis=0)
-        zero_var = (const | (V_Y < eps * scale**2))[:, None]
+        zero_var = _zero_variance_mask(jnp.where(keep, Y, Y[0][None, :]))[:, None]
         V_Y_safe = jnp.maximum(V_Y, 1e-30)[:, None]
         Sa = jnp.where(zero_var, jnp.nan, (acc_var_f / N) / V_Y_safe)
         S = jnp.where(zero_var, jnp.nan, (acc_cov_fy / N) / V_Y_safe)

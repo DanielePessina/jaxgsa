@@ -71,7 +71,12 @@ from jaxgsa._core.irregular import (
     analyze_irregular,
 )
 from jaxgsa._core.result import CIInfo
-from jaxgsa._core.validation import _prepare_Y, _validate_output, as_key
+from jaxgsa._core.validation import (
+    _prepare_Y,
+    _validate_output,
+    _zero_variance_mask,
+    as_key,
+)
 from jaxgsa.problem import Problem
 from jaxgsa.rank._result import RankResult
 
@@ -151,6 +156,14 @@ def _rank_columns(X: Array, Y_cols: Array, width: int, rows: Array | None = None
             cols = cols[rows]
         centred = cols - jnp.mean(cols, axis=0, keepdims=True)
         variance = jnp.mean(centred**2, axis=0)  # (width,)
+        # The zero-variance warning's own test. A constant float column's
+        # mean rounds, so ``centred`` holds one repeated round-off value and
+        # the ratio below is that value squared over itself squared: 1.0, or
+        # NaN when the round-off happens to be 0. Double where: divide by a
+        # safe 1 on a flagged column, then put the NaN back, so the gradient
+        # of every other column stays finite.
+        zero = _zero_variance_mask(cols)  # (width,)
+        safe_variance = jnp.where(zero, jnp.ones_like(variance), variance)
 
         # Rematerialised in reverse mode: lax.map would otherwise save the
         # gathered and rolled (N, width) copies of every parameter, D of
@@ -163,7 +176,8 @@ def _rank_columns(X: Array, Y_cols: Array, width: int, rows: Array | None = None
             sorted_y = centred[param_rows]  # (N, width)
             # Rank j pairs with rank j + 1. The largest rank wraps to rank 1.
             neighbour_y = jnp.roll(sorted_y, -1, axis=0)
-            return jnp.mean(sorted_y * neighbour_y, axis=0) / variance
+            ratio = jnp.mean(sorted_y * neighbour_y, axis=0) / safe_variance
+            return jnp.where(zero, jnp.nan, ratio)
 
         return jax.lax.map(one_param, order.T).T  # (width, D)
 
