@@ -84,7 +84,7 @@ class SurrogateResult(ABC):
                 are linear in the batch size with a large per-row constant,
                 so single-shot evaluation at large ``N_new`` can exhaust
                 memory. ``None`` (default) derives a batch size from a fixed
-                transient-memory budget (~512 MiB); an int fixes the rows
+                transient-memory budget (~2 GiB); an int fixes the rows
                 per batch, and ``batch_size >= N_new`` forces a single-shot
                 call. Each row's prediction is independent, so batching only
                 perturbs predictions at the level of floating-point

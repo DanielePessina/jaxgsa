@@ -116,7 +116,7 @@ leave-one-out error. They differ only in the order of the float32 sums.
 
 The streamed path engages when `batch_size` is an integer below `N`, or when the
 estimated resident memory of the single-pass fit (design matrix, QR
-factorization, LOO residuals) exceeds the active memory budget, about 512 MiB by
+factorization, LOO residuals) exceeds the active memory budget, about 2 GiB by
 default. Set that budget with `jaxgsa.config.set_memory_budget`.
 `batch_size >= N` is one full block, which is the single-pass fit.
 

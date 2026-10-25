@@ -142,8 +142,9 @@ control, such as `~/.cache/jaxgsa-jax`.
 ## Memory budget
 
 jaxgsa bounds peak transient memory by processing data in blocks and sizing
-each block against a byte budget. The default is 512 MiB. Reading and writing
-it:
+each block against a byte budget. The default is 2 GiB. The budget bounds the
+transient arrays inside an analysis' forward pass. It does not bound the inputs,
+the compile memory or reverse-mode gradients. Reading and writing it:
 
 ```python
 import jaxgsa
@@ -158,8 +159,8 @@ print(jaxgsa.config.get_memory_budget())
 ```
 
 ```
-512.0
-536870912
+2048.0
+2147483648
 0.0625
 ```
 
@@ -317,7 +318,7 @@ Y = (
     + 0.1 * (X[:, 2] ** 4)[:, None] * jnp.sin(X[:, 0])[:, None] * t[None, :]
 )[:, :, None]
 
-jaxgsa.sobol.analyze(design, Y)          # default 512 MiB
+jaxgsa.sobol.analyze(design, Y)          # default 2 GiB
 jaxgsa.config.set_memory_budget(8)       # 8 MiB
 jaxgsa.sobol.analyze(design, Y)
 ```
@@ -336,7 +337,7 @@ jaxgsa.sobol.analyze(design, Y)
     3. x3  ST=0.1129
 ```
 
-At 512 MiB all 200 slices fit in one device call. At 8 MiB jaxgsa takes them 81
+At 2 GiB all 200 slices fit in one device call. At 8 MiB jaxgsa takes them 81
 at a time. Same indices to four digits. Note that the ranking line averages over
 the 200 slices; the per-slice indices are in `result.ST`, shape `(200, 1, 3)`.
 

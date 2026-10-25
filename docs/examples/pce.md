@@ -195,7 +195,7 @@ leave-one-out error, so they differ only in float32 summation order.
 Leave it at `None` and the memory budget decides. jaxgsa estimates the
 resident cost of the design matrix, the QR factorization and the LOO
 residuals; under the budget it runs a single pass, over it streams over
-auto-sized blocks. The budget defaults to about 512 MiB and moves with
+auto-sized blocks. The budget defaults to about 2 GiB and moves with
 `jaxgsa.config.set_memory_budget`.
 
 An explicit value always wins over the budget. `batch_size=250` on the N=2000

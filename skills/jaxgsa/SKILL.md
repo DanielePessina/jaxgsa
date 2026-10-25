@@ -380,7 +380,9 @@ JAX computes in 32-bit by default and downcasts a `float64` `Y` you pass it.
 jaxgsa warns when it sees this. HSIC and VKOGA need float64 outright, for the
 reasons in their sections. `set_memory_budget` and `get_memory_budget` use megabytes unless `unit=`
 says otherwise (`"b"` for bytes). A byte count passed without `unit=` is read as
-megabytes, so pass `unit="b"` for bytes.
+megabytes, so pass `unit="b"` for bytes. The default budget is 2 GiB. It bounds
+the transient arrays inside an analysis' forward pass, not the inputs, the
+compile memory or reverse-mode gradients.
 
 ## Method capabilities
 

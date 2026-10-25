@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The default memory budget is now 2 GiB (was 512 MiB). `jaxgsa.config.set_memory_budget(2048)` restates it. The budget bounds the transient arrays inside an analysis' forward pass. It does not bound the inputs, the compile memory or reverse-mode gradients.
+
 ## 1.3.0 (2026-10-25)
 
 ### Added

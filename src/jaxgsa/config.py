@@ -23,8 +23,8 @@ __all__ = ["enable_compilation_cache", "get_memory_budget", "set_memory_budget"]
 #
 # All multipliers are binary (powers of 1024), so ``mb`` is 1024**2 and not
 # 1000**2. Memory is conventionally counted in binary units, and this choice
-# makes ``set_memory_budget(512)`` resolve to exactly the historical default of
-# ``512 * 1024**2`` bytes. The explicit binary spellings (``kib``, ``mib`` and
+# makes ``set_memory_budget(2048)`` resolve to exactly the default of
+# ``2 * 1024**3`` bytes. The explicit binary spellings (``kib``, ``mib`` and
 # so on) are exact synonyms of their short forms; they are accepted so callers
 # who prefer to be unambiguous can be.
 # A budget above this is almost surely bytes read as megabytes.
@@ -123,7 +123,7 @@ def set_memory_budget(budget: int | float, *, unit: str | None = None) -> None:
     the PCE S2 pair-mask chunking, and the PCE and HDMR streaming fits that
     engage when the single-pass design matrix would not fit. All of them
     derive their automatic batch/chunk sizes from this budget (default:
-    512 MiB); an explicit ``batch_size``/``*_chunk_size`` always wins over
+    2 GiB); an explicit ``batch_size``/``*_chunk_size`` always wins over
     the budget.
 
     Borgonovo also tiles its output grid, which is what bounds its peak in
@@ -132,7 +132,7 @@ def set_memory_budget(budget: int | float, *, unit: str | None = None) -> None:
     does not narrow the tile.
 
     The budget is read in megabytes unless you say otherwise, so
-    ``set_memory_budget(512)`` restates the default. Every unit is binary:
+    ``set_memory_budget(2048)`` restates the default. Every unit is binary:
     ``mb`` means ``1024**2`` bytes, not ``1000**2``, and ``kb``/``gb``/``tb``
     follow the same rule. ``mib``, ``kib``, ``gib`` and ``tib`` are exact
     synonyms of the short forms. Unit names are case-insensitive and
@@ -203,7 +203,7 @@ def get_memory_budget(*, unit: str = "mb") -> int | float:
 
     Returns:
         The budget set by the most recent :func:`set_memory_budget` call, or
-        the built-in default (512 MiB) if it was never called. An exact ``int``
+        the built-in default (2 GiB) if it was never called. An exact ``int``
         of bytes for ``"b"``/``"bytes"``; a ``float`` for every other unit,
         because the budget need not be a whole number of them.
 

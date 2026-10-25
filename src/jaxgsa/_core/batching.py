@@ -17,9 +17,9 @@ import numpy as np
 from jax import Array
 
 # Default transient-memory budget, in bytes, for deriving an automatic batch
-# size. 512 MiB keeps the per-batch tensors comfortably resident while making
-# per-batch dispatch overhead negligible next to the work done per batch.
-_DEFAULT_MEMORY_BUDGET_BYTES: int = 512 * 1024**2
+# size. 2 GiB keeps the per-batch tensors resident on a typical laptop while
+# making per-batch dispatch overhead negligible next to the work done per batch.
+_DEFAULT_MEMORY_BUDGET_BYTES: int = 2 * 1024**3
 
 # Module-level override for the transient-memory budget, set through
 # ``jaxgsa.config.set_memory_budget``. ``None`` means "use the default"; the

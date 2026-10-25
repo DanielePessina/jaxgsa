@@ -60,17 +60,16 @@ def _restore_memory_budget():
     _batching._memory_budget_bytes = saved
 
 
-def test_default_budget_is_512_mib_and_512_restates_it(_restore_memory_budget):
-    """T4: the unit change moved only how the budget is written, never its value.
+def test_default_budget_is_2_gib_and_2048_restates_it(_restore_memory_budget):
+    """T4: the default is 2 GiB, and a bare 2048 (megabytes) restates it.
 
-    536870912 is written out rather than as ``512 * 1024**2`` so that the
-    assertion cannot follow the source if the multiplier ever changes. The
-    claim the unit change rests on is that the new spelling of the default
-    resolves to the old one.
+    2147483648 is written out rather than as ``2 * 1024**3`` so that the
+    assertion cannot follow the source if the multiplier ever changes.
     """
-    assert jaxgsa.config.get_memory_budget() == 512.0
-    jaxgsa.config.set_memory_budget(512)
-    assert jaxgsa.config.get_memory_budget() == 512.0
+    assert jaxgsa.config.get_memory_budget() == 2048.0
+    assert jaxgsa.config.get_memory_budget(unit="b") == 2147483648
+    jaxgsa.config.set_memory_budget(2048)
+    assert jaxgsa.config.get_memory_budget(unit="b") == 2147483648
 
 
 def test_each_unit_resolves_to_its_exact_byte_count(_restore_memory_budget):

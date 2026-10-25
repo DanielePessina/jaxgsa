@@ -206,11 +206,12 @@ class TestGridTiling:
             (S((n_rep, D, n_classes, pts + 1), jnp.int32), S((n_rep, D, n_classes), jnp.int32)),
         )
         Y = S((n, total), jax.dtypes.canonicalize_dtype(dtype))
+        saved_budget = jaxgsa.config.get_memory_budget(unit="b")
         jaxgsa.config.set_memory_budget(budget_mib, unit="mib")
         try:
             cs, grid_chunk = _resolve_slice_chunks(groups, Y, grid, None)
         finally:
-            jaxgsa.config.set_memory_budget(512, unit="mib")
+            jaxgsa.config.set_memory_budget(saved_budget, unit="b")
         kernel = _get_delta_kernel(grid, None, _DEGENERATE_BW_TOL, None, grid_chunk, cs)
         compiled = kernel.lower(Y, S((n_rep, n), jnp.int32), groups).compile()
         temp = compiled.memory_analysis().temp_size_in_bytes
@@ -233,11 +234,12 @@ class TestGridTiling:
         X, Y = given_ishigami_xy
         Y2 = jnp.stack([Y, Y**2, jnp.sin(Y)], axis=1)
         r_default = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=BOOT, key=jax.random.key(0))
+        saved_budget = jaxgsa.config.get_memory_budget(unit="b")
         jaxgsa.config.set_memory_budget(1, unit="mib")
         try:
             r_small = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=BOOT, key=jax.random.key(0))
         finally:
-            jaxgsa.config.set_memory_budget(512, unit="mib")
+            jaxgsa.config.set_memory_budget(saved_budget, unit="b")
         np.testing.assert_allclose(
             np.asarray(r_default.delta), np.asarray(r_small.delta), rtol=1e-5, atol=1e-7
         )
