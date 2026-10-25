@@ -5,6 +5,12 @@ Verification tiers, per the project's oracle policy.
 * **T0, closed form.** Ishigami and Sobol-G have analytical ``S1`` and
   ``ST``. Every estimator must converge to them, because that is the only
   claim they all share. ``test_ishigami_end_to_end`` and ``test_sobol_g``.
+* **T2, permissive-licence library.** OpenTURNS implements Saltelli,
+  Jansen, Martinez and Mauntz-Kucherenko. Its numbers are recorded here from
+  ``scripts/oracles/openturns_sobol_estimators.py``, because OpenTURNS is
+  not a jaxgsa dependency. A recorded value from a T2 library is still T2.
+  The live SALib parity check for the default scheme is in
+  ``scripts/oracles/external_checks.py``.
 * **Structural.** Two of the claims in the estimator docstrings are exact,
   not statistical: Jansen's total order can never be negative, and
   Azzini-Rosati can never report ``S1 > ST``. Those are checked on samples
@@ -228,6 +234,95 @@ def test_the_default_estimator_is_named_and_shares_a_first_order_formula(ishigam
     other = jaxgsa.sobol.analyze(sr, Y, estimator="mauntz-kucherenko")
     np.testing.assert_allclose(np.asarray(implicit.S1), np.asarray(other.S1), rtol=1e-6)
     assert not np.allclose(np.asarray(implicit.ST), np.asarray(other.ST), rtol=1e-9)
+
+
+# Recorded from OpenTURNS 1.27 on 2026-08-21 by
+# ``scripts/oracles/openturns_sobol_estimators.py``. Read that script for the
+# convention differences, which set the tolerances below.
+OPENTURNS_ISHIGAMI = {
+    "jansen": (
+        [0.325659913086, 0.449937662035, 0.005534417301],
+        [0.556417110084, 0.441889970259, 0.242806411634],
+    ),
+    "martinez": (
+        [0.309152505070, 0.440555663071, -0.009814482997],
+        [0.562965078161, 0.443822006127, 0.243499042677],
+    ),
+    "mauntz-kucherenko": (
+        [0.306839712130, 0.438305521513, -0.004547979241],
+        [0.568104352653, 0.446389449976, 0.245736508513],
+    ),
+}
+
+
+class TestOpenTurnsOracle:
+    """T2 (permissive-licence library, recorded values): OpenTURNS 1.27.
+
+    The values in ``OPENTURNS_ISHIGAMI`` come from
+    ``scripts/oracles/openturns_sobol_estimators.py`` (run 2026-08-21). They
+    are recorded because OpenTURNS is not a jaxgsa dependency.
+    """
+
+    @staticmethod
+    def _design():
+        """Rebuild the exact Monte Carlo design the oracle script used."""
+        n, d, seed = 2**14, 3, 7
+        rng = np.random.default_rng(seed)
+        A = rng.uniform(-np.pi, np.pi, (n, d))
+        B = rng.uniform(-np.pi, np.pi, (n, d))
+        columns = np.arange(d)
+
+        def f(X):
+            return np.asarray(ishigami.evaluate(jnp.asarray(X)), dtype=np.float64)
+
+        AB = np.stack([f(np.where(columns == j, B, A)) for j in range(d)], axis=1)
+        return jnp.asarray(f(A)), jnp.asarray(AB), jnp.asarray(f(B))
+
+    def test_martinez_matches_openturns_exactly(self):
+        """Martinez is a correlation, so no normalisation convention can differ."""
+        with jax.enable_x64():
+            from jaxgsa.sobol._estimators import first_total_kernel
+
+            A, AB, B = self._design()
+            S1, ST = first_total_kernel("martinez")(A, AB, B)
+        expected_s1, expected_st = OPENTURNS_ISHIGAMI["martinez"]
+        np.testing.assert_allclose(np.asarray(S1), expected_s1, atol=1e-9)
+        np.testing.assert_allclose(np.asarray(ST), expected_st, atol=1e-9)
+
+    def test_jansen_total_order_matches_openturns_up_to_its_denominator(self):
+        """Same numerator as OpenTURNS, a different variance estimate below it.
+
+        Dividing each vector by its own sum removes the shared scalar
+        denominator, and what is left agrees to twelve digits. That is a much
+        tighter statement than comparing the raw indices, and it is the one
+        that says the numerators are the same formula.
+        """
+        with jax.enable_x64():
+            from jaxgsa.sobol._estimators import first_total_kernel
+
+            A, AB, B = self._design()
+            _, ST = first_total_kernel("jansen")(A, AB, B)
+        mine = np.asarray(ST)
+        expected = np.array(OPENTURNS_ISHIGAMI["jansen"][1])
+        np.testing.assert_allclose(mine / mine.sum(), expected / expected.sum(), atol=1e-9)
+
+    @pytest.mark.parametrize("estimator", ["jansen", "mauntz-kucherenko"])
+    def test_openturns_agreement_within_the_convention_gap(self, estimator):
+        """The remaining indices agree to within the documented O(1/sqrt(N)) gap.
+
+        OpenTURNS divides by the variance of the A block and pre-centres the
+        whole design; jaxgsa divides by the variance pooled over A and B and
+        does not pre-centre. Both are consistent, and at N = 16384 the two
+        conventions differ by under 0.02 on indices of order 0.3 to 0.6.
+        """
+        with jax.enable_x64():
+            from jaxgsa.sobol._estimators import first_total_kernel
+
+            A, AB, B = self._design()
+            S1, ST = first_total_kernel(estimator)(A, AB, B)
+        expected_s1, expected_st = OPENTURNS_ISHIGAMI[estimator]
+        np.testing.assert_allclose(np.asarray(S1), expected_s1, atol=0.02)
+        np.testing.assert_allclose(np.asarray(ST), expected_st, atol=0.02)
 
 
 class TestValidation:

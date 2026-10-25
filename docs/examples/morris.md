@@ -299,11 +299,11 @@ and `AB_j` differ in exactly one input. That is a radial star, so
 `SobolSamples.to_morris()` just relabels the design.
 
 ```python
-samples = jaxgsa.sobol.sample(PROBLEM, base_n=512, seed=0)
-Y = evaluate(jnp.asarray(samples.samples))
+design = jaxgsa.sobol.sample(PROBLEM, base_n=512, seed=0)
+Y = evaluate(jnp.asarray(design.samples))
 
-sobol_result = jaxgsa.sobol.analyze(samples, Y)
-morris_result = jaxgsa.morris.analyze(samples.to_morris(), Y)
+sobol_result = jaxgsa.sobol.analyze(design, Y)
+morris_result = jaxgsa.morris.analyze(design.to_morris(), Y)
 
 print("ST     :", sobol_result.ST)
 print("mu_star:", morris_result.mu_star)

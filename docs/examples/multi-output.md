@@ -223,10 +223,10 @@ def oscillator(X):
 
 
 # 1. Sobol (Saltelli), first/total-order only
-samples = jaxgsa.sobol.sample(problem, n_samples=4096, seed=0, calc_second_order=False)
-Y_sobol = oscillator(jnp.asarray(samples.samples))[..., None]  # (N, T) -> (N, T, 1)
+design = jaxgsa.sobol.sample(problem, n_samples=4096, seed=0, calc_second_order=False)
+Y_sobol = oscillator(jnp.asarray(design.samples))[..., None]  # (N, T) -> (N, T, 1)
 sobol_result = jaxgsa.sobol.analyze(
-    samples,
+    design,
     Y_sobol,
     n_bootstrap=200,
     conf_level=0.95,

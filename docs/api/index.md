@@ -73,7 +73,7 @@ warnings.filterwarnings("ignore", category=JaxgsaWarning)
 # Or capture them and decide per warning.
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter("always")
-    result = jaxgsa.sobol.analyze(samples, Y)
+    result = jaxgsa.sobol.analyze(design, Y)
 [(type(w.message).__name__, str(w.message)) for w in caught]
 ```
 
@@ -94,7 +94,7 @@ keyword-only `verbose: bool = True`. The default prints, so a bare call writes
 to stdout:
 
 ```python
-result = jaxgsa.sobol.analyze(samples, Y)
+result = jaxgsa.sobol.analyze(design, Y)
 ```
 
 ```
@@ -216,10 +216,10 @@ series is `(N, T, K)`, which means a single time-varying output is written
 explicitly as `(N, T, 1)`.
 
 ```python
-result = jaxgsa.sobol.analyze(samples, Y_2d)     # Y_2d is (8192, 5)
+result = jaxgsa.sobol.analyze(design, Y_2d)     # Y_2d is (8192, 5)
 result.S1.shape                                  # (5, 3)  ->  (K, D)
 
-result = jaxgsa.sobol.analyze(samples, Y_2d[:, :, None])
+result = jaxgsa.sobol.analyze(design, Y_2d[:, :, None])
 result.S1.shape                                  # (5, 1, 3)  ->  (T, K, D)
 ```
 
@@ -234,7 +234,7 @@ array work:
 
 ```python
 problem = jaxgsa.Problem(("x1", "x2", "x3"), bounds, output_names=("y",))
-jaxgsa.sobol.analyze(samples, Y_2d)              # Y_2d is (8192, 5)
+jaxgsa.sobol.analyze(design, Y_2d)              # Y_2d is (8192, 5)
 ```
 
 ```
@@ -276,9 +276,9 @@ for the complete input and result contract.
 ## Sobol
 
 ```python
-samples = jaxgsa.sobol.sample(problem, n_samples=8192, seed=0)
-Y = model(samples.samples)
-result = jaxgsa.sobol.analyze(samples, Y)
+design = jaxgsa.sobol.sample(problem, n_samples=8192, seed=0)
+Y = model(design.samples)
+result = jaxgsa.sobol.analyze(design, Y)
 result.S1   # Array([0.3223, 0.4361, 0.0014], dtype=float32)
 result.ST   # Array([0.556 , 0.4417, 0.2413], dtype=float32)
 ```
@@ -303,7 +303,7 @@ Every samples class has the same `load`. It raises a clear error when the file
 holds a different samples class, for example a Morris file read with
 `SobolSamples.load`.
 
-`jaxgsa.sobol.indices(samples, Y)` returns a `SobolIndices(S1, ST, S2)` named
+`jaxgsa.sobol.indices(design, Y)` returns a `SobolIndices(S1, ST, S2)` named
 tuple of plain arrays. `S2` is `None` for a first-order design. It
 runs the same estimator as `analyze`, but it checks nothing and builds no
 result, so it works inside `jax.jit`, `jax.vmap` and `jax.grad`. Pair it with
@@ -375,7 +375,7 @@ bias-corrected one, without running the analysis again:
 
 ```python
 result = jaxgsa.sobol.analyze(
-    samples, Y, n_bootstrap=1000, key=jax.random.key(0), keep_replicates=True
+    design, Y, n_bootstrap=1000, key=jax.random.key(0), keep_replicates=True
 )
 result.ci.level                      # 0.95
 result.ci.n_bootstrap                # 1000
@@ -505,21 +505,21 @@ already-evaluated Saltelli design as a radial Morris design, so screening
 measures cost no extra model runs:
 
 ```python
-samples = jaxgsa.sobol.sample(problem, 8192, seed=0)
-Y = model(samples.samples)
-sobol_result = jaxgsa.sobol.analyze(samples, Y)
-morris_result = jaxgsa.morris.analyze(samples.to_morris(), Y)
+design = jaxgsa.sobol.sample(problem, 8192, seed=0)
+Y = model(design.samples)
+sobol_result = jaxgsa.sobol.analyze(design, Y)
+morris_result = jaxgsa.morris.analyze(design.to_morris(), Y)
 ```
 
 eFAST sampling returns `jaxgsa.efast.EFASTSamples`. That object carries the
 design metadata `n_per_curve`, `M`, and `problem` into
-`jaxgsa.efast.analyze(samples, Y)`, so sampling and analysis can never be
+`jaxgsa.efast.analyze(design, Y)`, so sampling and analysis can never be
 mismatched:
 
 ```python
-samples = jaxgsa.efast.sample(problem, n_per_curve=1024, seed=0)
-Y = model(samples.samples)
-result = jaxgsa.efast.analyze(samples, Y)
+design = jaxgsa.efast.sample(problem, n_per_curve=1024, seed=0)
+Y = model(design.samples)
+result = jaxgsa.efast.analyze(design, Y)
 ```
 
 `EFASTSamples` supports `save(path)` and `load(path)`, so all four design

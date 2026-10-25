@@ -66,11 +66,11 @@ import jax.numpy as jnp
 from jaxgsa import efast
 from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate, ANALYTICAL_S1, ANALYTICAL_ST
 
-samples = efast.sample(PROBLEM, n_per_curve=4096, M=4, seed=42)
-print("shape:", samples.samples.shape, "n_runs:", samples.n_runs)
+design = efast.sample(PROBLEM, n_per_curve=4096, M=4, seed=42)
+print("shape:", design.samples.shape, "n_runs:", design.n_runs)
 
-Y = evaluate(jnp.asarray(samples.samples))
-result = efast.analyze(samples, Y)
+Y = evaluate(jnp.asarray(design.samples))
+result = efast.analyze(design, Y)
 
 print("S1:", result.S1)
 print("ST:", result.ST)
@@ -231,9 +231,9 @@ import jax.numpy as jnp
 from jaxgsa import efast
 from jaxgsa.benchmarks.sobol_g import PROBLEM, evaluate
 
-samples = efast.sample(PROBLEM, n_per_curve=4096, M=4, seed=123)
-Y = evaluate(jnp.asarray(samples.samples))
-result = efast.analyze(samples, Y)
+design = efast.sample(PROBLEM, n_per_curve=4096, M=4, seed=123)
+Y = evaluate(jnp.asarray(design.samples))
+result = efast.analyze(design, Y)
 print(result)
 ```
 
@@ -333,9 +333,9 @@ def multi_output_model(X):
     )
 
 
-samples = efast.sample(problem, n_per_curve=1025, seed=42)
-Y = multi_output_model(jnp.asarray(samples.samples))
-result = efast.analyze(samples, Y)
+design = efast.sample(problem, n_per_curve=1025, seed=42)
+Y = multi_output_model(jnp.asarray(design.samples))
+result = efast.analyze(design, Y)
 print("S1:\n", result.S1)
 print("ST:\n", result.ST)
 ```
@@ -378,11 +378,11 @@ import jax.numpy as jnp
 from jaxgsa import efast
 from jaxgsa.benchmarks import ishigami
 
-samples = efast.sample(ishigami.PROBLEM, n_per_curve=4096, M=4, seed=7)
-Y_full = ishigami.evaluate(jnp.asarray(samples.samples))
+design = efast.sample(ishigami.PROBLEM, n_per_curve=4096, M=4, seed=7)
+Y_full = ishigami.evaluate(jnp.asarray(design.samples))
 Y_multi = jnp.stack([Y_full, 0.5 * Y_full], axis=-1)  # (n_runs, 2)
 
-result = efast.analyze(samples, Y_multi)
+result = efast.analyze(design, Y_multi)
 print(result)
 ```
 
@@ -433,9 +433,9 @@ def time_series_model(X):
     )
 
 
-samples = efast.sample(problem, n_per_curve=1025, seed=42)
-Y = time_series_model(jnp.asarray(samples.samples))
-result = efast.analyze(samples, Y)
+design = efast.sample(problem, n_per_curve=1025, seed=42)
+Y = time_series_model(jnp.asarray(design.samples))
+result = efast.analyze(design, Y)
 
 print("S1 shape:", result.S1.shape, "ST shape:", result.ST.shape)
 print("damping ST, displacement, t = 0.25 / 2.5 / 5.0:",
@@ -509,10 +509,10 @@ def damped_oscillator(X, ts):
     return amplitude * jnp.exp(-gamma * ts[None, :]) * jnp.sin(omega * ts[None, :])
 
 
-samples = efast.sample(problem, n_per_curve=4096, M=4, seed=99)
-Y = damped_oscillator(jnp.asarray(samples.samples), times)
+design = efast.sample(problem, n_per_curve=4096, M=4, seed=99)
+Y = damped_oscillator(jnp.asarray(design.samples), times)
 Y = Y[..., None]  # (n_runs, T, 1)
-result = efast.analyze(samples, Y)
+result = efast.analyze(design, Y)
 print(result)
 ```
 
@@ -554,7 +554,7 @@ including `n_per_curve` and `M`. Use it when the model runs somewhere the
 analysis does not.
 
 ```python
-samples.save("efast_design.npz")
+design.save("efast_design.npz")
 reloaded = efast.EFASTSamples.load("efast_design.npz")
 print(reloaded.n_per_curve, reloaded.M, reloaded.samples.shape)
 ```
@@ -584,7 +584,7 @@ inputs independently by construction.
 
 ## Shape rules
 
-`n_runs = n_per_curve * D` is the design's total row count (`samples.n_runs`).
+`n_runs = n_per_curve * D` is the design's total row count (`design.n_runs`).
 `analyze` rejects any `Y` with a different leading dimension.
 
 - `(n_runs,)` is scalar output.

@@ -32,10 +32,10 @@ from jaxgsa.benchmarks.ishigami import PROBLEM
 
 Path("runs").mkdir(exist_ok=True)
 
-samples = jaxgsa.sobol.sample(PROBLEM, n_samples=4096, seed=42)
-samples.save("runs/ishigami")
+design = jaxgsa.sobol.sample(PROBLEM, n_samples=4096, seed=42)
+design.save("runs/ishigami")
 
-print("rows to evaluate:", samples.n_runs)
+print("rows to evaluate:", design.n_runs)
 print("file size (bytes):", Path("runs/ishigami.npz").stat().st_size)
 ```
 
@@ -104,18 +104,18 @@ estimators, so your number will differ.
 Worth checking once, so you can stop worrying about it.
 
 ```python
-samples = jaxgsa.sobol.sample(PROBLEM, n_samples=4096, seed=42, verbose=False)
-samples.save("runs/ishigami")
+design = jaxgsa.sobol.sample(PROBLEM, n_samples=4096, seed=42, verbose=False)
+design.save("runs/ishigami")
 restored = jaxgsa.sobol.SobolSamples.load("runs/ishigami")
 
-Y = evaluate(samples.samples)
+Y = evaluate(design.samples)
 
-before = jaxgsa.sobol.analyze(samples, Y, verbose=False)
+before = jaxgsa.sobol.analyze(design, Y, verbose=False)
 after = jaxgsa.sobol.analyze(restored, Y, verbose=False)
 
-print("same rows:      ", np.array_equal(samples.samples, restored.samples))
-print("same expansion: ", np.array_equal(samples.expanded_to_unique, restored.expanded_to_unique))
-print("same problem:   ", samples.problem == restored.problem)
+print("same rows:      ", np.array_equal(design.samples, restored.samples))
+print("same expansion: ", np.array_equal(design.expanded_to_unique, restored.expanded_to_unique))
+print("same problem:   ", design.problem == restored.problem)
 print("S1 before:", np.asarray(before.S1))
 print("S1 after: ", np.asarray(after.S1))
 print("bitwise identical S1/ST/S2:",
@@ -296,7 +296,7 @@ except Exception as exc:
 ```
 
 ```
-ValueError Y has 4096 rows but the design has 2048; evaluate the model once per row of samples.samples
+ValueError Y has 4096 rows but the design has 2048; evaluate the model once per row of design.samples, in order
 ```
 
 A same-size mismatch does not. If you redraw with a different seed and get a
@@ -312,7 +312,7 @@ The design object holds a plain NumPy matrix, so exporting for a solver that
 reads text is one call:
 
 ```python
-np.savetxt("runs/ishigami.csv", samples.samples, delimiter=",")
+np.savetxt("runs/ishigami.csv", design.samples, delimiter=",")
 ```
 
 One row per model run, one column per parameter, no header, physical units.

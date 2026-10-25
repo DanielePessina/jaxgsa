@@ -47,7 +47,7 @@ from jaxgsa._core.irregular import (
     analyze_irregular,
 )
 from jaxgsa._core.sampling import require_design
-from jaxgsa._core.validation import YLayout, _prepare_Y
+from jaxgsa._core.validation import YLayout, _prepare_Y, row_count_message
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.efast._result import EFASTResult
 from jaxgsa.efast._sampling import EFASTSamples, _frequency_plan
@@ -125,7 +125,11 @@ def _compute_indices(
 
 
 def _row_count_message(n_rows: int, N: int, D: int, n_runs: int) -> str:
-    """Build the "wrong number of Y rows" message shared by ``indices`` and ``analyze``.
+    """Build the eFAST "wrong number of Y rows" message.
+
+    The text comes from the shared :func:`row_count_message`, so it names
+    ``design.samples`` as every other design-based method does. eFAST adds
+    how the design arrives at its row count.
 
     Args:
         n_rows: The number of rows ``Y`` actually has.
@@ -136,10 +140,11 @@ def _row_count_message(n_rows: int, N: int, D: int, n_runs: int) -> str:
     Returns:
         The error text, naming both the mismatch and how to fix it.
     """
-    return (
-        f"Y has {n_rows} rows but this eFAST design requires "
-        f"n_runs = n_per_curve * D = {N} * {D} = {n_runs}; "
-        "evaluate the model on every row of samples.samples, in order"
+    return row_count_message(
+        n_rows,
+        n_runs,
+        "design.samples",
+        detail=f" (n_runs = n_per_curve * D = {N} * {D})",
     )
 
 

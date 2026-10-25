@@ -121,8 +121,8 @@ Ragged `Y` is automatically analyzed one output channel at a time; see
 [Irregular output grids](/examples/irregular-outputs).
 
 ```python
-samples = jaxgsa.morris.sample(problem, n_trajectories=512, seed=0, verbose=False)
-result = jaxgsa.morris.analyze(samples, ishigami(samples.samples), verbose=False)
+design = jaxgsa.morris.sample(problem, n_trajectories=512, seed=0, verbose=False)
+result = jaxgsa.morris.analyze(design, ishigami(design.samples), verbose=False)
 
 result.mu_star   # Array([7.4111, 7.875 , 6.6882], dtype=float32)
 result.sigma     # Array([6.248 , 7.8812, 9.1494], dtype=float32)
@@ -196,10 +196,10 @@ where `analyze` is not.
 a radial Morris design, so the screening measures cost no extra model runs:
 
 ```python
-samples = jaxgsa.sobol.sample(problem, n_samples=8192, seed=0)
-Y = model(samples.samples)
-sobol_result = jaxgsa.sobol.analyze(samples, Y)
-morris_result = jaxgsa.morris.analyze(samples.to_morris(), Y)
+design = jaxgsa.sobol.sample(problem, n_samples=8192, seed=0)
+Y = model(design.samples)
+sobol_result = jaxgsa.sobol.analyze(design, Y)
+morris_result = jaxgsa.morris.analyze(design.to_morris(), Y)
 ```
 
 ### Why a lossy conversion warns twice

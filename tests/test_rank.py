@@ -91,7 +91,7 @@ class TestAnalytic:
 
 class TestEstimator:
     def test_matches_a_loop_reference_of_eq_20(self, ishigami_small):
-        """T0: the vectorised kernel equals the written-out formula."""
+        """T4: the vectorised kernel equals an independent loop of the formula."""
         X, Y = ishigami_small
         result = rank.analyze(ishigami.PROBLEM, X, Y, verbose=False)
         ref = _reference_s1(np.asarray(X, dtype=np.float64), np.asarray(Y, dtype=np.float64))
