@@ -139,7 +139,7 @@ jaxgsa.vkoga.analyze
     n_centers: 300
     gamma: 7.533
     ridge: 5.995e-05
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 5592405 (resolved from the memory budget)
   results: top 3 of 3 parameters by S_TC
     1. x1  S_TC=0.8827
     2. x2  S_TC=0.6311
@@ -474,7 +474,7 @@ jaxgsa.vkoga.analyze
     n_centers: 300
     gamma: 7.533
     ridge: 0.001292
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 4473924 (resolved from the memory budget)
   results: top 3 of 3 parameters by S_TC, mean over 2 output slices
     1. x1  S_TC=0.6773
     2. x2  S_TC=0.5457

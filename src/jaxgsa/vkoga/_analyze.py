@@ -42,6 +42,7 @@ from jaxgsa._core.entry import (
     _user_stacklevel,
     at_least,
     bootstrap_checks,
+    positive_int,
     prepare,
     require,
 )
@@ -70,7 +71,7 @@ from jaxgsa.vkoga._engine import (
     _gaussian_kernel,
     _predict_vkoga,
 )
-from jaxgsa.vkoga._indices import estimate_correlated_indices
+from jaxgsa.vkoga._indices import estimate_correlated_indices, queue_rows
 from jaxgsa.vkoga._result import VKOGAResult
 
 # Keyword-only parameters the irregular engine forwards unchanged to the
@@ -362,7 +363,7 @@ def analyze(
                     ("n_variance", n_variance),
                 )
             ),
-            at_least("batch_size", batch_size, 1),
+            positive_int("batch_size", batch_size),
             *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
             require(
                 D >= 2,
@@ -608,11 +609,11 @@ def analyze(
         # Host NumPy/SciPy end to end, so there is no compile to mention and
         # stop() has nothing to block on.
         elapsed = _verbose.stop(t0, result.S_TC)
-        batching = (
-            f"batch_size: {batch_size} (user-set)"
-            if batch_size is not None
-            else "batch_size: auto (resolved from the memory budget)"
-        )
+        # The rows per surrogate call the index estimators queued, the
+        # same resolver they ran.
+        rows = queue_rows(problem.n_params, len(fit_cols), batch_size)
+        origin = "user-set" if batch_size is not None else "resolved from the memory budget"
+        batching = f"batch_size: {rows} ({origin})"
         _verbose.analysis_summary(
             method="jaxgsa.vkoga.analyze",
             dependence=problem.dependence,

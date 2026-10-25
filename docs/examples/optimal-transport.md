@@ -66,7 +66,7 @@ jaxgsa.optimal_transport.analyze
     estimator (includes compile on the first call): 0.2112 s
     mode: univariate
     epsilon: 0.03
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 1 (resolved from the memory budget)
   results: top 3 of 3 parameters by ot
     1. x2  ot=0.2764
     2. x1  ot=0.2013
@@ -191,7 +191,7 @@ jaxgsa.optimal_transport.analyze
     estimator (includes compile on the first call): 15.65 s
     mode: trajectory
     epsilon: 0.03
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: not used in the 'trajectory' mode
   results: top 3 of 3 parameters by ot, mean over 2 output slices
     1. k_elim  ot=0.4213
     2. dose    ot=0.3977
@@ -276,7 +276,7 @@ jaxgsa.optimal_transport.analyze
     estimator (includes compile on the first call): 15.52 s
     mode: multivariate
     epsilon: 0.03
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: not used in the 'multivariate' mode
   results: top 4 of 4 parameters by ot
     1. dose    ot=0.5128
     2. k_elim  ot=0.479

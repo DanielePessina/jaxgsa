@@ -76,8 +76,8 @@ jaxgsa.hdmr.analyze
   timing:
     fit + estimator (includes compile on the first call): 1.806 s
     order: 2
-    slice_chunk_size: auto (resolved from the memory budget)
-    batch_size: auto (resolved from the memory budget)
+    slice_chunk_size: 1 (resolved from the memory budget)
+    batch_size: 2000 (resolved from the memory budget)
   results: top 3 of 3 parameters by ST
     1. x1  ST=0.5838
     2. x2  ST=0.4847

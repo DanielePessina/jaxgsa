@@ -68,6 +68,7 @@ from jaxgsa._core.entry import (
     at_least,
     bootstrap_checks,
     check_scalars,
+    positive_int,
     prepare,
     require,
     validate_inputs,
@@ -869,6 +870,48 @@ def _static_dm_grid(group: tuple[Array, Array], levels: list[int] | None) -> Arr
     )
 
 
+def _univariate_slice_width(
+    Y_3d: Array,
+    groups: list[tuple[Array, Array]],
+    group_levels: list[list[int] | None],
+    slice_chunk_size: int | None,
+) -> int:
+    """Resolve the output columns per ``lax.map`` step of the univariate run.
+
+    Args:
+        Y_3d: Output promoted to ``(N, T, K)``.
+        groups: Canonical partition groups; see
+            :mod:`jaxgsa._core.partition`.
+        group_levels: Declared level counts per group, ``None`` for the
+            continuous group, in the same order as ``groups``.
+        slice_chunk_size: The caller's value, or ``None`` for a
+            memory-aware default.
+
+    Returns:
+        The slice width, between 1 and ``T*K``.
+    """
+    N, T, K = Y_3d.shape
+    total = T * K
+    # Peak memory scales with the summed per-group D_g * M_g
+    # conditional-quantile tensors, in bytes at the kernel's working dtype.
+    # The categorical groups still build (D, M, N) tensors. The continuous
+    # group works on (D, M, P) tensors only, where M * P is about N, and keeps
+    # a few of them live (class members, their ranks, sorted members, gaps).
+    layout_elems = sum(
+        g[0].shape[1] * g[0].shape[2] for g, lv in zip(groups, group_levels) if lv is not None
+    )
+    cont_elems = sum(
+        g[0].shape[1] * g[0].shape[2] * g[0].shape[3]
+        for g, lv in zip(groups, group_levels)
+        if lv is None
+    )
+    itemsize = jnp.dtype(jnp.result_type(Y_3d.dtype, jnp.float32)).itemsize
+    bytes_per_column = (
+        _CHUNK_LIVE_TENSORS * layout_elems * N + _CONT_LIVE_TENSORS * cont_elems
+    ) * itemsize
+    return resolve_batch_size(bytes_per_column, total, slice_chunk_size)
+
+
 def _run_univariate(
     Y_3d: Array,
     all_idx: Array,
@@ -901,28 +944,10 @@ def _run_univariate(
         ``(ot, advective, diffusive, degenerate)`` of shapes
         ``(R, T, K, D)`` three times and ``(R, T, K)``.
     """
-    N, T, K = Y_3d.shape
-    total = T * K
+    _, T, K = Y_3d.shape
     R_run = all_idx.shape[0]
     D_run = sum(g[0].shape[1] for g in groups)
-    # Peak memory scales with the summed per-group D_g * M_g
-    # conditional-quantile tensors, in bytes at the kernel's working dtype.
-    # The categorical groups still build (D, M, N) tensors. The continuous
-    # group works on (D, M, P) tensors only, where M * P is about N, and keeps
-    # a few of them live (class members, their ranks, sorted members, gaps).
-    layout_elems = sum(
-        g[0].shape[1] * g[0].shape[2] for g, lv in zip(groups, group_levels) if lv is not None
-    )
-    cont_elems = sum(
-        g[0].shape[1] * g[0].shape[2] * g[0].shape[3]
-        for g, lv in zip(groups, group_levels)
-        if lv is None
-    )
-    itemsize = jnp.dtype(jnp.result_type(Y_3d.dtype, jnp.float32)).itemsize
-    bytes_per_column = (
-        _CHUNK_LIVE_TENSORS * layout_elems * N + _CONT_LIVE_TENSORS * cont_elems
-    ) * itemsize
-    cs = resolve_batch_size(bytes_per_column, total, slice_chunk_size)
+    cs = _univariate_slice_width(Y_3d, groups, group_levels, slice_chunk_size)
     levels_static = tuple(tuple(lv) if lv is not None else None for lv in group_levels)
     ot, adv, diff, degen = _ot_1d_columns(Y_3d, all_idx, tuple(groups), levels_static, cs)
     if col_order is not None:
@@ -1536,7 +1561,7 @@ def analyze(
             # The bootstrap and the dummy baseline are the two consumers of
             # ``key``, so it fires before the data is touched, not after.
             *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
+            positive_int("slice_chunk_size", slice_chunk_size),
             require(key is not None or not dummy, "key is required when dummy=True"),
         ),
         min_kept=_MIN_KEPT,
@@ -1690,12 +1715,19 @@ def analyze(
         )
         _warn_joint_memory(N, P_est, dtype, M, stacklevel=2)
 
+    slice_widths: list[int] = []
+
     def _run(
         idx: Array,
         run_groups: list[tuple[Array, Array]],
         run_levels: list[list[int] | None],
     ) -> tuple[Array, Array, Array, Array, Array, int]:
         if mode == "univariate":
+            if verbose and not slice_widths:
+                # The width the first (real) run resolves, for the summary.
+                slice_widths.append(
+                    _univariate_slice_width(Y_3d, run_groups, run_levels, slice_chunk_size)
+                )
             ot, adv, diff, degen = _run_univariate(
                 Y_3d, idx, run_groups, run_levels, None, slice_chunk_size
             )
@@ -1856,11 +1888,13 @@ def analyze(
 
     if verbose:
         elapsed = _verbose.stop(t0, result.ot)
-        chunking = (
-            f"slice_chunk_size: {slice_chunk_size} (user-set)"
-            if slice_chunk_size is not None
-            else "slice_chunk_size: auto (resolved from the memory budget)"
-        )
+        if slice_widths:
+            origin = (
+                "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
+            )
+            chunking = f"slice_chunk_size: {slice_widths[0]} ({origin})"
+        else:
+            chunking = f"slice_chunk_size: not used in the {mode!r} mode"
         _verbose.analysis_summary(
             method="jaxgsa.optimal_transport.analyze",
             problem=problem,
@@ -1995,7 +2029,7 @@ def indices(
             require(epsilon > 0, f"epsilon must be > 0, got {epsilon}"),
             at_least("max_iter", max_iter, 1),
             require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
+            positive_int("slice_chunk_size", slice_chunk_size),
         ),
         method="jaxgsa.optimal_transport.indices",
     )

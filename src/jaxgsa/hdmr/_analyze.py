@@ -56,7 +56,12 @@ from jaxgsa.hdmr._engine import (
     _build_B3,
     _compute_f_crits,
 )
-from jaxgsa.hdmr._fit import _fit_bytes_per_row, _fit_hdmr, pair_solve_warning
+from jaxgsa.hdmr._fit import (
+    _fit_bytes_per_row,
+    _fit_hdmr,
+    _resolve_fit_widths,
+    pair_solve_warning,
+)
 from jaxgsa.hdmr._result import HDMRResult, _HDMRFit
 from jaxgsa.problem import Problem
 
@@ -283,6 +288,56 @@ def _get_hdmr_static_data(D: int, order: int, n_intervals: int) -> _HDMRStaticDa
         m3=m3,
         beta2=beta2,
         beta3=beta3,
+    )
+
+
+def _resolved_widths(
+    problem: Problem,
+    n_rows: int,
+    n_slices: int,
+    dtype: np.dtype,
+    *,
+    order: int,
+    n_intervals: int,
+    batch_size: int | None,
+    slice_chunk_size: int | None,
+) -> tuple[int, int]:
+    """Resolve the row batch and slice chunk a fit of these sizes runs with.
+
+    The same resolver :func:`jaxgsa.hdmr._fit._fit_hdmr` runs: cheap
+    arithmetic, so a verbose summary reports the widths rather than
+    re-deriving them by hand.
+
+    Args:
+        problem: The problem the fit is for.
+        n_rows: Rows of the design.
+        n_slices: Flattened output slices ``T*K``.
+        dtype: The fit dtype.
+        order: The requested expansion order; it is clamped to ``D`` here.
+        n_intervals: Number of B-spline intervals.
+        batch_size: The caller's rows per batch, or ``None``.
+        slice_chunk_size: The caller's slices per chunk, or ``None``.
+
+    Returns:
+        ``(batch_size, slice_chunk_size)`` as the fit resolves them.
+    """
+    D = problem.n_params
+    fitted_order = min(order, D)
+    static = _get_hdmr_static_data(D, fitted_order, n_intervals)
+    return _resolve_fit_widths(
+        n_rows,
+        D,
+        n_slices,
+        jnp.dtype(dtype).itemsize,
+        fitted_order,
+        static.n2,
+        static.n3,
+        static.n,
+        static.m1,
+        static.m2,
+        static.m3,
+        batch_size,
+        slice_chunk_size,
     )
 
 
@@ -634,16 +689,22 @@ def analyze(
     if verbose:
         elapsed = _verbose.stop(t0, result.ST)
         _, T, K = ctx.Y3.shape
-        slice_note = (
-            f"slice_chunk_size: {slice_chunk_size} (user-set)"
-            if slice_chunk_size is not None
-            else "slice_chunk_size: auto (resolved from the memory budget)"
+        b, cs = _resolved_widths(
+            problem,
+            int(X.shape[0]),
+            T * K,
+            jnp.result_type(X.dtype, Y.dtype),
+            order=order,
+            n_intervals=n_intervals,
+            batch_size=batch_size,
+            slice_chunk_size=slice_chunk_size,
         )
-        batch_note = (
-            f"batch_size: {batch_size} (user-set)"
-            if batch_size is not None
-            else "batch_size: auto (resolved from the memory budget)"
+        slice_origin = (
+            "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
         )
+        batch_origin = "user-set" if batch_size is not None else "resolved from the memory budget"
+        slice_note = f"slice_chunk_size: {cs} ({slice_origin})"
+        batch_note = f"batch_size: {b} ({batch_origin})"
         _verbose.analysis_summary(
             method="jaxgsa.hdmr.analyze",
             problem=problem,

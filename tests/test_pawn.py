@@ -169,7 +169,7 @@ class TestPAWNBasic:
     def test_slice_chunk_size_must_be_positive(self, given_ishigami_xy):
         """Tier T4 (internal consistency): an unusable chunk size is refused."""
         X, Y = given_ishigami_xy
-        with pytest.raises(ValueError, match="slice_chunk_size must be >= 1"):
+        with pytest.raises(ValueError, match="slice_chunk_size must be an integer >= 1"):
             analyze(ishigami.PROBLEM, X[:200], Y[:200], slice_chunk_size=0)
 
 

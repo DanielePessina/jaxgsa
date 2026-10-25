@@ -197,6 +197,28 @@ class CorrelatedIndices(NamedTuple):
     variance: np.ndarray
 
 
+def queue_rows(n_params: int, n_slices: int, batch_size: int | None) -> int:
+    """Resolve the sample rows the prediction queue holds before a flush.
+
+    This is what ``batch_size`` sets for the index estimators: the rows
+    per surrogate call. Without a caller's value, the queue gets a quarter
+    of the memory budget (see :func:`estimate_correlated_indices`).
+
+    Args:
+        n_params: Number of inputs ``D``.
+        n_slices: Output slices the surrogate predicts.
+        batch_size: The caller's rows per call, or ``None``.
+
+    Returns:
+        The rows per flush, at least 1.
+    """
+    if batch_size is not None:
+        return batch_size
+    return resolve_batch_size(
+        _QUEUE_BUDGET_SHARE * 8 * (3 * n_params + 3 * n_slices), 1 << 62, None
+    )
+
+
 def estimate_correlated_indices(
     *,
     problem: Problem,
@@ -298,11 +320,7 @@ def estimate_correlated_indices(
     # The factor 3 on both leaves room for the chunk's own noise and
     # conditioning rows. Chunks are capped at the same row count, so one
     # oversized block cannot overrun the queue.
-    flush_rows = (
-        batch_size
-        if batch_size is not None
-        else resolve_batch_size(_QUEUE_BUDGET_SHARE * 8 * (3 * D + 3 * n_slices), 1 << 62, None)
-    )
+    flush_rows = queue_rows(D, n_slices, batch_size)
     queue = _PredictQueue(predict, flush_rows, predict_group_mean)
     finish_total: list[Callable[[], np.ndarray]] = []
     finish_uncorrelated: list[Callable[[], tuple[np.ndarray, np.ndarray]]] = []

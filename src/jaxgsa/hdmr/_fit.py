@@ -1617,6 +1617,52 @@ def _get_finalize(n: int, n1: int, n2: int, m1: int, m2: int, m3: int, N: int):
 # ---------------------------------------------------------------------------
 
 
+def _resolve_fit_widths(
+    N: int,
+    D: int,
+    L: int,
+    itemsize: int,
+    order: int,
+    n2: int,
+    n3: int,
+    n: int,
+    m1: int,
+    m2: int,
+    m3: int,
+    batch_size: int | None,
+    slice_chunk_size: int | None,
+) -> tuple[int, int]:
+    """Resolve the row batch and the slice chunk :func:`_fit_hdmr` runs with.
+
+    Args:
+        N: Rows of the design.
+        D: Number of inputs.
+        L: Flattened output slices ``T*K``.
+        itemsize: Bytes per element of the fit dtype.
+        order: HDMR expansion order, post-clamping.
+        n2: Number of second-order terms.
+        n3: Number of third-order terms.
+        n: Total number of terms.
+        m1: First-order basis size.
+        m2: Second-order basis size.
+        m3: Third-order basis size.
+        batch_size: The caller's rows per batch, or ``None``.
+        slice_chunk_size: The caller's slices per chunk, or ``None``.
+
+    Returns:
+        ``(batch_size, slice_chunk_size)``, both resolved and clamped.
+    """
+    slice_bytes = _slice_bytes_per_row(n, itemsize)
+    b = resolve_batch_size(
+        _fit_bytes_per_row(D, m1, m2, m3, n2, n3, n, L, itemsize), N, batch_size
+    )
+    # Pair solver state per lane: rhs, x, best x, r, z, p and the
+    # matrix-vector product.
+    lane_fixed = 7 * n2 * m2 * itemsize if order >= 2 and n2 > 0 else 0
+    cs = _resolve_slice_chunk_size(slice_chunk_size, L, b, slice_bytes, lane_fixed)
+    return b, cs
+
+
 class _FitHDMR(NamedTuple):
     """The raw fit :func:`_fit_hdmr` returns, one field per name.
 
@@ -1733,16 +1779,11 @@ def _fit_hdmr(
     dtype = jnp.result_type(X_n.dtype, Y_nl.dtype)
     itemsize = jnp.dtype(dtype).itemsize
 
-    slice_bytes = _slice_bytes_per_row(n, itemsize)
-    b = resolve_batch_size(
-        _fit_bytes_per_row(D, m1, m2, m3, n2, n3, n, L, itemsize), N, batch_size
+    b, cs = _resolve_fit_widths(
+        N, D, L, itemsize, order, n2, n3, n, m1, m2, m3, batch_size, slice_chunk_size
     )
     order2 = order >= 2 and n2 > 0
     order3 = order >= 3 and n3 > 0
-    # Pair solver state per lane: rhs, x, best x, r, z, p and the
-    # matrix-vector product.
-    lane_fixed = 7 * n2 * m2 * itemsize if order2 else 0
-    cs = _resolve_slice_chunk_size(slice_chunk_size, L, b, slice_bytes, lane_fixed)
 
     # Pad both axes so each jitted step compiles once. A padded row is masked
     # to zero in every accumulator; a padded lane is an independent constant

@@ -235,7 +235,7 @@ jaxgsa.efast.analyze
     invalid: none found in 3 search curves (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.1108 s
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 3 (resolved from the memory budget)
     omega_0: 32, M: 4
   results: top 3 of 3 parameters by ST
     1. x1  ST=0.5372

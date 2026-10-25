@@ -78,6 +78,7 @@ from jaxgsa._core.entry import (
     at_least,
     bootstrap_checks,
     check_scalars,
+    positive_int,
     prepare,
     require,
     validate_inputs,
@@ -830,7 +831,7 @@ def indices(
                 f"statistic must be 'median', 'max', or 'mean', got {statistic!r}",
             ),
             at_least("n_classes", n_classes, 2),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
+            positive_int("slice_chunk_size", slice_chunk_size),
         ),
         method="jaxgsa.pawn.indices",
     )
@@ -1016,7 +1017,7 @@ def analyze(
             ),
             at_least("n_classes", n_classes, 2),
             *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
+            positive_int("slice_chunk_size", slice_chunk_size),
         ),
         min_kept=_MIN_KEPT,
         # A constant slice leaves every conditional distribution equal to

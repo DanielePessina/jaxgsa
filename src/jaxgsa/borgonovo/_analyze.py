@@ -70,6 +70,7 @@ from jaxgsa._core.entry import (
     at_least,
     bootstrap_checks,
     check_scalars,
+    positive_int,
     prepare,
     require,
     validate_inputs,
@@ -1201,7 +1202,7 @@ def analyze(
                 0 <= float(degenerate_tol) < 1,
                 f"degenerate_tol must be in [0, 1), got {degenerate_tol}",
             ),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
+            positive_int("slice_chunk_size", slice_chunk_size),
             require(
                 not (bias_correct and n_bootstrap == 0),
                 "bias_correct=True needs bootstrap replicates, but "
@@ -1562,7 +1563,7 @@ def indices(
                 0 <= float(degenerate_tol) < 1,
                 f"degenerate_tol must be in [0, 1), got {degenerate_tol}",
             ),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
+            positive_int("slice_chunk_size", slice_chunk_size),
         ),
         method="jaxgsa.borgonovo.indices",
     )

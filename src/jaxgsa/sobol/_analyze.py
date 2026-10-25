@@ -1425,7 +1425,10 @@ def analyze(
                 Y.dtype.itemsize,
                 cs,
             )
-            notes.insert(1, f"bootstrap resample_chunk_size: {boot_rs} ({origin})")
+            # Not a keyword: an internal width, always from the memory budget.
+            notes.insert(
+                1, f"bootstrap resamples per call: {boot_rs} (resolved from the memory budget)"
+            )
         _verbose.analysis_summary(
             method="jaxgsa.sobol.analyze",
             problem=samples.problem,

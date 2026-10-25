@@ -252,7 +252,7 @@ def test_shapley_verbose_prints_chunk_keywords(shapley_case, capsys):
     _shapley(X, Y, backend="hdmr", order=1, slice_chunk_size=4, verbose=True)
     out = capsys.readouterr().out
     assert "slice_chunk_size: 4 (user-set)" in out
-    assert "batch_size: auto (resolved from the memory budget)" in out
+    assert "batch_size: 320 (resolved from the memory budget)" in out
     _shapley(X, Y, order=2, batch_size=64, verbose=True)
     out = capsys.readouterr().out
     assert "batch_size: 64 (user-set)" in out

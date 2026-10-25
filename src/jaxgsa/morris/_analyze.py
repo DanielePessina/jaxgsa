@@ -29,7 +29,6 @@ from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints, draw_row_matrix
 from jaxgsa._core.column_chunks import map_column_chunks
 from jaxgsa._core.entry import (
-    at_least,
     bootstrap_checks,
     check_scalars,
     positive_int,
@@ -400,6 +399,33 @@ def _mapped_measures(
     return mu, mu_star, sigma
 
 
+def _resample_width(
+    ee_shape: tuple[int, ...], itemsize: int, n_bootstrap: int, resample_chunk_size: int | None
+) -> int:
+    """Resolve the bootstrap resamples processed per call.
+
+    One chunk holds a single gathered copy of the ``(r, D, T, K)`` effects
+    tensor (the resamples run in sequence) plus three ``(T, K, D)`` results
+    per resample. The copy is a fixed cost, so the budget left after it sets
+    how many resamples fit in a chunk.
+
+    Args:
+        ee_shape: Shape ``(r, D, T, K)`` of the effects one call sees.
+        itemsize: Bytes per element of the effects.
+        n_bootstrap: Bootstrap replicates in total.
+        resample_chunk_size: The caller's resamples per call, or ``None`` to
+            derive one from the memory budget.
+
+    Returns:
+        The resamples per call, between 1 and ``n_bootstrap``.
+    """
+    fixed = _resample_temp_bytes(ee_shape, itemsize, 0)
+    per_resample = _resample_temp_bytes(ee_shape, itemsize, 1) - fixed
+    if resample_chunk_size is None:
+        return max(1, min(n_bootstrap, (get_memory_budget() - fixed) // per_resample))
+    return resolve_batch_size(per_resample, n_bootstrap, resample_chunk_size)
+
+
 def _bootstrap_draws(
     ee: Array, resample_idx: Array, resample_chunk_size: int | None
 ) -> tuple[Array, Array, Array]:
@@ -415,17 +441,7 @@ def _bootstrap_draws(
         ``(mu, mu_star, sigma)`` draws, each shape ``(R, T, K, D)``.
     """
     n_bootstrap = resample_idx.shape[0]
-    # One chunk holds a single gathered copy of the (r, D, T, K) effects
-    # tensor (the resamples run in sequence) plus three (T, K, D) results
-    # per resample. The copy is a fixed cost, so the budget left after it
-    # sets how many resamples fit in a chunk.
-    itemsize = ee.dtype.itemsize
-    fixed = _resample_temp_bytes(ee.shape, itemsize, 0)
-    per_resample = _resample_temp_bytes(ee.shape, itemsize, 1) - fixed
-    if resample_chunk_size is None:
-        cs = max(1, min(n_bootstrap, (get_memory_budget() - fixed) // per_resample))
-    else:
-        cs = resolve_batch_size(per_resample, n_bootstrap, resample_chunk_size)
+    cs = _resample_width(ee.shape, ee.dtype.itemsize, n_bootstrap, resample_chunk_size)
     mu_parts: list[Array] = []
     mu_star_parts: list[Array] = []
     sigma_parts: list[Array] = []
@@ -747,7 +763,7 @@ def analyze(
         on_invalid=on_invalid,
         checks=(
             *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
-            at_least("resample_chunk_size", resample_chunk_size, 1),
+            positive_int("resample_chunk_size", resample_chunk_size),
             positive_int("slice_chunk_size", slice_chunk_size),
         ),
         n_expected=int(samples.samples.shape[0]),
@@ -936,11 +952,20 @@ def analyze(
         notes = [f"slice_chunk_size: {width} ({origin})"]
         # The resample width only exists when bootstrapping ran.
         if n_bootstrap > 0:
-            notes.append(
-                f"resample_chunk_size: {resample_chunk_size} (user-set)"
-                if resample_chunk_size is not None
-                else "resample_chunk_size: auto (resolved from the memory budget)"
+            # The effects one bootstrap call sees: one slice chunk of
+            # (r, D, width, 1) when chunked, else the whole (r, D, T, K).
+            ee_shape = (
+                (len(idx_after), samples.n_params, width, 1)
+                if width < T * K
+                else (len(idx_after), samples.n_params, T, K)
             )
+            rs = _resample_width(ee_shape, ctx.Y3.dtype.itemsize, n_bootstrap, resample_chunk_size)
+            rs_origin = (
+                "user-set"
+                if resample_chunk_size is not None
+                else "resolved from the memory budget"
+            )
+            notes.append(f"resample_chunk_size: {rs} ({rs_origin})")
         _verbose.analysis_summary(
             method="jaxgsa.morris.analyze",
             problem=samples.problem,

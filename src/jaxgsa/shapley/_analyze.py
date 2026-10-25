@@ -746,15 +746,17 @@ def analyze(
             notes=[
                 f"backend: {backend}",
                 f"order: {result.order}",
-                *(
-                    f"{name}: {value} (user-set)"
-                    if value is not None
-                    else f"{name}: auto (resolved from the memory budget)"
-                    for name, value in (
-                        ("batch_size", batch_size),
-                        ("slice_chunk_size", slice_chunk_size),
-                    )
-                    if backend == "hdmr" or name == "batch_size"
+                *_chunk_notes(
+                    backend,
+                    problem,
+                    X,
+                    Y,
+                    n_runs=n_runs,
+                    n_slices=T * K,
+                    order=result.order,
+                    backend_kwargs=backend_kwargs,
+                    batch_size=batch_size,
+                    slice_chunk_size=slice_chunk_size,
                 ),
             ],
             index_name="Sh",
@@ -762,6 +764,68 @@ def analyze(
             conf=result.Sh_conf,
         )
     return result
+
+
+def _chunk_notes(
+    backend: str,
+    problem: "Problem",
+    X: Array,
+    Y: Array,
+    *,
+    n_runs: int,
+    n_slices: int,
+    order: int | None,
+    backend_kwargs: dict[str, Any],
+    batch_size: int | None,
+    slice_chunk_size: int | None,
+) -> list[str]:
+    """The verbose lines for the chunking keywords the backend ran with.
+
+    The hdmr backend reports the widths its fit resolves. The pce backend
+    resolves its own width inside the fit, so its line keeps the backend's
+    wording.
+
+    Args:
+        backend: ``"pce"`` or ``"hdmr"``.
+        problem: The problem the backend fitted.
+        X: The caller's inputs.
+        Y: The caller's outputs.
+        n_runs: Rows the fit used, after any drop.
+        n_slices: Flattened output slices ``T*K``.
+        order: The fitted order the result reports.
+        backend_kwargs: The keywords forwarded to the backend.
+        batch_size: The caller's rows per batch, or ``None``.
+        slice_chunk_size: The caller's slices per chunk, or ``None``.
+
+    Returns:
+        One line per keyword the backend reads.
+    """
+
+    def origin(value: int | None) -> str:
+        return "user-set" if value is not None else "resolved from the memory budget"
+
+    if backend != "hdmr":
+        return [
+            f"batch_size: {batch_size} (user-set)"
+            if batch_size is not None
+            else "batch_size: auto (resolved from the memory budget)"
+        ]
+    from jaxgsa.hdmr._analyze import _resolved_widths
+
+    b, cs = _resolved_widths(
+        problem,
+        n_runs,
+        n_slices,
+        jnp.result_type(jnp.asarray(X).dtype, jnp.asarray(Y).dtype, jnp.float32),
+        order=order if order is not None else int(backend_kwargs.get("order", 2)),
+        n_intervals=int(backend_kwargs.get("n_intervals", 2)),
+        batch_size=batch_size,
+        slice_chunk_size=slice_chunk_size,
+    )
+    return [
+        f"batch_size: {b} ({origin(batch_size)})",
+        f"slice_chunk_size: {cs} ({origin(slice_chunk_size)})",
+    ]
 
 
 def _with_intervals(

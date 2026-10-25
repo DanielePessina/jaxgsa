@@ -112,7 +112,7 @@ jaxgsa.dgsm.analyze
   timing:
     model sweep + estimator (includes compile on the first call): 0.4897 s
     gradients: reverse-mode autodiff (T*K=1, D=4)
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 20000 (resolved from the memory budget)
   results: top 4 of 4 parameters by nu
     1. porosity   nu=3.036e+04
     2. roughness  nu=1.224e+04
@@ -389,7 +389,7 @@ jaxgsa.dgsm.analyze
   timing:
     model sweep + estimator (includes compile on the first call): 0.6843 s
     gradients: forward-mode autodiff (T*K=40, D=3)
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 4000 (resolved from the memory budget)
   results: top 3 of 3 parameters by nu, mean over 40 output slices
     1. frequency  nu=82.16
     2. damping    nu=2.081
@@ -451,7 +451,7 @@ jaxgsa.dgsm.analyze
   timing:
     estimator (includes compile on the first call): 0.203 s
     gradients: user-supplied dfdx
-    batch_size: auto (resolved from the memory budget)
+    batch_size: not used (pre-computed dfdx, no bootstrap)
   results: top 4 of 4 parameters by nu
     1. porosity   nu=3.198e+04
     2. roughness  nu=1.229e+04

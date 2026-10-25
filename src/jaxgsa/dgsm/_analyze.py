@@ -30,10 +30,10 @@ from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import (
     _user_stacklevel,
-    at_least,
     bootstrap_checks,
     check_scalars,
     gates,
+    positive_int,
     prepare,
     validate_inputs,
 )
@@ -751,7 +751,7 @@ def analyze(
     # Poincare-inequality bound on ST assumes independent inputs, so both
     # calling conventions are refused for a correlated problem.
     checks = (
-        at_least("batch_size", batch_size, 1),
+        positive_int("batch_size", batch_size),
         *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
     )
     unit = _SPEC.invalid_unit
@@ -1007,11 +1007,25 @@ def analyze(
             gradients = f"gradients: {mode}-mode autodiff (T*K={T * K}, D={problem.n_params})"
         else:
             gradients = "gradients: user-supplied dfdx"
-        batching = (
-            f"batch_size: {batch_size} (user-set)"
-            if batch_size is not None
-            else "batch_size: auto (resolved from the memory budget)"
-        )
+        # Same bytes model the batch loops resolve with: cheap arithmetic,
+        # reported rather than re-derived by hand.
+        origin = "user-set" if batch_size is not None else "resolved from the memory budget"
+        if use_autodiff:
+            b = resolve_batch_size(
+                _jac_bytes_per_row(n_outputs, D, jnp.dtype(X.dtype).itemsize),
+                int(X.shape[0]),
+                batch_size,
+            )
+            batching = f"batch_size: {b} ({origin})"
+        elif n_bootstrap > 0:
+            b = resolve_batch_size(
+                _jac_bytes_per_row(T * K, D, jnp.dtype(dfdx_arr.dtype).itemsize),
+                int(Y_3d.shape[0]),
+                batch_size,
+            )
+            batching = f"batch_size: {b} ({origin})"
+        else:
+            batching = "batch_size: not used (pre-computed dfdx, no bootstrap)"
         _verbose.analysis_summary(
             method="jaxgsa.dgsm.analyze",
             problem=problem,

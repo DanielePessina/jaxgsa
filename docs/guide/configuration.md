@@ -225,7 +225,8 @@ Four rules, and they hold everywhere the keyword appears.
 **`batch_size` sizes row blocks, clamped to N.** It is a cap on how many rows
 are resident, not a request for a particular block count. Passing more rows
 than you have is legal and means "one shot". Below 1 it raises:
-`ValueError: batch_size must be >= 1, got 0`.
+`ValueError: batch_size must be an integer >= 1, got 0`.
+A float such as `2.0` raises the same `ValueError`.
 
 **`None` derives the width from the memory budget.** That is the default
 everywhere.
@@ -285,7 +286,7 @@ lines that differ plus the results, because the problem and timing sections are
 identical and machine-specific:
 
 ```
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 4096 (resolved from the memory budget)
   results: top 3 of 3 parameters by nu
     1. x2  nu=24.49
     2. x3  nu=10.77
@@ -297,7 +298,7 @@ identical and machine-specific:
     2. x3  nu=10.77
     3. x1  nu=7.806
 
-    batch_size: 1000000000 (user-set)
+    batch_size: 4096 (user-set)
   results: top 3 of 3 parameters by nu
     1. x2  nu=24.49
     2. x3  nu=10.77
@@ -308,7 +309,7 @@ Every summary also carries `gradients: reverse-mode autodiff (T*K=1, D=3)`.
 DGSM picks its autodiff mode from the shape, `jacfwd` when `T*K > D` and
 `jacrev` otherwise. There is no keyword for it.
 
-The summary echoes the value you passed, not the clamp. The effective width is
+The summary prints the width that ran, after the clamp. The effective width is
 `min(batch_size, N)`, so the third call ran in one shot over all 4096 rows.
 
 Lowering the budget shows the `None` rule moving. Here is a time-resolved Sobol

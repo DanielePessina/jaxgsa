@@ -89,7 +89,7 @@ jaxgsa.efast.analyze
     invalid: none found in 3 search curves (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.1799 s
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 3 (resolved from the memory budget)
     omega_0: 511, M: 4
   results: top 3 of 3 parameters by ST
     1. x1  ST=0.5507
@@ -247,7 +247,7 @@ jaxgsa.efast.analyze
     invalid: none found in 8 search curves (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.533 s
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 8 (resolved from the memory budget)
     omega_0: 511, M: 4
   results: top 5 of 8 parameters by ST
     1. x1  ST=0.7874
@@ -350,7 +350,7 @@ jaxgsa.efast.analyze
     invalid: none found in 3 search curves (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.1729 s
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 6 (resolved from the memory budget)
     omega_0: 128, M: 4
   results: top 3 of 3 parameters by ST, mean over 2 output slices
     1. frequency  ST=0.9399
@@ -396,7 +396,7 @@ jaxgsa.efast.analyze
     invalid: none found in 3 search curves (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.6224 s
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 6 (resolved from the memory budget)
     omega_0: 511, M: 4
   results: top 3 of 3 parameters by ST, mean over 2 output slices
     1. x1  ST=0.5507
@@ -454,7 +454,7 @@ jaxgsa.efast.analyze
     invalid: none found in 3 search curves (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.201 s
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 120 (resolved from the memory budget)
     omega_0: 128, M: 4
   results: top 3 of 3 parameters by ST, mean over 40 output slices
     1. damping    ST=0.8998
@@ -526,7 +526,7 @@ jaxgsa.efast.analyze
     invalid: none found in 3 search curves (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.2865 s
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 150 (resolved from the memory budget)
     omega_0: 511, M: 4
   results: top 3 of 3 parameters by ST, mean over 50 output slices
     1. frequency  ST=0.8588

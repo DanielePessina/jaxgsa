@@ -585,7 +585,7 @@ def test_scalar_argument_validation_raises_early():
         ({"n_inner": 1}, "n_inner must be >= 2"),
         ({"n_variance": 1}, "n_variance must be >= 2"),
         ({"max_centers": 0}, "max_centers must be >= 1"),
-        ({"batch_size": 0}, "batch_size must be >= 1"),
+        ({"batch_size": 0}, "batch_size must be an integer >= 1"),
         ({"key": None}, "key is required"),
         ({"gamma": -1.0}, "gamma must be a finite positive number"),
         ({"gamma": 0.0}, "gamma must be a finite positive number"),
