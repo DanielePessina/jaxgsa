@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3.0 (unreleased)
+## 1.3.0 (2026-10-25)
 
 ### Added
 
@@ -18,7 +18,7 @@
 - `hdmr.indices` now applies the same input checks as `hdmr.analyze`.
 - Each refusal message gives the reason and lists the methods that accept the family.
 
-## 1.2.1 (2026-10-22)
+## 1.2.1 (2026-10-25)
 
 ### Documentation
 
