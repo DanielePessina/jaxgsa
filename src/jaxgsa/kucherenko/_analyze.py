@@ -59,7 +59,7 @@ from jax import Array
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
 from jaxgsa._core.bootstrap import draw_row_matrix, interval
-from jaxgsa._core.entry import _user_stacklevel, bootstrap_checks, prepare
+from jaxgsa._core.entry import _user_stacklevel, bootstrap_checks, positive_int, prepare
 from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -85,6 +85,7 @@ _IRREGULAR_KWARGS = (
     "conf_level",
     "ci_method",
     "key",
+    "slice_chunk_size",
     "on_invalid",
     "keep_replicates",
 )
@@ -494,6 +495,7 @@ def analyze(
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | int | None = None,
+    slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
@@ -541,6 +543,13 @@ def analyze(
         key: A ``jax.random`` key for the bootstrap resampling. Required when
             ``n_bootstrap > 0``. Pass ``jax.random.key(0)`` if you have an
             integer seed.
+        slice_chunk_size: Maximum number of flattened ``T*K`` output slices
+            the estimators read at once. Every index is computed per slice,
+            so the value changes only the peak memory and the wall clock,
+            never an index. ``None`` (default) derives one from the active
+            memory budget (:func:`jaxgsa.config.set_memory_budget`). An
+            explicit value wins over the budget, is clamped to the number of
+            slices, and must be an integer of at least 1.
         on_invalid: What to do about non-finite model outputs. The unit here
             is one base point, which appears once in the joint block and once
             in each of the ``2D`` conditional blocks, so a single bad value
@@ -570,8 +579,9 @@ def analyze(
             holds a non-finite value under ``on_invalid="raise"``; if fewer
             than 2 base points survive a drop; if ``n_bootstrap`` is negative,
             ``conf_level`` is not in ``(0, 1)``, ``ci_method`` is not
-            ``"quantile"`` or ``"gaussian"``, or ``n_bootstrap > 0`` and no
-            ``key`` was given.
+            ``"quantile"`` or ``"gaussian"``, ``n_bootstrap > 0`` and no
+            ``key`` was given, or ``slice_chunk_size`` is given and is not an
+            integer of at least 1.
 
     Warns:
         JaxgsaWarning: If any output slice has zero variance (its indices are
@@ -608,7 +618,10 @@ def analyze(
         problem,
         Y,
         on_invalid=on_invalid,
-        checks=bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
+        checks=(
+            *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
+            positive_int("slice_chunk_size", slice_chunk_size),
+        ),
         n_expected=samples.n_runs,
         # A base point k feeds the joint row and every conditional row with
         # the same k, so one non-finite output anywhere invalidates all of
@@ -646,13 +659,14 @@ def analyze(
     # The estimators work in float64 on the host. Converting all of Y at
     # once costs twice its float32 size, plus the estimators' temporaries on
     # top. Instead the point estimates read one (N, S) block at a time
-    # (_HostBlocks), and only when even that is over the memory budget are
-    # the output slices taken a chunk at a time. Every estimate is per slice,
+    # (_HostBlocks), and only when even that is over the memory budget (or
+    # the caller set slice_chunk_size) are the output slices taken a chunk at
+    # a time. Every estimate is per slice,
     # so neither choice changes an index. The bootstrap reads every block of
     # a chunk many times, so it converts its chunk once, sized to half the
     # budget; it sizes its own resample temporaries from the budget.
     per_slice = 2 * n_blocks * N * 8 if n_bootstrap > 0 else _KUCHERENKO_LIVE_COPIES * N * 8
-    width = resolve_batch_size(per_slice, n_slices, None)
+    width = resolve_batch_size(per_slice, n_slices, slice_chunk_size)
     keep_mask = None if keep.all() else keep
     parts: list[tuple[np.ndarray, ...]] = []
     boot_parts: list[tuple[np.ndarray, np.ndarray]] = []
@@ -761,6 +775,7 @@ def analyze(
 
     if verbose:
         elapsed = _verbose.stop(t0, result.S1, result.ST)
+        origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
         _verbose.analysis_summary(
             method="jaxgsa.kucherenko.analyze",
             problem=problem,
@@ -771,9 +786,10 @@ def analyze(
             invalid=invalid,
             timings=[("compute", elapsed)],
             notes=[
+                f"slice_chunk_size: {width} ({origin})",
                 f"design: {problem.dependence} "
                 f"({'subsets=all, 2^D' if all_subsets else '2D+1'} = {n_blocks} "
-                f"blocks of {n_kept} base points)"
+                f"blocks of {n_kept} base points)",
             ],
             index_name="ST",
             values=result.ST,

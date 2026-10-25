@@ -111,6 +111,7 @@ analyze(
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | int | None = None,
     resample_chunk_size: int | None = None,
+    slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
@@ -148,6 +149,12 @@ a scalar run handles easily. `None` derives the width from the memory budget;
 an explicit value is honoured as given, capped only at `n_bootstrap`. It
 changes no number beyond float summation order.
 
+`slice_chunk_size` caps how many flattened `T*K` output slices are turned into
+elementary effects at once, so the full `(r, D, T, K)` effects tensor never
+exists for a large `T * K`. The bootstrap runs on each chunk with the same
+resamples. Every measure is per slice, so it changes no number. `None` derives
+the width from the memory budget, and the verbose summary prints it.
+
 `on_invalid` counts one trajectory as the unit, so a single non-finite value
 condemns the whole trajectory's `D + 1` rows.
 
@@ -183,7 +190,7 @@ bootstrap draws are rescaled along with the measures.
 ## indices
 
 ```python
-indices(samples, Y, *, standardize_outputs=False)
+indices(samples, Y, *, standardize_outputs=False, slice_chunk_size=None)
     -> MorrisIndices                  # mu, mu_star, sigma
 ```
 

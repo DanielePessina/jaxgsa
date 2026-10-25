@@ -243,12 +243,18 @@ answer. HSIC's memory is set by `N`, so lower `N`.
 
 ### Which keyword each method takes
 
-| Keyword | Blocks over | `analyze` functions |
+| Keyword | Blocks over | Methods |
 | --- | --- | --- |
-| `batch_size` | rows of `X` | `pce`, `hdmr`, `dgsm`, `vkoga`, and `SurrogateResult.predict` |
-| `slice_chunk_size` | flattened `(T, K)` output slices | `sobol`, `hdmr`, `pawn`, `borgonovo`, `efast`, `optimal_transport` |
+| `batch_size` | rows of `X` | `pce`, `hdmr`, `dgsm`, `vkoga`, `shapley`, and `SurrogateResult.predict` |
+| `slice_chunk_size` | flattened `(T, K)` output slices | `sobol`, `efast`, `borgonovo`, `pawn`, `optimal_transport`, `hdmr`, `kucherenko`, `morris`, `rank`, and `shapley` with `backend="hdmr"` |
 | `resample_chunk_size` | bootstrap replicates | `morris` |
-| none | | `hsic`, `shapley`, `kucherenko` |
+| none | | `hsic` |
+
+Each keyword is on `analyze` and, where the method has one, on `indices`
+too. `vkoga` and `kucherenko` have no `indices`. `shapley` passes both
+keywords to its backend. The PCE backend fits every output slice in one
+shared solve, so `slice_chunk_size` with `backend="pce"` raises
+`ValueError`.
 
 `slice_chunk_size` and `resample_chunk_size` follow the same four rules over
 their own axis, clamped to the number of slices or replicates there are.
