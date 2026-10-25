@@ -24,12 +24,14 @@ Array shape conventions used throughout:
 """
 
 import dataclasses
+import math
 from functools import lru_cache
 from typing import Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import numpy.typing as npt
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
@@ -54,7 +56,7 @@ from jaxgsa._core.result import CIInfo
 from jaxgsa._core.sampling import require_design
 from jaxgsa._core.validation import (
     YLayout,
-    _prepare_Y,
+    _layout_of,
     _standardize_outputs,
     as_key,
 )
@@ -253,34 +255,6 @@ def _separate_output_values(
     return A, AB, BA, B
 
 
-def _separate_flattened(
-    Y: Array, D: int, calc_second_order: bool
-) -> tuple[Array, Array, Array | None, Array]:
-    """Standardize, split into the Saltelli blocks and fold the slices in one call.
-
-    Exactly :func:`_separate_output_values` followed by :func:`_flatten_slices`,
-    traced as a single executable instead of the ~8 eager dispatches the two
-    functions make over the expanded array. Both the point-estimate path and
-    the bootstrap path go through it, so they stay the one seam the estimator
-    front half always was. The row-count check of
-    :func:`_separate_output_values` runs at trace time, so a hand-built
-    misaligned ``Y`` still raises the same error.
-
-    Args:
-        Y: Expanded outputs, shape ``(N * step, ...)``, rows in Saltelli
-            group order.
-        D: Number of input parameters.
-        calc_second_order: Whether the layout includes the BA blocks.
-
-    Returns:
-        ``(A_flat, AB_flat, BA_flat, B_flat)`` with shapes ``(S, N)``,
-        ``(S, N, D)``, ``(S, N, D)`` and ``(S, N)``; ``BA_flat`` is ``None``
-        when second order is off. Standardized per output slice, exactly as
-        the two component functions produced.
-    """
-    return _get_separate_flatten(D, calc_second_order)(Y)
-
-
 @lru_cache(maxsize=None)
 def _get_separate_flatten(D: int, calc_second_order: bool):
     """Build the jitted standardize-split-flatten for one (D, design) pair.
@@ -314,17 +288,37 @@ def _get_chunk_front(D: int, calc_second_order: bool, width: int):
         width: Number of output slices in the chunk.
 
     Returns:
-        A jitted function of ``(Y3, start)`` returning the flattened blocks of
-        slices ``start : start + width``.
+        A jitted function of ``(Y, start)`` returning the flattened blocks of
+        slices ``start : start + width``. ``Y`` may have rank 1, 2 or 3; its
+        trailing axes are read as the flattened ``T * K`` slices.
     """
 
-    def fn(Y3: Array, start: Array) -> tuple[Array, Array, Array | None, Array]:
-        rows, T, K = Y3.shape
-        cols = jax.lax.dynamic_slice_in_dim(Y3.reshape(rows, T * K), start, width, axis=1)
+    def fn(Y: Array, start: Array) -> tuple[Array, Array, Array | None, Array]:
+        # The fold to (rows, T * K) happens in here, where a reshape is free.
+        # An eager reshape (or an eager promotion to rank 3) of ``Y`` would
+        # write a full copy of it first.
+        rows = Y.shape[0]
+        cols = jax.lax.dynamic_slice_in_dim(Y.reshape(rows, -1), start, width, axis=1)
         A, AB, BA, B = _separate_output_values(cols.reshape(rows, width, 1), D, calc_second_order)
         return _flatten_slices(A, AB, BA, B)
 
     return jax.jit(fn)
+
+
+def _promoted_slice_dims(Y: Array) -> tuple[int, int]:
+    """Return the ``(T, K)`` that :func:`_prepare_Y` would give ``Y``, from its shape.
+
+    Args:
+        Y: Outputs of rank 1, 2 or 3, sample axis first.
+
+    Returns:
+        ``(1, 1)`` for rank 1, ``(1, K)`` for rank 2, ``(T, K)`` for rank 3.
+    """
+    if Y.ndim == 1:
+        return 1, 1
+    if Y.ndim == 2:
+        return 1, int(Y.shape[1])
+    return int(Y.shape[1]), int(Y.shape[2])
 
 
 class _SeparatedSlices:
@@ -338,6 +332,10 @@ class _SeparatedSlices:
     the same columns of the whole array, and only one chunk's working copy
     exists at a time.
 
+    ``Y`` is kept at the caller's own rank. Promoting it to ``(N, T, K)``
+    outside a trace is an eager reshape, which writes a full copy of ``Y``;
+    the chunk executable folds the trailing axes itself, for free.
+
     Attributes:
         total: Number of output slices ``T * K``.
         base_n: Base sample size ``N``.
@@ -346,10 +344,11 @@ class _SeparatedSlices:
     """
 
     def __init__(self, Y: Array, D: int, calc_second_order: bool) -> None:
-        """Wrap a promoted ``(N * step, T, K)`` array.
+        """Wrap an expanded ``(N * step, ...)`` array at any output rank.
 
         Args:
-            Y: Expanded outputs promoted to ``(N * step, T, K)``.
+            Y: Expanded outputs, shape ``(N * step,)``, ``(N * step, K)`` or
+                ``(N * step, T, K)``.
             D: Number of input parameters.
             calc_second_order: Whether the layout includes the BA blocks.
 
@@ -360,7 +359,7 @@ class _SeparatedSlices:
         self._D = D
         self.calc_second_order = calc_second_order
         self._rows = Y.shape[0]
-        self.total = Y.shape[1] * Y.shape[2]
+        self.total = math.prod(Y.shape[1:])
         self._Y = Y
         probe = jax.ShapeDtypeStruct((self._rows, 1, 1), Y.dtype)
         a, _, _, _ = jax.eval_shape(_get_separate_flatten(D, calc_second_order), probe)
@@ -380,13 +379,11 @@ class _SeparatedSlices:
             ``(width, N, D)`` and ``(width, N)``; ``BA`` is ``None`` without
             second order. Lanes past ``end - start`` are zero padding.
         """
-        if start == 0 and end == self.total:
-            A, AB, BA, B = _separate_flattened(self._Y, self._D, self.calc_second_order)
-        else:
-            # The slice happens inside the executable, so the only new buffers
-            # are one chunk's blocks, never a copy of the whole ``Y``.
-            front = _get_chunk_front(self._D, self.calc_second_order, end - start)
-            A, AB, BA, B = front(self._Y, start)
+        # The slice happens inside the executable, so the only new buffers
+        # are one chunk's blocks, never a copy of the whole ``Y``. A chunk
+        # that spans every slice is the same program with a no-op slice.
+        front = _get_chunk_front(self._D, self.calc_second_order, end - start)
+        A, AB, BA, B = front(self._Y, start)
         return (
             pad_slice_axis(A, width),
             pad_slice_axis(AB, width),
@@ -689,15 +686,15 @@ def _indices_from_expanded(
         # gather into the front half (one executable, measured ~2.2x faster
         # than the eager pipeline); wide layouts run slower fused, so they
         # gather eagerly and take the standard path below.
-        _, layout = _prepare_Y(Y)
-        if layout is YLayout.SCALAR:
+        if _layout_of(Y) is YLayout.SCALAR:
             fused = _get_fused_scalar_indices(D, calc_second_order, estimator)
-            return _squeeze_indices(layout, fused(Y, expand_map))
+            return _squeeze_indices(YLayout.SCALAR, fused(Y, expand_map))
         Y = jnp.take(Y, expand_map, axis=0)
 
-    # Promote to uniform 3-D shape (N, T, K) so downstream code is shape-agnostic.
-    Y, layout = _prepare_Y(Y)
-    _, T, K = Y.shape
+    # Read the (T, K) the promotion would give, without promoting: an eager
+    # promotion would copy all of Y. _SeparatedSlices folds the axes itself.
+    layout = _layout_of(Y)
+    T, K = _promoted_slice_dims(Y)
 
     S1_out, ST_out, S2_out = _point_indices_3d(
         _SeparatedSlices(Y, D, calc_second_order),
@@ -918,11 +915,11 @@ def _analyze_bootstrap(
     endpoints before the next chunk is processed. Keeping replicates opts in
     to assembling the full public draw arrays.
     """
-    Y, layout = _prepare_Y(Y)
+    layout = _layout_of(Y)
     D = samples.n_params
     calc_second_order = samples.calc_second_order
 
-    _, T, K = Y.shape
+    T, K = _promoted_slice_dims(Y)
     slices = _SeparatedSlices(Y, D, calc_second_order)
     base_n = slices.base_n
     total = T * K
@@ -1106,6 +1103,27 @@ def _analyze_bootstrap(
         S2_conf=S2_conf,
         ci=ci,
     )
+
+
+def _expansion_is_identity(samples: SobolSamples, Y: npt.ArrayLike) -> bool:
+    """Whether expanding ``Y`` to the design layout would only copy it.
+
+    A design with no repeated row has ``expanded_to_unique == arange``, and
+    the expansion is then a gather that writes a full copy of ``Y`` and
+    changes nothing. For a wide ``Y`` that copy is the size of the input, so
+    it is skipped. A scalar ``Y`` keeps the expansion: it is small, and under
+    ``on_invalid='skip'`` the scalar path fuses the gather into its kernel.
+
+    Args:
+        samples: The Sobol design.
+        Y: The caller's outputs, before any conversion.
+
+    Returns:
+        True when the expansion is the identity and ``Y`` has rank 2 or more.
+    """
+    if np.ndim(Y) < 2 or samples.n_runs != samples.n_expanded:
+        return False
+    return bool(np.array_equal(samples.expanded_to_unique, np.arange(samples.n_expanded)))
 
 
 def analyze(
@@ -1303,7 +1321,7 @@ def analyze(
             positive_int("slice_chunk_size", slice_chunk_size),
         ),
         n_expected=int(samples.samples.shape[0]),
-        expand=samples.expand_outputs,
+        expand=None if _expansion_is_identity(samples, Y) else samples.expand_outputs,
         n_units=base_n,
         unit_of_row=unit_of_row,
         # The Saltelli layout groups units contiguously, step rows each.
@@ -1321,11 +1339,19 @@ def analyze(
     # branches on Y's own rank, so this is ctx.Y and not ctx.Y3.
     Y = ctx.Y
     invalid = ctx.invalid
-    if not ctx.keep.all():
+    _, T, K = ctx.Y3.shape
+    layout = ctx.layout
+    keep = ctx.keep
+    deferred_expand = ctx.deferred_expand
+    # ctx.Y3 is a promoted copy of Y whenever Y has rank 1 or 2. Nothing below
+    # reads it, so the context is dropped here instead of holding that copy
+    # alive through the estimator.
+    del ctx
+    if not keep.all():
         trailing = Y.shape[1:]
         # Boolean indexing gives a variable-length result, which JAX cannot
         # trace, so the compaction round-trips through NumPy.
-        grouped = np.asarray(Y).reshape(base_n, step, *trailing)[ctx.keep]
+        grouped = np.asarray(Y).reshape(base_n, step, *trailing)[keep]
         Y = jnp.asarray(grouped.reshape(-1, *trailing))
 
     # on_invalid='skip' held the expansion back from the preamble (see
@@ -1337,11 +1363,11 @@ def analyze(
     # the expanded rows, so both expand eagerly here: the same thing prepare
     # would have done, one dispatch earlier in the pipeline.
     expand_map = None
-    if ctx.deferred_expand is not None:
-        if n_bootstrap == 0 and ctx.keep.all() and ctx.layout is YLayout.SCALAR:
+    if deferred_expand is not None:
+        if n_bootstrap == 0 and keep.all() and layout is YLayout.SCALAR:
             expand_map = samples._expanded_to_unique_jax
         else:
-            Y = ctx.deferred_expand(Y)
+            Y = deferred_expand(Y)
 
     # The outputs are standardized inside _separate_output_values, which both
     # paths below reach, so there is nothing to do to Y here.
@@ -1374,7 +1400,6 @@ def analyze(
 
     if verbose:
         elapsed = _verbose.stop(t0, result.S1, result.ST)
-        _, T, K = ctx.Y3.shape
         # Same resolver the point kernel ran, on the same shapes: cheap
         # arithmetic, reported rather than re-derived by hand.
         cs = resolve_point_chunk_size(

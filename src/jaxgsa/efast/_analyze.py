@@ -27,7 +27,7 @@ References:
 from __future__ import annotations
 
 import warnings
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import NamedTuple, cast
 
 import jax
@@ -47,7 +47,7 @@ from jaxgsa._core.irregular import (
     analyze_irregular,
 )
 from jaxgsa._core.sampling import require_design
-from jaxgsa._core.validation import YLayout, _prepare_Y, row_count_message
+from jaxgsa._core.validation import YLayout, _layout_of, row_count_message
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.efast._result import EFASTResult
 from jaxgsa.efast._sampling import EFASTSamples, _frequency_plan
@@ -177,30 +177,61 @@ def _get_efast_kernel(N: int, M: int, omega_0: int, analysis_max: int):
     return jax.jit(jax.vmap(kernel))
 
 
-def _curve_chunk(Y_curves: Array, start: int, end: int, n_slices: int) -> Array:
-    """Gather rows ``start:end`` of the flattened ``(D * T * K, N)`` batch.
+@lru_cache(maxsize=32)
+def _get_curve_chunk(D: int, N: int, width: int):
+    """Build the jitted gather of ``width`` rows of the flattened curve batch.
 
-    Row ``f`` is curve ``f // (T * K)`` and output slice ``f % (T * K)``.
-    Gathering only the requested rows avoids a full transposed copy of ``Y``.
+    Row ``f`` of the ``(D * T * K, N)`` batch is curve ``f // (T * K)`` and
+    output slice ``f % (T * K)``. The reshapes and the gather run inside one
+    executable, so the only new buffer is the ``(width, N)`` chunk. Done
+    eagerly, the reshape of ``Y`` to ``(D, N, T * K)`` alone writes a full
+    copy of ``Y`` on every chunk. The chunk start is a traced scalar, so every
+    chunk of a call shares one compilation, the ragged last one included.
 
     Args:
-        Y_curves: Outputs split into curves, shape ``(D, N, T, K)``.
-        start: First flattened row of the chunk.
-        end: One past the last flattened row.
-        n_slices: ``T * K``.
+        D: Number of search curves.
+        N: Number of samples per curve.
+        width: Rows per chunk.
 
     Returns:
-        Array of shape ``(end - start, N)``.
+        A jitted function of ``(Y, start)``, with ``Y`` the outputs at any
+        rank, ``(D * N, ...)``, returning the ``(width, N)`` chunk. Rows past
+        the end repeat the last row; the caller drops them.
     """
-    D, N = Y_curves.shape[:2]
-    flat = Y_curves.reshape(D, N, n_slices)
-    rows = np.arange(start, end)
-    return flat[rows // n_slices, :, rows % n_slices]
+
+    def fn(Y: Array, start: Array) -> Array:
+        flat = Y.reshape(D, N, -1)
+        n_slices = flat.shape[2]
+        rows = jnp.minimum(start + jnp.arange(width), D * n_slices - 1)
+        return flat[rows // n_slices, :, rows % n_slices]
+
+    return jax.jit(fn)
 
 
-def _indices_from_3d(
-    Y3: Array,
-    layout: YLayout,
+@partial(jax.jit, static_argnames=("D", "N"))
+def _count_zero_curves(Y: Array, D: int, N: int) -> Array:
+    """Count search-curve/output slices with zero variance, in one program.
+
+    A slice counts when its variance along the curve is zero but some other
+    curve of the same output slice varies (a slice that is constant on every
+    curve gets the zero-variance warning from :func:`prepare` instead).
+    Traced as one executable so the ``(D, N, T * K)`` view and the centred
+    temporaries of ``var`` are never written out in full.
+
+    Args:
+        Y: Outputs at any rank, ``(D * N, ...)``.
+        D: Number of search curves (static).
+        N: Number of samples per curve (static).
+
+    Returns:
+        Scalar integer count.
+    """
+    curve_zero = jnp.var(Y.reshape(D, N, -1), axis=1) == 0  # (D, T * K)
+    return jnp.sum(curve_zero & ~jnp.all(curve_zero, axis=0, keepdims=True))
+
+
+def _indices_from_outputs(
+    Y: Array,
     D: int,
     N: int,
     M: int,
@@ -208,16 +239,18 @@ def _indices_from_3d(
     analysis_max: int,
     slice_chunk_size: int | None,
 ) -> tuple[Array, Array]:
-    """Run the eFAST kernel over every output slice of a promoted ``Y``.
+    """Run the eFAST kernel over every output slice of ``Y``.
 
     This is the shared estimator body of :func:`analyze` and :func:`indices`,
     so the two can never report different numbers. Everything it branches on
     is a shape or a Python scalar, and it reads no array value on the host.
 
+    ``Y`` stays at the caller's rank. Promoting it to ``(n_runs, T, K)``
+    outside a trace is an eager reshape that copies all of it; the chunk
+    gather folds the trailing axes inside its own executable instead.
+
     Args:
-        Y3: Model outputs promoted to ``(n_runs, T, K)``.
-        layout: Rank the caller passed, used to squeeze the promoted axes back
-            off the result.
+        Y: Model outputs, ``(n_runs,)``, ``(n_runs, K)`` or ``(n_runs, T, K)``.
         D: Number of parameters, which is also the number of search curves.
         N: Number of samples per search curve.
         M: Interference factor.
@@ -230,51 +263,39 @@ def _indices_from_3d(
         ``(S1, ST)`` at the caller's own rank: ``(D,)``, ``(K, D)`` or
         ``(T, K, D)``.
     """
-    _, T, K = Y3.shape
-
-    # Split the contiguous search curves into (D, N, T, K).
-    Y_reshaped = Y3.reshape(D, N, T, K)
-
+    layout = _layout_of(Y)
     if layout is YLayout.SCALAR:
-        # Scalar path: squeeze the trailing singletons and vmap over the D
-        # curves only.
-        Y_curves = Y_reshaped[:, :, 0, 0]  # (D, N)
+        # Scalar path: split the contiguous search curves into (D, N) and
+        # vmap over the D curves only. Y is one value per run, so the eager
+        # reshape is cheap.
         kernel = _get_efast_kernel(N, M, omega_0, analysis_max)
-        return kernel(Y_curves)  # each (D,)
-
-    # Batched path: flatten (D, T, K) into a single vmap axis.
-    # Transposed one chunk at a time below, so no full-size copy of Y exists.
+        return kernel(Y.reshape(D, N))  # each (D,)
+    T, K = (1, Y.shape[1]) if layout is YLayout.MULTI_OUTPUT else Y.shape[1:]
+    # Batched path: flatten (D, T, K) into a single vmap axis, gathered one
+    # chunk at a time below, so no full-size copy of Y exists.
     total = D * T * K
     # One vmapped slice costs a handful of length-N arrays, so the chunk
     # follows the transient-memory budget when the caller gives no size.
-    itemsize = jnp.dtype(jnp.result_type(Y3.dtype, jnp.float32)).itemsize
+    itemsize = jnp.dtype(jnp.result_type(Y.dtype, jnp.float32)).itemsize
     cs = resolve_batch_size(_EFAST_LIVE_ARRAYS * N * itemsize, total, slice_chunk_size)
     batched = _get_efast_kernel(N, M, omega_0, analysis_max)
-
+    gather = _get_curve_chunk(D, N, cs)
     s1_parts: list[Array] = []
     st_parts: list[Array] = []
     for start in range(0, total, cs):
-        end = min(start + cs, total)
-        actual = end - start
-        batch = _curve_chunk(Y_reshaped, start, end, T * K)
-        if actual < cs:
-            # dtype= keeps the pad in the batch's own dtype: an unannotated
-            # jnp.zeros is float64 under x64, which would promote the whole
-            # trailing chunk and re-trace the kernel at a second dtype.
-            pad = jnp.zeros((cs - actual, N), dtype=batch.dtype)
-            batch = jnp.concatenate([batch, pad], axis=0)
-        s1_chunk, st_chunk = batched(batch)
+        # The last chunk is padded to cs rows by the gather (it repeats the
+        # final row), so the kernel traces once. Every row is its own vmap
+        # lane, so the padding cannot reach a real row, and it is dropped.
+        actual = min(cs, total - start)
+        s1_chunk, st_chunk = batched(gather(Y, start))
         s1_parts.append(s1_chunk[:actual])
         st_parts.append(st_chunk[:actual])
-
     S1_flat = jnp.concatenate(s1_parts)  # (D*T*K,)
     ST_flat = jnp.concatenate(st_parts)
-
     # Reshape to (D, T, K), then transpose to the (T, K, D) convention.
     S1 = S1_flat.reshape(D, T, K).transpose(1, 2, 0)
     ST = ST_flat.reshape(D, T, K).transpose(1, 2, 0)
-
-    # Drop the singleton dims that _prepare_Y inserted.
+    # Drop the singleton dims the promotion to (T, K) would have inserted.
     return layout.squeeze(S1), layout.squeeze(ST)
 
 
@@ -363,9 +384,8 @@ def indices(
     # Rebuild the frequency plan sample() used, from the design metadata that
     # travels inside EFASTSamples.
     plan = _frequency_plan(D, N, M)
-    Y3, layout = _prepare_Y(Y_arr)
-    S1, ST = _indices_from_3d(
-        Y3, layout, D, N, M, plan.omega_0, plan.analysis_max, slice_chunk_size
+    S1, ST = _indices_from_outputs(
+        Y_arr, D, N, M, plan.omega_0, plan.analysis_max, slice_chunk_size
     )
     return EFASTIndices(S1, ST)
 
@@ -491,7 +511,11 @@ def analyze(
         unit_stride=N,
     )
     invalid = ctx.invalid
-    Y = ctx.Y3
+    # The caller's own array, not ctx.Y3: for a rank-1 or rank-2 Y the
+    # promoted copy is a full copy of it, and nothing below needs it.
+    Y = ctx.Y
+    _, T, K = ctx.Y3.shape
+    del ctx
 
     # Rebuild the frequency plan sample() used, from the design metadata that
     # travels inside EFASTSamples. Both sides read the same numbers, so the
@@ -499,18 +523,13 @@ def analyze(
     plan = _frequency_plan(D, N, M)
     omega_0 = plan.omega_0
 
-    _, T, K = Y.shape
-    Y_reshaped = Y.reshape(D, N, T, K)
-
     # Per-curve zero-variance check. The global zero-variance warning that
     # prepare() ran (see _core/entry.py) can miss a curve where a single
     # parameter has no effect, giving V=0 on that curve alone and a silent
     # NaN index.
-    per_curve_var = jnp.var(Y_reshaped, axis=1)  # (D, T, K)
     # A slice that is constant on every curve is a constant output. prepare()
     # already warned about it, so only the partly-flat slices are counted here.
-    curve_zero = per_curve_var == 0
-    n_zero_curves = int(jnp.sum(curve_zero & ~jnp.all(curve_zero, axis=0, keepdims=True)))
+    n_zero_curves = int(_count_zero_curves(Y, D=D, N=N))
     if n_zero_curves > 0:
         warnings.warn(
             f"jaxgsa.efast: {n_zero_curves} search-curve/output slice(s) have zero "
@@ -520,7 +539,7 @@ def analyze(
         )
 
     t0 = _verbose.tic()
-    S1, ST = _indices_from_3d(Y, ctx.layout, D, N, M, omega_0, plan.analysis_max, slice_chunk_size)
+    S1, ST = _indices_from_outputs(Y, D, N, M, omega_0, plan.analysis_max, slice_chunk_size)
 
     result = EFASTResult(
         S1=S1,
