@@ -240,6 +240,30 @@ def test_float32_never_takes_a_direct_pair_solve():
     from jaxgsa.hdmr import _fit
 
     assert _fit._pair_solver(500, 4, 10, 1000, 4) == "cg"
+    assert _fit._pair_solver(500, 4, 10, 25, 4) == "cg"
+
+
+@pytest.mark.parametrize(("D", "N", "spread", "seed"), [(8, 1024, 0.3, 3), (5, 800, 1e-3, 1)])
+def test_float32_narrow_input_gives_no_spurious_pairs(D, N, spread, seed):
+    """An input that does not fill its bounds must not create pair indices.
+
+    Its projected pair blocks are float32 round-off. A float32 direct
+    (factored) solve fitted them: spurious S2 up to 0.0067 at D = 8 and
+    0.0068 at D = 5. The early-stopped pair CG gives 0.0002 (float64: 0.0003).
+    The only true pair is x2 x3.
+    """
+    rng = np.random.default_rng(seed)
+    X = rng.uniform(size=(N, D))
+    X[:, D - 1] = 0.5 + spread * rng.uniform(size=N)
+    Y = np.sin(2 * np.pi * X[:, 0]) + X[:, 1] ** 2 + 2 * X[:, 2] * X[:, 3]
+    problem = Problem(names=[f"x{i}" for i in range(D)], bounds=[(0.0, 1.0)] * D)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = _fit_order2(problem, jnp.asarray(X, jnp.float32), jnp.asarray(Y, jnp.float32))
+    S2 = np.asarray(res.S2, dtype=float)
+    assert S2[2, 3] == pytest.approx(0.035, abs=0.005)
+    S2[2, 3] = S2[3, 2] = 0.0
+    assert np.nanmax(np.abs(S2)) < 5e-4
 
 
 def test_all_pair_solvers_drop_a_dead_pair_alike(x64, monkeypatch):

@@ -208,7 +208,7 @@ def _ridge_eye(gram: Array, ridge: float, m: int) -> Array:
     Returns:
         Array of shape ``(..., m, m)``.
     """
-    return ridge * _ridge_scale(gram)[..., None, None] * jnp.eye(m)
+    return ridge * _ridge_scale(gram)[..., None, None] * jnp.eye(m, dtype=gram.dtype)
 
 
 def _ridge_scale(gram: Array) -> Array:
@@ -377,7 +377,8 @@ def _first_order_pinv(G1: Array) -> Array:
 def _pair_normal_pass(
     coefs: list[Array],
     A: Array,
-    rows: list[tuple[int, int]],
+    b: int,
+    n_row_batches: int,
     X_p: Array,
     w_full: Array,
     build: Callable[..., list[Array]],
@@ -391,7 +392,8 @@ def _pair_normal_pass(
     Args:
         coefs: Pair coefficients per lane chunk, each ``(cs, n2, m2)``.
         A: Projection of B2 onto the first-order space, ``(P, m2, n2)``.
-        rows: Row batch bounds.
+        b: Rows per batch.
+        n_row_batches: Number of row batches.
         X_p: Padded inputs.
         w_full: Row mask.
         build: Basis builder for orders up to 2.
@@ -402,14 +404,76 @@ def _pair_normal_pass(
 
     Returns:
         ``Bt^T Bt c`` for each lane chunk, without the ridge term.
+
+    The row batches run in a ``fori_loop``, so only one batch of bases is
+    alive at a time. Unrolled in Python inside the CG loop, XLA was free to
+    keep every batch's bases alive at once: at D = 64, N = 4096 the float32
+    fit went above 3 GiB, and 1.2 GiB with the loop.
     """
     vs = [jnp.einsum("pmj,ljm->lp", A, c) for c in coefs]
     accs = [(jnp.zeros_like(v), jnp.zeros_like(c)) for v, c in zip(vs, coefs, strict=True)]
-    for lo, hi in rows:
-        B1_b, B2_b = build(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)[:2]
-        for j in range(len(coefs)):
-            accs[j] = _acc_pair_normal(B1_b, B2_b, coefs[j], vs[j], accs[j])
+
+    def body(i: Array, accs: list[tuple[Array, Array]]) -> list[tuple[Array, Array]]:
+        X_b = jax.lax.dynamic_slice_in_dim(X_p, i * b, b)
+        w_b = jax.lax.dynamic_slice_in_dim(w_full, i * b, b)
+        B1_b, B2_b = build(X_b, w_b, c2_idx, c3_idx, beta2, beta3)[:2]
+        return [
+            _acc_pair_normal(B1_b, B2_b, c, v, acc)
+            for c, v, acc in zip(coefs, vs, accs, strict=True)
+        ]
+
+    accs = jax.lax.fori_loop(0, n_row_batches, body, accs)
     return [g2 - jnp.einsum("pmj,lp->ljm", A, g1) for g1, g2 in accs]
+
+
+def _pair_normal_cached(coefs: list[Array], A: Array, B1: Array, B2: Array) -> list[Array]:
+    """Apply the projected pair normal matrix with the bases of all rows held.
+
+    The arithmetic is that of :func:`_pair_normal_pass` with one row batch,
+    ``B2 c - B1 (A c)``. Holding the projected basis ``B2 - B1 A`` instead
+    was measured to be worse in float32: at D = 8, N = 1024 with one input on
+    (0.5, 0.501) the pair CG stalled at relative residual 0.07 and S2 of the
+    true pair fell from 0.036 to 0.026.
+
+    Args:
+        coefs: Pair coefficients per lane chunk, each ``(cs, n2, m2)``.
+        A: Projection of B2 onto the first-order space, ``(P, m2, n2)``.
+        B1: First-order basis of all padded rows, ``(N_pad, m1, n1)``.
+        B2: Pair basis of all padded rows, ``(N_pad, m2, n2)``.
+
+    Returns:
+        ``Bt^T Bt c`` for each lane chunk, without the ridge term.
+    """
+    out = []
+    for c in coefs:
+        v = jnp.einsum("pmj,ljm->lp", A, c)
+        g1, g2 = _acc_pair_normal(B1, B2, c, v, (jnp.zeros_like(v), jnp.zeros_like(c)))
+        out.append(g2 - jnp.einsum("pmj,lp->ljm", A, g1))
+    return out
+
+
+def _pair_bases(
+    rows: list[tuple[int, int]],
+    X_p: Array,
+    w_full: Array,
+    build: Callable[..., list[Array]],
+    basis_idx: tuple[Array, Array, Array, Array],
+) -> tuple[Array, Array]:
+    """Build the first-order and pair bases of every padded row.
+
+    Args:
+        rows: Row batch bounds.
+        X_p: Padded inputs.
+        w_full: Row mask.
+        build: Basis builder for orders up to 2.
+        basis_idx: ``(c2_idx, c3_idx, beta2, beta3)``.
+
+    Returns:
+        ``B1``, ``(N_pad, m1, n1)``, and ``B2``, ``(N_pad, m2, n2)``, zero on
+        padded rows.
+    """
+    blocks = [build(X_p[lo:hi], w_full[lo:hi], *basis_idx)[:2] for lo, hi in rows]
+    return jnp.concatenate([b[0] for b in blocks]), jnp.concatenate([b[1] for b in blocks])
 
 
 _PAIR_ITER_FACTOR = 10
@@ -442,8 +506,9 @@ def _joint_pair_solve(
     once per pair, so the pairs add up to far more than the residual. The
     joint ridge solution ``(Bt^T Bt + lam) c = Bt^T r`` has no such
     overshoot. It is solved without forming the ``n2 m2`` square matrix: each
-    CG step is one pass over the rows (:func:`_pair_normal_pass`). The
-    per-term solve is the preconditioner and the start.
+    CG step is one pass over the rows (:func:`_pair_normal_pass`) or two
+    products with the cached projected basis. The per-term solve is the
+    preconditioner and the start.
 
     Args:
         BtB: Projected per-term Gram blocks, ``(n2, m2, m2)``.
@@ -453,9 +518,16 @@ def _joint_pair_solve(
         sweep: Applies the unregularized normal matrix to a list of chunks.
 
     Returns:
-        The pair coefficients per lane chunk, each ``(cs, m2, n2)``, the final
+        The pair coefficients per lane chunk, each ``(cs, m2, n2)``, the
         worst relative residual over all lanes, and the tolerance it was
-        held to.
+        held to. Each lane returns its best iterate, by recurrence residual.
+
+    In float32 this solve relies on stopping early. The projected system holds
+    round-off in near-null directions (an input that does not fill its
+    bounds); a solve that converges further fits them. Measured at D = 8,
+    N = 1024 with one input on (0.5, 0.8): spurious S2 up to 0.0067 with a
+    factored float32 solve, 0.0019 with an SPD-clipped preconditioner, and
+    0.0002 with this CG.
     """
     m_basis = BtB.shape[1]
     lam = _ridge_eye(BtB, ridge, m_basis)  # (n2, m2, m2)
@@ -464,7 +536,7 @@ def _joint_pair_solve(
     # is zero, so it starts at zero and its search direction stays zero, and
     # its residual is masked out.
     _, live = _live_pairs(BtB, ridge)
-    eye = jnp.eye(m_basis)
+    eye = jnp.eye(m_basis, dtype=BtB.dtype)
     Minv = jnp.where(
         live[:, None, None], jnp.linalg.inv(jnp.where(live[:, None, None], BtB + lam, eye)), 0.0
     )
@@ -504,14 +576,17 @@ def _joint_pair_solve(
             jnp.stack([jnp.max(jnp.sqrt(d) / b) for d, b in zip(dot(r, r), bnorm, strict=True)])
         )
 
+    def lane_rel(r: list[Array]) -> list[Array]:
+        return [jnp.sqrt(d) / b for d, b in zip(dot(r, r), bnorm, strict=True)]
+
     def cond(state: tuple) -> Array:
-        _, r, _, _, k, _, k_best = state
+        _, r, _, _, k, _, k_best, _, _ = state
         # Stop at the tolerance, at the step cap, or when the residual has not
         # improved for _PAIR_STALL steps (float32 stalls above the tolerance).
         return (rel_res(r) >= tol) & (k < max_iter) & (k - k_best < stall)
 
     def body(state: tuple) -> tuple:
-        x, r, p, rz, k, best, k_best = state
+        x, r, p, rz, k, best, k_best, x_best, lane_best = state
         Mp = sweep(p)
         Ap = [m + lam_diag[None] * pp for m, pp in zip(Mp, p, strict=True)]
         pAp = dot(p, Ap)
@@ -532,6 +607,15 @@ def _joint_pair_solve(
         p = [zz + be[:, None, None] * pp for zz, be, pp in zip(z, beta, p, strict=True)]
         rel_new = rel_res(r)
         improved = rel_new < 0.99 * best
+        # Keep each lane's best iterate. Float32 CG often stalls and then
+        # drifts, so the last iterate can be worse than an earlier one.
+        lr = lane_rel(r)
+        better = [n < o for n, o in zip(lr, lane_best, strict=True)]
+        x_best = [
+            jnp.where(bt[:, None, None], xx, xb)
+            for bt, xx, xb in zip(better, x, x_best, strict=True)
+        ]
+        lane_best = [jnp.minimum(n, o) for n, o in zip(lr, lane_best, strict=True)]
         return (
             x,
             r,
@@ -540,11 +624,14 @@ def _joint_pair_solve(
             k + 1,
             jnp.where(improved, rel_new, best),
             jnp.where(improved, k + 1, k_best),
+            x_best,
+            lane_best,
         )
 
-    init = (x, r, z, dot(r, z), jnp.array(0), rel_res(r), jnp.array(0))
-    x, r, *_ = jax.lax.while_loop(cond, body, init)
-    return [xx.transpose(0, 2, 1) for xx in x], rel_res(r), tol
+    init = (x, r, z, dot(r, z), jnp.array(0), rel_res(r), jnp.array(0), x, lane_rel(r))
+    *_, x_best, lane_best = jax.lax.while_loop(cond, body, init)
+    worst = jnp.max(jnp.stack([jnp.max(lb) for lb in lane_best]))
+    return [xx.transpose(0, 2, 1) for xx in x_best], worst, tol
 
 
 def pair_solve_warning(rel: Array | None, max_iter: int) -> str | None:
@@ -581,11 +668,11 @@ def _get_pair_solve(m: int, b: int, n_row_batches: int, max_iter: int, ridge: fl
 
     Returns:
         A jitted function ``(X_p, w, c2_idx, c3_idx, beta2, beta3, A, BtB,
-        rhs) -> (C2, rel, tol)`` where ``rhs`` and ``C2`` stack the lane
-        chunks on the leading axis.
+        rhs, bases) -> (C2, rel)`` where ``rhs`` and ``C2`` stack the lane
+        chunks on the leading axis. ``bases`` is ``(B1, B2)`` of every padded
+        row (:func:`_pair_bases`), or ``None`` to rebuild them on every step.
     """
     build = _get_build_bases(m, True, False)
-    rows = [(i * b, i * b + b) for i in range(n_row_batches)]
 
     @jax.jit
     def solve(
@@ -598,16 +685,21 @@ def _get_pair_solve(m: int, b: int, n_row_batches: int, max_iter: int, ridge: fl
         A: Array,
         BtB: Array,
         rhs: Array,
+        bases: tuple[Array, Array] | None,
     ) -> tuple[Array, Array]:
-        C, rel, _ = _joint_pair_solve(
-            BtB,
-            list(rhs),
-            ridge=ridge,
-            max_iter=max_iter,
-            sweep=lambda cs_: _pair_normal_pass(
-                cs_, A, rows, X_p, w_full, build, c2_idx, c3_idx, beta2, beta3
-            ),
-        )
+        if bases is None:
+
+            def sweep(cs_: list[Array]) -> list[Array]:
+                return _pair_normal_pass(
+                    cs_, A, b, n_row_batches, X_p, w_full, build, c2_idx, c3_idx, beta2, beta3
+                )
+
+        else:
+
+            def sweep(cs_: list[Array]) -> list[Array]:
+                return _pair_normal_cached(cs_, A, *bases)
+
+        C, rel, _ = _joint_pair_solve(BtB, list(rhs), ridge=ridge, max_iter=max_iter, sweep=sweep)
         return jnp.stack(C), rel
 
     return solve
@@ -783,10 +875,13 @@ def _pair_solver(N: int, L: int, n2: int, m2: int, itemsize: int) -> str:
     residual and weights for ``"dual"``. ``"cg"`` is
     the matrix-free fallback.
 
-    Direct solves run only in float64. In float32 an underdetermined pair
-    system (more free coefficients than rows) makes them unstable: measured at
-    D = 15, N = 1024, test NRMSE 1.7 against 0.17 with CG, which stops early
-    and so regularizes.
+    Direct solves run only in float64. In float32 the projected pair system
+    carries round-off (in the projection and the right-hand side) in
+    near-null directions. An exact solve fits them; CG from the per-term
+    start stops before it does. Measured at D = 8, N = 1024 with one input
+    on (0.5, 0.8): spurious S2 up to 0.0067 with a float32 factored solve,
+    0.0002 with CG. At D = 15, N = 1024, test NRMSE was 1.7 with a float32
+    direct solve against 0.17 with CG.
 
     Args:
         N: Number of rows.
@@ -798,10 +893,10 @@ def _pair_solver(N: int, L: int, n2: int, m2: int, itemsize: int) -> str:
     Returns:
         ``"dense"``, ``"dual"`` or ``"cg"``.
     """
-    if itemsize < 8:
-        return "cg"
     K = n2 * m2
     budget = get_memory_budget()
+    if itemsize < 8:
+        return "cg"
     dense_ok = 3 * K * K * itemsize <= budget
     # 10 % margin for the tile work and the tile padding.
     dual_ok = 1.1 * (2 * N * N + 2 * N * L) * itemsize <= budget
@@ -1059,10 +1154,16 @@ def _acc_pair_normal(
     Returns:
         The updated accumulators.
     """
-    B1f = B1_b.reshape(B1_b.shape[0], -1)
-    t = jnp.einsum("rmj,ljm->rl", B2_b, c) - B1f @ v.T
+    b, m2, n2 = B2_b.shape
+    cs = c.shape[0]
+    B1f = B1_b.reshape(b, -1)
+    # Flat matrix products: the same products as 3-D einsums were measured
+    # 3.6x slower (16 ms against 58 ms at N = 4096, K = 12400).
+    B2f = B2_b.reshape(b, m2 * n2)
+    t = B2f @ c.transpose(0, 2, 1).reshape(cs, m2 * n2).T - B1f @ v.T  # (b, cs)
     g1, g2 = acc
-    return g1 + jnp.einsum("rp,rl->lp", B1f, t), g2 + jnp.einsum("rmj,rl->ljm", B2_b, t)
+    g2_new = (t.T @ B2f).reshape(cs, m2, n2).transpose(0, 2, 1)
+    return g1 + t.T @ B1f, g2 + g2_new
 
 
 @jax.jit
@@ -1314,8 +1415,14 @@ def _get_stats_step(blocked: bool):
         # Cov(f_j, Y - f_hat)/Var(Y) that does not cancel under correlated
         # inputs. With independent inputs Sb -> 0 and S -> Sa either way.
         w2 = w * w
-        w2_ = w2[None, :, None]
-        y0_w2 = y0 * w2[:, None]
+        # The block loop works in a (term, lane, row) layout so every sum runs
+        # over the minor axis. Summing ``X * y[None]`` over the middle axis of
+        # a (term, row, lane) array hits a slow float32 XLA CPU fusion:
+        # measured 102 ms in float32 against 7 ms in float64 at
+        # (28, 624, 1000), and 2.5 ms over the minor axis.
+        w2_ = w2[None, None, :]
+        y0_w2_t = (y0 * w2[:, None]).T  # (cs, b)
+        y0_t = y0.T
 
         r0 = ((Y_bc - shift_c[None, :]) - mean_z_c[None, :]) * w[:, None]  # Y - f0
         # F-test for incremental model selection (Li et al., 2002). The null
@@ -1334,7 +1441,7 @@ def _get_stats_step(blocked: bool):
                     lst.append(jnp.zeros((0, cs), dtype=dtype))
                 continue
             tb = min(n_k, _STATS_TERM_BLOCK)
-            r_k = r_null[k][None]
+            r_k = r_null[k].T[None]  # (1, cs, b)
 
             def body(
                 start: Array,
@@ -1350,16 +1457,16 @@ def _get_stats_step(blocked: bool):
                 C_blk = jax.lax.dynamic_slice_in_dim(C, start, tb, axis=2)
                 mf = jax.lax.dynamic_slice_in_dim(mean_f_c, off + start, tb, axis=1)
                 my = jax.lax.dynamic_slice_in_dim(mean_y0m_c, off + start, tb, axis=1)
-                Fk = jnp.einsum("rmj,lmj->jrl", B_blk, C_blk)  # (tb, b, cs)
-                fcn = Fk - mf.T[:, None, :]
-                y0m_c = (y0[None] - Fk) - my.T[:, None, :]
+                Fk = jnp.einsum("rmj,lmj->jlr", B_blk, C_blk)  # (tb, cs, b)
+                fcn = Fk - mf.T[:, :, None]
+                y0m_c = (y0_t[None] - Fk) - my.T[:, :, None]
                 vals = (
-                    jnp.sum(fcn * fcn * w2_, axis=1),
-                    jnp.sum(fcn * y0_w2[None], axis=1),
-                    jnp.sum(fcn * (y0m_c * w2_), axis=1),
+                    jnp.sum(fcn * fcn * w2_, axis=2),
+                    jnp.sum(fcn * y0_w2_t[None], axis=2),
+                    jnp.sum(fcn * (y0m_c * w2_), axis=2),
                     # sum r_null * f_i, each term against its own null residual.
-                    jnp.sum(r_k * Fk, axis=1),
-                    jnp.sum(Fk * Fk, axis=1),
+                    jnp.sum(r_k * Fk, axis=2),
+                    jnp.sum(Fk * Fk, axis=2),
                 )
                 new = []
                 for acc_k, v in zip(carry, vals, strict=True):
@@ -1588,8 +1695,9 @@ def _fit_hdmr(
     )
     order2 = order >= 2 and n2 > 0
     order3 = order >= 3 and n3 > 0
-    # Pair solver state per lane: rhs, x, r, z, p and the matrix-vector product.
-    lane_fixed = 6 * n2 * m2 * itemsize if order2 else 0
+    # Pair solver state per lane: rhs, x, best x, r, z, p and the
+    # matrix-vector product.
+    lane_fixed = 7 * n2 * m2 * itemsize if order2 else 0
     cs = _resolve_slice_chunk_size(slice_chunk_size, L, b, slice_bytes, lane_fixed)
 
     # Pad both axes so each jitted step compiles once. A padded row is masked
@@ -1723,11 +1831,12 @@ def _fit_hdmr(
                     C1_chunks[j].reshape(cs, P) @ G1_flat
                 )
                 rhs.append(BtY[j] - jnp.einsum("pmj,lp->ljm", A, r1))
+            C2_stack: Array | None = None
             if dense:
                 C2_stack = _dense_pair_solve(
                     G22, G12, A, BtB, jnp.stack(rhs), jnp.asarray(term_ridge, dtype=dtype)
                 )
-                rel = None
+                del G22
             elif kind == "dual":
                 C2_stack = _dual_pair_solve(
                     G1_flat,
@@ -1741,11 +1850,24 @@ def _fit_hdmr(
                     cs,
                     term_ridge,
                 )
-                rel = None
-            else:
+                del res_rows
+            rel = None
+            if C2_stack is None:
+                # Hold the bases when they fit half the budget: a CG step is
+                # then a few matrix products instead of a basis rebuild.
+                bases = None
+                if 2 * X_p.shape[0] * (n_terms * m_basis + P) * itemsize <= get_memory_budget():
+                    bases = _pair_bases(
+                        rows,
+                        X_p,
+                        w_full,
+                        _get_build_bases(n_intervals, True, False),
+                        (c2_idx, c3_idx, beta2, beta3),
+                    )
                 C2_stack, rel = _get_pair_solve(
                     n_intervals, b, n_row_batches, _PAIR_ITER_FACTOR * max_iter, term_ridge
-                )(X_p, w_full, c2_idx, c3_idx, beta2, beta3, A, BtB, jnp.stack(rhs))
+                )(X_p, w_full, c2_idx, c3_idx, beta2, beta3, A, BtB, jnp.stack(rhs), bases)
+                del bases
             pair_rel = rel
             C2_chunks = list(C2_stack)
             C1_fold = []
