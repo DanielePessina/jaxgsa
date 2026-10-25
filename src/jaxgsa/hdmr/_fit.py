@@ -223,25 +223,62 @@ def _ridge_scale(gram: Array) -> Array:
     return jnp.mean(jnp.diagonal(gram, axis1=-2, axis2=-1), axis=-1)
 
 
-def _live_pairs(BtB: Array, ridge: float | Array) -> tuple[Array, Array]:
+def _live_pairs(BtB: Array, ridge: float | Array, raw_scale: Array) -> tuple[Array, Array]:
     """Return the per-term ridge and which terms are live.
 
+    The projected Gram ``G22 - G12^T G1^+ G12`` is a difference of two large
+    matrices. The pseudo-inverse keeps eigenvalues down to ``sqrt(eps)`` of the
+    largest, so the difference carries absolute round-off of about
+    ``sqrt(eps)`` times the unprojected block. A pair of an input that does not
+    fill its bounds keeps only a tiny part of its unprojected Gram, and that
+    round-off makes its block indefinite. The ridge of each block is therefore
+    at least ``sqrt(eps) * raw_scale``; a ridge relative to the projected block
+    alone is far below the round-off there.
+
+    Measured in float64 at D = 8, N = 1024, one input on (0.5, 0.501): the
+    projected blocks of that input keep 1e-7 of their unprojected mean
+    diagonal (healthy blocks keep 0.085), their smallest eigenvalue is
+    -3e-5 against a relative ridge of 4e-9, and the exact solve gave a
+    spurious S2 of 0.09. The largest negative eigenvalue on a 44-case grid
+    was 0.13 ``sqrt(eps)`` of the unprojected mean diagonal.
+
+    On a healthy block the floor against the default ridge (1e-6) is about
+    0.18 at ``n_intervals=2``, 0.08 at 3 and 0.04 at 5, so it does not act.
+    At ``n_intervals=1`` a healthy block keeps only about 0.013 of its
+    unprojected diagonal, the floor is 1.1-1.25 times the default ridge and
+    acts on every pair: S and S2 move by up to 2e-4 on uniform inputs. A
+    caller ridge below about 1.2e-6 (``n_intervals=1``), 1.75e-7 (2) or
+    4e-8 (5) is raised by the floor. At ``n_intervals=1`` with one input on
+    (0.5, 0.501), the dual solve without the floor returned NaN for every
+    index; with it the indices are finite.
+
+    The floor is float64 only. In float32 it is 12 times the ridge of every
+    healthy block (``term_ridge`` is already ``sqrt(eps)`` of the projected
+    block, which keeps 0.085 of the unprojected one), so it would change
+    every float32 fit: by up to 0.016 in S on uniform inputs. The float32 pair
+    CG instead stops before it fits the round-off (see
+    :func:`_joint_pair_solve`).
+
     A pair whose projected Gram is near zero (an input with almost no spread)
-    holds nothing beyond the first order. Its ridge is then tiny and the
-    round-off left by the projection makes its block near-singular or
-    indefinite, which turns the coefficients of every lane into huge values or
-    NaN. Every pair solver drops such a pair alike, with zero coefficients.
+    holds nothing beyond the first order. Every pair solver drops such a pair
+    alike, with zero coefficients.
 
     Args:
         BtB: Projected per-term Gram blocks, ``(n2, m2, m2)``.
         ridge: Relative ridge, as in :func:`_ridge_eye`.
+        raw_scale: Mean diagonal of the unprojected blocks, ``(n2,)``.
 
     Returns:
-        The per-term ridge ``ridge * mean(diag)``, shape ``(n2,)``, and a
-        boolean mask of the live terms, shape ``(n2,)``.
+        The per-term ridge ``max(ridge * mean(diag), sqrt(eps) * raw_scale)``
+        (float64) or ``ridge * mean(diag)`` (float32), shape ``(n2,)``, and
+        a boolean mask of the live terms, shape ``(n2,)``.
     """
-    lam = ridge * _ridge_scale(BtB)
-    live = lam > jnp.sqrt(jnp.finfo(lam.dtype).eps) * jnp.max(lam)
+    scale = _ridge_scale(BtB)
+    root_eps = jnp.sqrt(jnp.finfo(scale.dtype).eps)
+    lam = ridge * scale
+    if scale.dtype == jnp.float64:
+        lam = jnp.maximum(lam, root_eps * raw_scale)
+    live = scale > root_eps * jnp.max(scale)
     return lam, live
 
 
@@ -497,6 +534,7 @@ def _joint_pair_solve(
     rhs: list[Array],
     *,
     ridge: float,
+    raw_scale: Array,
     max_iter: int,
     sweep: Callable[[list[Array]], list[Array]],
 ) -> tuple[list[Array], Array, float]:
@@ -514,6 +552,8 @@ def _joint_pair_solve(
         BtB: Projected per-term Gram blocks, ``(n2, m2, m2)``.
         rhs: ``Bt^T r`` per lane chunk, each ``(cs, n2, m2)``.
         ridge: Relative ridge, as in :func:`_ridge_eye`.
+        raw_scale: Mean diagonal of the unprojected blocks, ``(n2,)``, for
+            the ridge floor of :func:`_live_pairs`.
         max_iter: Cap on CG steps.
         sweep: Applies the unregularized normal matrix to a list of chunks.
 
@@ -530,15 +570,15 @@ def _joint_pair_solve(
     0.0002 with this CG.
     """
     m_basis = BtB.shape[1]
-    lam = _ridge_eye(BtB, ridge, m_basis)  # (n2, m2, m2)
-    lam_diag = jnp.diagonal(lam, axis1=-2, axis2=-1)  # (n2, m2)
     # A dead pair is dropped as in the direct solves: its preconditioner block
     # is zero, so it starts at zero and its search direction stays zero, and
     # its residual is masked out.
-    _, live = _live_pairs(BtB, ridge)
+    lam_t, live = _live_pairs(BtB, ridge, raw_scale)  # (n2,)
     eye = jnp.eye(m_basis, dtype=BtB.dtype)
+    lam_diag = jnp.broadcast_to(lam_t[:, None], (lam_t.shape[0], m_basis))  # (n2, m2)
+    M = BtB + lam_t[:, None, None] * eye  # (n2, m2, m2)
     Minv = jnp.where(
-        live[:, None, None], jnp.linalg.inv(jnp.where(live[:, None, None], BtB + lam, eye)), 0.0
+        live[:, None, None], jnp.linalg.inv(jnp.where(live[:, None, None], M, eye)), 0.0
     )
     live_l = live[None, :, None]
 
@@ -552,10 +592,14 @@ def _joint_pair_solve(
     def safe(d: Array) -> Array:
         return jnp.where(d == 0, 1.0, d)
 
-    solver = _get_gram_higher_solver(m_basis, ridge)
     rhs = [jnp.where(live_l, rr, 0.0) for rr in rhs]
     # Start from the independent per-term solution, stored as (cs, n2, m2).
     # A dead block is swapped for the identity, so no near-singular solve runs.
+    # The start keeps the plain relative ridge, without the float64 floor: it
+    # is only a start, and float32 CG (which has no floor) depends on it to
+    # the last bit. Measured: a per-term start with the same ridge but a
+    # different solve order moved float32 S2 by up to 0.003.
+    solver = _get_gram_higher_solver(m_basis, ridge)
     BtB_live = jnp.where(live[:, None, None], BtB, eye)
     x = [solver(BtB_live, r).transpose(0, 2, 1) for r in rhs]
     Mx = sweep(x)
@@ -668,7 +712,7 @@ def _get_pair_solve(m: int, b: int, n_row_batches: int, max_iter: int, ridge: fl
 
     Returns:
         A jitted function ``(X_p, w, c2_idx, c3_idx, beta2, beta3, A, BtB,
-        rhs, bases) -> (C2, rel)`` where ``rhs`` and ``C2`` stack the lane
+        raw_scale, rhs, bases) -> (C2, rel)`` where ``rhs`` and ``C2`` stack the lane
         chunks on the leading axis. ``bases`` is ``(B1, B2)`` of every padded
         row (:func:`_pair_bases`), or ``None`` to rebuild them on every step.
     """
@@ -684,6 +728,7 @@ def _get_pair_solve(m: int, b: int, n_row_batches: int, max_iter: int, ridge: fl
         beta3: Array,
         A: Array,
         BtB: Array,
+        raw_scale: Array,
         rhs: Array,
         bases: tuple[Array, Array] | None,
     ) -> tuple[Array, Array]:
@@ -699,7 +744,9 @@ def _get_pair_solve(m: int, b: int, n_row_batches: int, max_iter: int, ridge: fl
             def sweep(cs_: list[Array]) -> list[Array]:
                 return _pair_normal_cached(cs_, A, *bases)
 
-        C, rel, _ = _joint_pair_solve(BtB, list(rhs), ridge=ridge, max_iter=max_iter, sweep=sweep)
+        C, rel, _ = _joint_pair_solve(
+            BtB, list(rhs), ridge=ridge, raw_scale=raw_scale, max_iter=max_iter, sweep=sweep
+        )
         return jnp.stack(C), rel
 
     return solve
@@ -1026,6 +1073,7 @@ def _dual_pair_solve(
     n_chunks: int,
     cs: int,
     ridge: float,
+    raw_scale: Array,
 ) -> Array:
     """Solve all pair terms jointly in sample space.
 
@@ -1048,6 +1096,7 @@ def _dual_pair_solve(
         n_chunks: Number of lane chunks.
         cs: Lanes per chunk.
         ridge: Relative ridge.
+        raw_scale: Mean diagonal of the unprojected blocks, ``(n2,)``.
 
     Returns:
         The pair coefficients, ``(n_chunks, cs, m2, n2)``.
@@ -1068,7 +1117,7 @@ def _dual_pair_solve(
 
     # A dead pair would make 1 / lam huge and the kernel indefinite, so the
     # Cholesky factor of every lane turns NaN. Drop it (see _live_pairs).
-    lam, live = _live_pairs(BtB, ridge)  # (n2,)
+    lam, live = _live_pairs(BtB, ridge, raw_scale)  # (n2,)
     inv = jnp.where(live, 1.0 / jnp.where(live, lam, 1.0), 0.0)
     inv_lam = jnp.zeros((n1, n1), dtype=B1.dtype).at[c2_idx[:, 0], c2_idx[:, 1]].set(inv)
     itemsize = jnp.dtype(B1.dtype).itemsize
@@ -1088,7 +1137,7 @@ def _dual_pair_solve(
 
 @jax.jit
 def _dense_pair_solve(
-    G22: Array, G12: Array, A: Array, BtB: Array, rhs: Array, ridge: Array
+    G22: Array, G12: Array, A: Array, BtB: Array, rhs: Array, ridge: Array, raw_scale: Array
 ) -> Array:
     """Solve all pair terms jointly by one direct solve.
 
@@ -1108,6 +1157,7 @@ def _dense_pair_solve(
             scale.
         rhs: Right-hand sides, ``(n_chunks, cs, n2, m2)``.
         ridge: Relative ridge, a scalar.
+        raw_scale: Mean diagonal of the unprojected blocks, ``(n2,)``.
 
     Returns:
         The pair coefficients, ``(n_chunks, cs, m2, n2)``.
@@ -1118,7 +1168,7 @@ def _dense_pair_solve(
     G12_f = G12.transpose(0, 2, 1).reshape(G12.shape[0], K)
     Gt = G22 - G12_f.T @ A_f
     Gt = (Gt + Gt.T) / 2
-    lam, live = _live_pairs(BtB, ridge)  # (n2,)
+    lam, live = _live_pairs(BtB, ridge, raw_scale)  # (n2,)
     # A dead pair keeps an identity block and a zero right-hand side, so its
     # coefficients are zero and it cannot reach the live pairs.
     live_flat = jnp.repeat(live, m2)
@@ -1821,6 +1871,8 @@ def _fit_hdmr(
             # Project the pair basis off the first-order space, so a pair term
             # holds only what no sum of 1-D functions can explain.
             A = (_first_order_pinv(G1_flat) @ G12.reshape(P, -1)).reshape(G12.shape)
+            # The projection's round-off scales with the unprojected Gram.
+            raw_scale = _ridge_scale(BtB)
             BtB = BtB - jnp.einsum("pmj,pnj->jmn", A, G12)
             BtB = (BtB + BtB.transpose(0, 2, 1)) / 2
             rhs = []
@@ -1834,7 +1886,13 @@ def _fit_hdmr(
             C2_stack: Array | None = None
             if dense:
                 C2_stack = _dense_pair_solve(
-                    G22, G12, A, BtB, jnp.stack(rhs), jnp.asarray(term_ridge, dtype=dtype)
+                    G22,
+                    G12,
+                    A,
+                    BtB,
+                    jnp.stack(rhs),
+                    jnp.asarray(term_ridge, dtype=dtype),
+                    raw_scale,
                 )
                 del G22
             elif kind == "dual":
@@ -1849,6 +1907,7 @@ def _fit_hdmr(
                     n_chunks,
                     cs,
                     term_ridge,
+                    raw_scale,
                 )
                 del res_rows
             rel = None
@@ -1866,7 +1925,19 @@ def _fit_hdmr(
                     )
                 C2_stack, rel = _get_pair_solve(
                     n_intervals, b, n_row_batches, _PAIR_ITER_FACTOR * max_iter, term_ridge
-                )(X_p, w_full, c2_idx, c3_idx, beta2, beta3, A, BtB, jnp.stack(rhs), bases)
+                )(
+                    X_p,
+                    w_full,
+                    c2_idx,
+                    c3_idx,
+                    beta2,
+                    beta3,
+                    A,
+                    BtB,
+                    raw_scale,
+                    jnp.stack(rhs),
+                    bases,
+                )
                 del bases
             pair_rel = rel
             C2_chunks = list(C2_stack)

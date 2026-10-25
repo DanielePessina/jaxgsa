@@ -1110,7 +1110,13 @@ def _analyze_hdmr_core(
             stable components. Decrease it if genuine sharp features are being
             oversmoothed. The second-order blocks are rank-deficient (they are
             orthogonal to the first-order space), so they use at least
-            ``sqrt(eps)`` of the working precision whatever you pass.
+            ``sqrt(eps)`` of the working precision whatever you pass. In
+            float64 there is one more floor: the ridge of each pair is at
+            least ``sqrt(eps)`` times that pair's Gram before the projection.
+            This stops round-off from creating pair indices when an input
+            does not fill its bounds. It can raise a small ridge: below about
+            1.75e-7 at ``n_intervals=2``, and below about 1.2e-6 at
+            ``n_intervals=1``, where it also raises the default ridge.
         slice_chunk_size: Maximum number of (T, K) output slices fitted per
             vmap. It caps peak device memory for large T*K, and a smaller
             value trades speed for memory. ``None`` (default) derives the
