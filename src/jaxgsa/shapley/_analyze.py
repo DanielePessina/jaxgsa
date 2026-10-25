@@ -781,9 +781,8 @@ def _chunk_notes(
 ) -> list[str]:
     """The verbose lines for the chunking keywords the backend ran with.
 
-    The hdmr backend reports the widths its fit resolves. The pce backend
-    resolves its own width inside the fit, so its line keeps the backend's
-    wording.
+    Each backend reports the widths its fit resolves, through the resolver
+    the fit itself runs.
 
     Args:
         backend: ``"pce"`` or ``"hdmr"``.
@@ -804,19 +803,19 @@ def _chunk_notes(
     def origin(value: int | None) -> str:
         return "user-set" if value is not None else "resolved from the memory budget"
 
+    dtype = jnp.result_type(jnp.asarray(X).dtype, jnp.asarray(Y).dtype, jnp.float32)
     if backend != "hdmr":
-        return [
-            f"batch_size: {batch_size} (user-set)"
-            if batch_size is not None
-            else "batch_size: auto (resolved from the memory budget)"
-        ]
+        from jaxgsa.pce._analyze import _batch_note
+
+        fitted = order if order is not None else int(backend_kwargs.get("order", 3))
+        return [_batch_note(problem, n_runs, n_slices, dtype, fitted, batch_size)]
     from jaxgsa.hdmr._analyze import _resolved_widths
 
     b, cs = _resolved_widths(
         problem,
         n_runs,
         n_slices,
-        jnp.result_type(jnp.asarray(X).dtype, jnp.asarray(Y).dtype, jnp.float32),
+        dtype,
         order=order if order is not None else int(backend_kwargs.get("order", 2)),
         n_intervals=int(backend_kwargs.get("n_intervals", 2)),
         batch_size=batch_size,

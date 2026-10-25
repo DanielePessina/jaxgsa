@@ -118,9 +118,9 @@ def test_invalid_batch_size_raises():
     with pytest.raises(ValueError, match="batch_size"):
         result.predict(_x_new(), batch_size=0)
     # A fractional batch size would blow up in ``range(...)`` later, so it is
-    # refused up front instead of two layers deeper.
+    # refused up front with the ValueError every chunking keyword raises.
     fractional: Any = 2.5
-    with pytest.raises(TypeError, match="batch_size must be an integer"):
+    with pytest.raises(ValueError, match="batch_size must be an integer >= 1"):
         result.predict(_x_new(), batch_size=fractional)
 
 

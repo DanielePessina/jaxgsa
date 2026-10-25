@@ -22,6 +22,7 @@ from jaxgsa._core.entry import (
     bootstrap_checks,
     check_scalars,
     gates,
+    positive_int,
     prepare,
     require,
 )
@@ -32,6 +33,7 @@ from jaxgsa._core.fit_quality import (
     check_gram_rank,
     warn_cv_overfit,
     warn_gram_rank_replicates,
+    warn_ridge_dominance,
     warn_variance_fit,
 )
 from jaxgsa._core.invalid import OnInvalid
@@ -42,6 +44,7 @@ from jaxgsa._core.irregular import (
     _is_irregular_y,
     analyze_irregular,
 )
+from jaxgsa._core.precision import default_float_dtype
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import GROUPED_MIN_D, _in_column_order, family_cdf_block
@@ -54,10 +57,14 @@ from jaxgsa.pce._engine import (
     TruncatedFamily,
     build_design_matrix,
     build_multi_index,
-    hat_diagonal,
-    loo_error,
+    fold_ridge,
+    loo_fit,
+    loo_residuals,
+    qr_with_rhs,
     r_pivot_share,
+    resolve_ridge,
     ridge_qr,
+    ridge_sensitivity,
     sobol_from_coefficients,
     truncated_gaussian_family,
 )
@@ -94,6 +101,12 @@ _IRREGULAR_KWARGS = (
 # floor and that expansion's term budget still fails, with a clear message
 # (M2), rather than fitting an underdetermined system silently.
 _MIN_ROWS = 2
+
+
+_RIDGE_ADVICE = (
+    "Check that the inputs fill their declared bounds, pass a smaller ridge "
+    "(or ridge=None), or lower order."
+)
 
 
 def _map_to_reference(
@@ -349,7 +362,8 @@ class _PCEFit(NamedTuple):
     multi-index. The design matrix and the QR factor are deliberately
     NOT carried: the streamed path never materializes them at full ``N``, so
     both fit paths reduce to the same coefficient, LOO and fitted-variance
-    summary. The small QR factor is reduced to ``pivot_share`` and dropped.
+    summary. The small ``(n_terms, n_terms)`` QR factor is kept for the rank
+    and ridge checks.
     """
 
     coefficients: Array  # (T, K, n_terms), terms-last
@@ -361,10 +375,16 @@ class _PCEFit(NamedTuple):
     # Smallest unexplained column share of the ridge-augmented design, read off
     # the QR factor (see r_pivot_share).
     pivot_share: Array | None = None
+    # The QR factor of the ridge-augmented design and its Tikhonov parameter,
+    # for the ridge check (see ridge_sensitivity). Both are small.
+    R: Array | None = None
+    lam: Array | None = None
 
 
 @lru_cache(maxsize=32)
-def _get_streamed_steps(input_types: tuple[str | TruncatedFamily, ...], order: int):
+def _get_streamed_steps(
+    input_types: tuple[str | TruncatedFamily, ...], order: int, loo_floor: bool
+):
     """Build and cache the two jitted per-batch steps of the streamed fit.
 
     The streamed fit used to rebuild the design block and run its
@@ -391,13 +411,18 @@ def _get_streamed_steps(input_types: tuple[str | TruncatedFamily, ...], order: i
         input_types: Per-dimension ``"uniform"`` / ``"gaussian"`` tags. Its
             length is ``D``.
         order: Effective (post-``_auto_order``) polynomial order.
+        loo_floor: Take clipped leave-one-out rows from the fallback fit of
+            :func:`jaxgsa.pce._engine.loo_fit` (float64 default ridge).
 
     Returns:
         ``(acc_qr, acc_loo)``. ``acc_qr(X_b, Y_b, w, R, z)`` folds one batch
         into the running triangular factor ``R`` and the rotated right-hand
-        side ``z = Q^T Y``; ``acc_loo(X_b, Y_b, w, coeffs_flat, R, sse)``
-        folds one batch into the running ``(LOO, in-sample)`` sums of
-        squares.
+        side ``z = Q^T Y``; ``acc_loo(X_b, Y_b, w, coeffs_flat, R,
+        coeffs_loo, R_loo, R_double, sse)`` folds one batch into the running
+        ``(LOO, in-sample)`` sums of squares
+        (:func:`jaxgsa.pce._engine.loo_residuals`). ``coeffs_loo`` and
+        ``R_loo``, ``R_double`` come from :func:`jaxgsa.pce._engine.loo_fit`,
+        read only when ``loo_floor``.
     """
     multi_index = build_multi_index(len(input_types), order)
 
@@ -407,9 +432,7 @@ def _get_streamed_steps(input_types: tuple[str | TruncatedFamily, ...], order: i
         # Tall-skinny QR: factor the old R stacked on the new rows. The
         # product of the two orthogonal factors is the orthogonal factor of
         # all the rows so far, so Q^T Y carries over as z.
-        Q, R_new = jnp.linalg.qr(jnp.concatenate([R, Phi_b], axis=0), mode="reduced")
-        z_new = Q.T @ jnp.concatenate([z, Y_b], axis=0)
-        return R_new, z_new
+        return qr_with_rhs(jnp.concatenate([R, Phi_b], axis=0), jnp.concatenate([z, Y_b], axis=0))
 
     @jax.jit
     def acc_loo(
@@ -418,13 +441,18 @@ def _get_streamed_steps(input_types: tuple[str | TruncatedFamily, ...], order: i
         w: Array,
         coeffs_flat: Array,
         R: Array,
+        coeffs_loo: Array,
+        R_loo: Array,
+        R_double: Array,
         sse: tuple[Array, Array],
     ) -> tuple[Array, Array]:
         Phi_b = build_design_matrix(X_b, multi_index, input_types, order) * w[:, None]
-        residuals = Y_b - Phi_b @ coeffs_flat  # (b, M); zero on padded rows
-        loo_residuals = residuals / (1.0 - hat_diagonal(Phi_b, R.T))[:, None]
+        # Zero on padded rows: their leverage is 0 and their residual 0.
+        loo, residuals = loo_residuals(
+            Phi_b, Y_b, coeffs_flat, R, (coeffs_loo, R_loo, R_double) if loo_floor else None
+        )
         sse_loo, sse_fit = sse
-        return sse_loo + jnp.sum(loo_residuals**2, axis=0), sse_fit + jnp.sum(residuals**2, axis=0)
+        return sse_loo + jnp.sum(loo**2, axis=0), sse_fit + jnp.sum(residuals**2, axis=0)
 
     return acc_qr, acc_loo
 
@@ -435,10 +463,10 @@ def _fit_pce_streamed(
     multi_index: np.ndarray,
     input_types: tuple[str | TruncatedFamily, ...],
     order: int,
-    ridge: float,
+    ridge: float | None,
     batch_size: int | None,
     diagnostics: bool,
-) -> tuple[Array, Array | None, Array | None, Array]:
+) -> tuple[Array, Array | None, Array | None, Array, Array, Array]:
     """Fit the PCE by streaming row batches.
 
     The QR pass always runs. A second pass computes LOO and the in-sample
@@ -447,10 +475,11 @@ def _fit_pce_streamed(
 
     1. Fold each batch into a running QR factorisation of the ridge-augmented
        design (tall-skinny QR). The carry is the ``(n_terms, n_terms)``
-       factor ``R`` and ``z = Q^T Y``, which starts at ``sqrt(ridge)*I`` and
-       zero. The coefficients solve ``R c = z`` once. This is the same
-       Tikhonov problem as the single pass, and only the float32 rounding
-       differs.
+       factor ``R`` and ``z = Q^T Y``, which both start at zero. The ridge
+       rows are folded in after the last batch
+       (:func:`jaxgsa.pce._engine.fold_ridge`), as in the single pass, and
+       the coefficients solve ``R c = z`` once. This is the same Tikhonov
+       problem as the single pass, and only the rounding differs.
     2. When diagnostics are enabled, with ``R`` known, rebuild each design
        block, get its hat-matrix diagonal from
        :func:`jaxgsa.pce._engine.hat_diagonal` and its per-row residuals, and
@@ -470,36 +499,30 @@ def _fit_pce_streamed(
         multi_index: Multi-index array, shape ``(n_terms, D)``.
         input_types: Per-dimension ``"uniform"`` / ``"gaussian"`` tags.
         order: Effective (post-``_auto_order``) polynomial order.
-        ridge: Tikhonov parameter of the ridge-augmented design.
+        ridge: Tikhonov parameter, or ``None`` for the dtype default (see
+            :func:`jaxgsa.pce._engine.resolve_ridge`).
         batch_size: Rows per batch, or ``None`` to derive one from the
             active memory budget.
         diagnostics: Whether to run the streamed LOO pass.
 
     Returns:
         Tuple of ``coeffs_flat``, shape ``(n_terms, T*K)``, the per-slice LOO
-        RMSE, shape ``(T*K,)``, the per-slice in-sample RMSE, same shape, and
-        the triangular factor ``R``, shape ``(n_terms, n_terms)``. The two
-        RMSEs are ``None`` when diagnostics are disabled.
+        RMSE, shape ``(T*K,)``, the per-slice in-sample RMSE, same shape, the
+        triangular factor ``R``, shape ``(n_terms, n_terms)``, and the
+        Tikhonov parameter used, and the pivot share for the rank check
+        (see :func:`jaxgsa.pce._engine.resolve_ridge`). The two RMSEs are
+        ``None`` when diagnostics
+        are disabled.
     """
     N = X_ref.shape[0]
     n_terms = multi_index.shape[0]
     M = Y_flat.shape[1]
     dtype = jnp.result_type(X_ref.dtype, Y_flat.dtype)
 
-    # Per-row transient cost of one batch. The design block peaks at 3*n_terms
-    # floats (the running product). The QR step then holds the stacked block,
-    # its orthogonal factor and the factorisation workspace, about 4*n_terms
-    # floats per row, plus 2*M for the residual and right-hand-side arrays.
-    # The LOO step is dearer: the design block, the leverage solve against R
-    # and the residuals measured about 5.4*n_terms floats per row, so it is
-    # priced at 6*n_terms. Both passes share one batch width, so the dearer
-    # pass sets it when diagnostics run.
-    floats_per_term = 6 if diagnostics else 4
-    bytes_per_row = jnp.dtype(dtype).itemsize * (floats_per_term * n_terms + 2 * M)
-    # The batch width and the batch count come from the row count's bucket, so
-    # every N in a bucket reuses the compiled steps (see _bucket).
+    b = _streamed_batch_width(N, n_terms, M, jnp.dtype(dtype).itemsize, batch_size, diagnostics)
+    # The batch count comes from the row count's bucket, so every N in a
+    # bucket reuses the compiled steps (see _bucket).
     n_bucket = _bucket(N)
-    b = resolve_batch_size(bytes_per_row, n_bucket, batch_size)
 
     # Pad the sample axis so every batch traces at the same shape. The padded
     # rows are masked to zero inside the jitted steps, so they contribute
@@ -516,13 +539,15 @@ def _fit_pce_streamed(
     Y_batches = Y_p.reshape(n_batches, b, *Y_p.shape[1:])
     w_batches = w.reshape(n_batches, b)
 
-    acc_qr, acc_loo = _get_streamed_steps(input_types, order)
+    # Only the float64 default ridge is tiny enough to leave interpolated
+    # rows at round-off; an explicit ridge keeps the exact shortcut.
+    loo_floor = ridge is None and jnp.dtype(dtype) == jnp.float64
+    acc_qr, acc_loo = _get_streamed_steps(input_types, order, loo_floor)
 
-    # Pass 1: fold the batches into the QR factor, starting from the ridge rows.
-    # The step may promote (float32 data with the float64 multi-index under
-    # x64), and a scan carry keeps one type, so the carry starts at the type
-    # the step returns.
-    R0 = jnp.sqrt(jnp.asarray(ridge, dtype=dtype)) * jnp.eye(n_terms, dtype=dtype)
+    # Pass 1: fold the batches into the QR factor, starting from zero; the
+    # ridge rows come last. A scan carry keeps one type, so the carry starts
+    # at the type the step returns.
+    R0 = jnp.zeros((n_terms, n_terms), dtype=dtype)
     z0 = jnp.zeros((n_terms, M), dtype=dtype)
     R_type, z_type = jax.eval_shape(acc_qr, X_batches[0], Y_batches[0], w_batches[0], R0, z0)
     R = R0.astype(R_type.dtype)
@@ -532,6 +557,10 @@ def _fit_pce_streamed(
         return acc_qr(*batch, *carry), None
 
     (R, z), _ = jax.lax.scan(qr_step, (R, z), (X_batches, Y_batches, w_batches))
+    lam, share = resolve_ridge(ridge, R)
+    R, z = fold_ridge(R, z, lam)
+    if not (ridge is None and R.dtype == jnp.float64):
+        share = r_pivot_share(R)
     coeffs_flat = solve_triangular(R, z, lower=False)  # (n_terms, M)
 
     if diagnostics:
@@ -539,14 +568,26 @@ def _fit_pce_streamed(
         # leverage comes from the shared hat_diagonal helper, which only needs
         # the small (n_terms, n_terms) factor, so this path holds nothing that
         # scales with N and applies the same clip as the single-pass path.
+        coeffs_loo, R_loo, R_double = (
+            loo_fit(R, coeffs_flat, lam) if loo_floor else (coeffs_flat, R, R)
+        )
         sse0 = (jnp.zeros((M,), dtype=dtype), jnp.zeros((M,), dtype=dtype))
         sse_type = jax.eval_shape(
-            acc_loo, X_batches[0], Y_batches[0], w_batches[0], coeffs_flat, R, sse0
+            acc_loo,
+            X_batches[0],
+            Y_batches[0],
+            w_batches[0],
+            coeffs_flat,
+            R,
+            coeffs_loo,
+            R_loo,
+            R_double,
+            sse0,
         )
         sse = (sse0[0].astype(sse_type[0].dtype), sse0[1].astype(sse_type[1].dtype))
 
         def loo_step(carry: tuple[Array, Array], batch: tuple[Array, Array, Array]):
-            return acc_loo(*batch, coeffs_flat, R, carry), None
+            return acc_loo(*batch, coeffs_flat, R, coeffs_loo, R_loo, R_double, carry), None
 
         sse, _ = jax.lax.scan(loo_step, sse, (X_batches, Y_batches, w_batches))
         loo_flat = jnp.sqrt(sse[0] / N)  # == sqrt(mean(loo_residuals^2, axis=0))
@@ -555,7 +596,117 @@ def _fit_pce_streamed(
         loo_flat = None
         rmse_flat = None
 
-    return coeffs_flat, loo_flat, rmse_flat, R
+    return coeffs_flat, loo_flat, rmse_flat, R, lam, share
+
+
+def _streamed_batch_width(
+    N: int, n_terms: int, M: int, itemsize: int, batch_size: int | None, diagnostics: bool
+) -> int:
+    """Rows per batch of the streamed fit.
+
+    Per-row transient cost of one batch: the design block peaks at 3*n_terms
+    floats (the running product). The QR step then holds the stacked block,
+    its orthogonal factor and the factorisation workspace, about 4*n_terms
+    floats per row, plus 2*M for the residual and right-hand-side arrays. The
+    LOO step is dearer: the design block, the leverage solve against R and
+    the residuals measured about 5.4*n_terms floats per row, so it is priced
+    at 6*n_terms. Both passes share one batch width, so the dearer pass sets
+    it when diagnostics run. The width comes from the row count's bucket, so
+    every N in a bucket reuses the compiled steps (see :func:`_bucket`).
+
+    Args:
+        N: Number of rows.
+        n_terms: Number of expansion terms.
+        M: Number of flattened output slices.
+        itemsize: Bytes per element of the fit dtype.
+        batch_size: The caller's rows per batch, or ``None``.
+        diagnostics: Whether the leave-one-out pass runs.
+
+    Returns:
+        The batch width, at least 1 and at most the bucket of ``N``.
+    """
+    floats_per_term = 6 if diagnostics else 4
+    bytes_per_row = itemsize * (floats_per_term * n_terms + 2 * M)
+    return resolve_batch_size(bytes_per_row, _bucket(N), batch_size)
+
+
+def _resolve_fit_width(
+    N: int,
+    D: int,
+    n_terms: int,
+    M: int,
+    itemsize: int,
+    batch_size: int | None,
+    diagnostics: bool = True,
+) -> tuple[bool, int]:
+    """Whether the fit streams, and the rows per batch it runs with.
+
+    The single source of the decision for :func:`_fit_pce_core` and for the
+    verbose summaries of :func:`analyze` and ``jaxgsa.shapley``. The fit
+    streams iff the caller's explicit width splits the sample, or no width
+    was given and the single-pass residents exceed the budget. An explicit
+    ``batch_size`` always wins over the budget, so ``batch_size >= N`` runs
+    the single pass even on an over-budget problem.
+
+    The single pass runs on rows padded to their bucket, and ``_pad_x`` and
+    ``_pad_y`` hold second copies of ``X`` and ``Y``, so all of them are
+    priced at the padded row count.
+
+    Args:
+        N: Number of rows.
+        D: Number of inputs.
+        n_terms: Number of expansion terms.
+        M: Number of flattened output slices.
+        itemsize: Bytes per element of the fit dtype.
+        batch_size: The caller's rows per batch, or ``None``.
+        diagnostics: Whether the leave-one-out pass runs.
+
+    Returns:
+        ``(streamed, width)``. The width is ``N`` for the single pass (one
+        row block) and the streamed batch width otherwise.
+    """
+    n_padded = _bucket(N)
+    single_pass_bytes = _single_pass_fit_bytes(n_padded, n_terms, M, itemsize)
+    if n_padded != N:
+        single_pass_bytes += itemsize * n_padded * (D + M)
+    if batch_size is not None:
+        streamed = batch_size < N
+    else:
+        streamed = single_pass_bytes > get_memory_budget()
+    if not streamed:
+        return False, N
+    return True, _streamed_batch_width(N, n_terms, M, itemsize, batch_size, diagnostics)
+
+
+def _batch_note(
+    problem: Problem,
+    n_rows: int,
+    n_slices: int,
+    dtype: jnp.dtype,
+    order: int,
+    batch_size: int | None,
+) -> str:
+    """The verbose ``batch_size`` line, with the width the fit resolved.
+
+    Args:
+        problem: The problem the fit is for.
+        n_rows: Rows the fit used.
+        n_slices: Flattened output slices ``T*K``.
+        dtype: The fit dtype.
+        order: The effective order of the fit.
+        batch_size: The caller's rows per batch, or ``None``.
+
+    Returns:
+        ``"batch_size: <width> (user-set)"`` or ``"... (resolved from the
+        memory budget)"``.
+    """
+    D = problem.n_params
+    n_terms = build_multi_index(D, order).shape[0]
+    _, width = _resolve_fit_width(
+        n_rows, D, n_terms, n_slices, jnp.dtype(dtype).itemsize, batch_size
+    )
+    origin = "user-set" if batch_size is not None else "resolved from the memory budget"
+    return f"batch_size: {width} ({origin})"
 
 
 def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
@@ -667,8 +818,14 @@ def _row_mask(n_total: int, n_rows: Array | int, dtype: jnp.dtype) -> Array:
 
 @partial(jax.jit, static_argnames=("problem", "order"))
 def _single_pass_coefficients(
-    problem: Problem, X: Array, Y_3d: Array, n_rows: Array | int, ridge: float, *, order: int
-) -> tuple[Array, Array, Array]:
+    problem: Problem,
+    X: Array,
+    Y_3d: Array,
+    n_rows: Array | int,
+    ridge: float | None,
+    *,
+    order: int,
+) -> tuple[Array, Array, Array, Array, Array]:
     """Fit the expansion in one pass, as a single compiled computation.
 
     Run eagerly, every op in this body compiles on its own on the first call
@@ -690,14 +847,16 @@ def _single_pass_coefficients(
         X: Inputs in physical units, shape ``(N_pad, D)``.
         Y_3d: Outputs in canonical layout, shape ``(N_pad, T, K)``.
         n_rows: Number of real rows, at most ``N_pad``.
-        ridge: Tikhonov parameter of the ridge-augmented design.
+        ridge: Tikhonov parameter, or ``None`` for the dtype default (see
+            :func:`jaxgsa.pce._engine.resolve_ridge`).
         order: Effective (post-``_auto_order``) polynomial order.
 
     Returns:
-        ``(coefficients, Phi, R)``: coefficients in terms-last layout, shape
-        ``(T, K, n_terms)``, the masked design matrix and the triangular QR
-        factor of the ridge-augmented design. A caller that skips the
-        diagnostics drops the design matrix.
+        ``(coefficients, Phi, R, lam, share)``: coefficients in terms-last
+        layout, shape ``(T, K, n_terms)``, the masked design matrix, the
+        triangular QR factor of the ridge-augmented design, the Tikhonov
+        parameter used and the pivot share for the rank check. A caller that
+        skips the diagnostics drops the design matrix.
     """
     N = X.shape[0]
     _, T, K = Y_3d.shape
@@ -705,18 +864,28 @@ def _single_pass_coefficients(
     X_ref, input_types = _map_to_reference(X, problem, order)
     Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
     Phi = build_design_matrix(X_ref, mi, input_types, order)
-    Phi = Phi * _row_mask(N, n_rows, Phi.dtype)[:, None]
+    # The barrier makes XLA write Phi out once. Without it, XLA fuses the
+    # design-matrix build into the QR operand and the fit takes twice as long
+    # (measured at N = 16384, 165 terms, float64: 87 ms against 48 ms).
+    Phi = jax.lax.optimization_barrier(Phi * _row_mask(N, n_rows, Phi.dtype)[:, None])
     # The basis is identical for every output slice (the effective order
     # depends only on N and D), so fitting all T*K slices is ONE QR with
     # multiple right-hand sides.
-    coeffs_flat, R = ridge_qr(Phi, Y_flat, ridge)  # (n_terms, T*K)
+    coeffs_flat, R, lam, share = ridge_qr(Phi, Y_flat, ridge)  # (n_terms, T*K)
     # Terms-last layout, matching HDMR's Sa convention (slices lead).
-    return coeffs_flat.T.reshape(T, K, mi.shape[0]), Phi, R
+    return coeffs_flat.T.reshape(T, K, mi.shape[0]), Phi, R, lam, share
 
 
-@jax.jit
+@partial(jax.jit, static_argnames=("loo_floor",))
 def _single_pass_loo(
-    Phi: Array, R: Array, Y_3d: Array, coefficients: Array, n_rows: Array | int
+    Phi: Array,
+    R: Array,
+    lam: Array,
+    Y_3d: Array,
+    coefficients: Array,
+    n_rows: Array | int,
+    *,
+    loo_floor: bool,
 ) -> tuple[Array, Array]:
     """Per-slice LOO and in-sample RMSE of a single-pass fit.
 
@@ -724,10 +893,14 @@ def _single_pass_loo(
         Phi: Masked design matrix, shape ``(N_pad, n_terms)``.
         R: Triangular QR factor of the ridge-augmented design, shape
             ``(n_terms, n_terms)``.
+        lam: Tikhonov parameter of the fit.
         Y_3d: Outputs in canonical layout, shape ``(N_pad, T, K)``, zero after
             the first ``n_rows`` rows.
         coefficients: Fitted coefficients, shape ``(T, K, n_terms)``.
         n_rows: Number of real rows.
+        loo_floor: Take rows whose leverage hits the clip from the fallback
+            fit of :func:`jaxgsa.pce._engine.loo_fit` (float64 default
+            ridge only).
 
     Returns:
         ``(loo_flat, rmse_flat)``, each of shape ``(T*K,)``.
@@ -736,11 +909,12 @@ def _single_pass_loo(
     Y_flat = Y_3d.reshape(N, -1)
     coeffs_flat = coefficients.reshape(-1, coefficients.shape[-1]).T  # (n_terms, T*K)
     # R^T R = Phi^T Phi + ridge*I, so R.T is the Cholesky factor hat_diagonal
-    # wants, and loo_error reuses it without carrying anything that scales
-    # with N. A zero row has leverage 0 and residual 0, so only the divisor
+    # wants. A zero row has leverage 0 and residual 0, so only the divisor
     # needs the real count.
-    loo_flat = loo_error(Phi, Y_flat, coeffs_flat, gram_chol=R.T, n_rows=n_rows)
-    rmse_flat = jnp.sqrt(jnp.sum((Y_flat - Phi @ coeffs_flat) ** 2, axis=0) / n_rows)
+    fallback = loo_fit(R, coeffs_flat, lam) if loo_floor else None
+    loo, residuals = loo_residuals(Phi, Y_flat, coeffs_flat, R, fallback)
+    loo_flat = jnp.sqrt(jnp.sum(loo**2, axis=0) / n_rows)
+    rmse_flat = jnp.sqrt(jnp.sum(residuals**2, axis=0) / n_rows)
     return loo_flat, rmse_flat
 
 
@@ -834,7 +1008,7 @@ def _fit_pce_core(
     # arguments it was given -- `jaxgsa.shapley.indices` does -- fits the same
     # expansion `analyze` would. `tests/test_shapley.py` compares the two.
     order: int = 3,
-    ridge: float = 1e-8,
+    ridge: float | None = None,
     fit_ratio: float = 0.5,
     batch_size: int | None = None,
     diagnostics: bool = True,
@@ -872,6 +1046,13 @@ def _fit_pce_core(
             path.
     """
     Y_3d, _ = _prepare_Y(Y_canonical)
+    # One working dtype for the whole fit: float32 only when both X and Y
+    # are float32. A float64 Y fitted in float32 would lose its digits.
+    work = jnp.result_type(X.dtype, Y_3d.dtype)
+    if not jnp.issubdtype(work, jnp.floating):
+        work = default_float_dtype()
+    X = X.astype(work)
+    Y_3d = Y_3d.astype(work)
     N, D = X.shape
     _, T, K = Y_3d.shape
 
@@ -886,38 +1067,36 @@ def _fit_pce_core(
     # ``batch_size >= N`` runs the single-pass path even on an over-budget
     # problem — the library-wide semantics: ``batch_size`` sizes row blocks,
     # clamped to N, and never selects a different algorithm.
-    itemsize = jnp.dtype(jnp.result_type(X.dtype, float)).itemsize
-    # The single pass runs on rows padded to their bucket, and ``_pad_x`` and
-    # ``_pad_y`` hold second copies of ``X`` and ``Y``, so price all of them
-    # at the padded row count.
-    n_padded = _bucket(N)
-    single_pass_bytes = _single_pass_fit_bytes(n_padded, n_terms, T * K, itemsize)
-    if n_padded != N:
-        single_pass_bytes += itemsize * n_padded * (D + T * K)
-    if batch_size is not None:
-        streamed = batch_size < N
-    else:
-        streamed = single_pass_bytes > get_memory_budget()
+    itemsize = jnp.dtype(work).itemsize
+    streamed, _ = _resolve_fit_width(N, D, n_terms, T * K, itemsize, batch_size, diagnostics)
     if not streamed:
         # Single-pass path: one jitted call maps the inputs, builds the design
         # matrix, solves the ridge least squares by QR and (optionally) the exact LOO.
         # The rows are padded to their bucket first, so every N in a bucket
         # shares one compiled program (see _bucket).
         Y_p, n_rows = _pad_y(Y_3d)
-        coeffs, Phi, R = _single_pass_coefficients(
+        coeffs, Phi, R, lam, share = _single_pass_coefficients(
             problem, _pad_x(X), Y_p, n_rows, ridge, order=effective_order
         )
         loo_flat = None
         rmse_flat = None
         if diagnostics:
-            loo_flat, rmse_flat = _single_pass_loo(Phi, R, Y_p, coeffs, n_rows)
+            loo_flat, rmse_flat = _single_pass_loo(
+                Phi,
+                R,
+                lam,
+                Y_p,
+                coeffs,
+                n_rows,
+                loo_floor=ridge is None and Phi.dtype == jnp.float64,
+            )
     else:
         # Streamed path: same least squares and exact LOO, accumulated
         # over row batches so peak memory stays within the budget.
         # Map inputs to reference domain; (N, D) is small next to (N, n_terms).
         X_ref, input_types = _map_to_reference(X, problem, effective_order)
         Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
-        coeffs_flat, loo_flat, rmse_flat, R = _fit_pce_streamed(
+        coeffs_flat, loo_flat, rmse_flat, R, lam, share = _fit_pce_streamed(
             X_ref, Y_flat, mi, input_types, effective_order, ridge, batch_size, diagnostics
         )
         # Terms-last layout, matching HDMR's Sa convention (slices lead).
@@ -930,7 +1109,9 @@ def _fit_pce_core(
         loo_flat=loo_flat,
         rmse_flat=rmse_flat,
         streamed=streamed,
-        pivot_share=r_pivot_share(R),
+        pivot_share=share,
+        R=R,
+        lam=lam,
     )
 
 
@@ -940,10 +1121,11 @@ def _indices_and_share(
     Y_3d: Array,
     *,
     order: int,
-    ridge: float,
+    ridge: float | None,
     fit_ratio: float,
     batch_size: int | None,
-) -> tuple[Array, Array, Array, Array]:
+    ridge_check: bool = True,
+) -> tuple[Array, Array, Array, Array, Array | None]:
     """Fit the expansion and read the indices and the rank share off it.
 
     The shared body of :func:`indices` and of one bootstrap replicate. It
@@ -953,10 +1135,13 @@ def _indices_and_share(
     (``diagnostics=False``); a bootstrap run is ``n_bootstrap`` of these.
 
     Returns:
-        ``(S1, ST, S2, pivot_share)``. The share is the rank diagnostic of
-        :func:`jaxgsa.pce._engine.r_pivot_share`. A bootstrap replicate
-        returns it so :func:`analyze` can count the resamples that fitted a
-        near-singular design.
+        ``(S1, ST, S2, pivot_share, ridge_ratio)``. The share is the rank
+        diagnostic of :func:`jaxgsa.pce._engine.r_pivot_share`, and the ratio
+        that of :func:`jaxgsa.pce._engine.ridge_sensitivity`. A bootstrap
+        replicate returns both so :func:`analyze` can count the resamples
+        that fitted a near-singular design or one the ridge dominates. The
+        ratio is ``None`` when ``ridge_check`` is false: it costs a refit of
+        the ``(n_terms, n_terms)`` factor, which :func:`indices` cannot use.
     """
     fit = _fit_pce_core(
         problem,
@@ -969,6 +1154,12 @@ def _indices_and_share(
         diagnostics=False,
     )
     assert fit.pivot_share is not None
+    assert fit.R is not None and fit.lam is not None
+    ratio = (
+        ridge_sensitivity(fit.R, fit.coefficients, fit.lam, fit.multi_index)
+        if ridge_check
+        else None
+    )
     Y_p, n_rows = _pad_y(Y_3d)
     S1, ST, S2 = _sobol_from_fit(
         fit.coefficients,
@@ -978,7 +1169,7 @@ def _indices_and_share(
         order=fit.order,
         budget=get_memory_budget(),
     )
-    return S1, ST, S2, fit.pivot_share
+    return S1, ST, S2, fit.pivot_share, ratio
 
 
 def _indices_3d(
@@ -987,7 +1178,7 @@ def _indices_3d(
     Y_3d: Array,
     *,
     order: int,
-    ridge: float,
+    ridge: float | None,
     fit_ratio: float,
     batch_size: int | None,
 ) -> tuple[Array, Array, Array]:
@@ -996,7 +1187,7 @@ def _indices_3d(
     See :func:`_indices_and_share`. This drops the rank share, which
     :func:`indices` cannot act on: it traces, so it cannot raise.
     """
-    S1, ST, S2, _ = _indices_and_share(
+    S1, ST, S2, _, _ = _indices_and_share(
         problem,
         X,
         Y_3d,
@@ -1004,6 +1195,7 @@ def _indices_3d(
         ridge=ridge,
         fit_ratio=fit_ratio,
         batch_size=batch_size,
+        ridge_check=False,
     )
     return S1, ST, S2
 
@@ -1015,12 +1207,12 @@ def _pce_replicate(
     *,
     problem: Problem,
     order: int,
-    ridge: float,
+    ridge: float | None,
     fit_ratio: float,
     batch_size: int | None,
-) -> tuple[Array, Array, Array, Array]:
-    """Refit the expansion on the rows ``rows`` and return indices and share."""
-    return _indices_and_share(
+) -> tuple[Array, Array, Array, Array, Array]:
+    """Refit the expansion on the rows ``rows``; see :func:`_indices_and_share`."""
+    S1, ST, S2, share, ratio = _indices_and_share(
         problem,
         X[rows],
         Y_3d[rows],
@@ -1029,6 +1221,8 @@ def _pce_replicate(
         fit_ratio=fit_ratio,
         batch_size=batch_size,
     )
+    assert ratio is not None
+    return S1, ST, S2, share, ratio
 
 
 def _bootstrap_indices(
@@ -1039,10 +1233,10 @@ def _bootstrap_indices(
     *,
     n_bootstrap: int,
     order: int,
-    ridge: float,
+    ridge: float | None,
     fit_ratio: float,
     batch_size: int | None,
-) -> tuple[Array, Array, Array, Array]:
+) -> tuple[Array, Array, Array, Array, Array]:
     """Refit the expansion on ``n_bootstrap`` row resamples.
 
     One replicate is a full refit: the rows are drawn with replacement, the
@@ -1063,14 +1257,15 @@ def _bootstrap_indices(
         key: A ``jax.random`` key, split once per replicate.
         n_bootstrap: Number of replicates.
         order: Requested maximum polynomial degree.
-        ridge: Tikhonov parameter.
+        ridge: Tikhonov parameter, or ``None`` for the dtype default.
         fit_ratio: Terms-to-samples cap.
         batch_size: Rows per fit batch, or ``None``.
 
     Returns:
-        ``(S1, ST, S2, pivot_share)`` draws, each with a leading axis of
-        length ``n_bootstrap``. The indices follow with the canonical
-        ``(T, K, ...)`` shape, and the share is a scalar per replicate.
+        ``(S1, ST, S2, pivot_share, ridge_ratio)`` draws, each with a
+        leading axis of length ``n_bootstrap``. The indices follow with the
+        canonical ``(T, K, ...)`` shape, and the share and the ratio are a
+        scalar per replicate.
     """
 
     return bootstrap_draws(
@@ -1094,7 +1289,7 @@ def indices(
     Y: Array,
     *,
     order: int = 3,
-    ridge: float = 1e-8,
+    ridge: float | None = None,
     fit_ratio: float = 0.5,
     batch_size: int | None = None,
 ) -> PCEIndices:
@@ -1130,7 +1325,17 @@ def indices(
         Y: Model outputs, shape ``(N,)``, ``(N, K)`` or ``(N, T, K)``, as
             :func:`analyze` accepts them.
         order: Maximum total polynomial degree, as in :func:`analyze`.
-        ridge: Tikhonov regularization for the least-squares fit.
+        ridge: Tikhonov regularization for the least-squares fit, as an
+            absolute parameter. ``None`` (default) picks it from the working
+            dtype: ``1e-8`` in float32, and in float64 machine epsilon times
+            the mean diagonal of the Gram matrix, the size of its own
+            round-off. That default only guards against a singular design
+            and does not bias a direction the data resolves, also when the
+            inputs do not fill their declared bounds. A float64 design that
+            is singular to round-off (a two-level input, say) gets ``1e-12``
+            times the mean diagonal instead: the minimum-norm fit. The ridge
+            varies smoothly between the two. See
+            :func:`jaxgsa.pce._engine.resolve_ridge`.
         fit_ratio: Maximum ratio of terms to samples before ``order`` is
             reduced. Must be at most 1, and must leave room for the order-1
             expansion: ``D + 1 <= int(fit_ratio * N)``.
@@ -1165,7 +1370,7 @@ def indices(
             at_least("ridge", ridge, 0.0),
             at_least("fit_ratio", fit_ratio, 0.0),
             require(fit_ratio <= 1.0, f"fit_ratio must be <= 1, got {fit_ratio}"),
-            at_least("batch_size", batch_size, 1),
+            positive_int("batch_size", batch_size),
             require(
                 min_terms <= int(fit_ratio * N),
                 f"fit_ratio={fit_ratio} and N={N} rows cannot fit even the "
@@ -1200,7 +1405,7 @@ def analyze(
     Y: Array | IrregularY,
     *,
     order: int = 3,
-    ridge: float = 1e-8,
+    ridge: float | None = None,
     fit_ratio: float = 0.5,
     batch_size: int | None = None,
     n_bootstrap: int = 0,
@@ -1233,9 +1438,20 @@ def analyze(
             term count C(D+order, order) grows fast and needs more samples
             to fit. Automatically reduced (with a warning) if the term
             count would exceed ``fit_ratio * N``.
-        ridge: Tikhonov regularization for the least-squares fit. The tiny
-            default only guards against a singular design. Increase
-            it if coefficients look unstable (noisy Y, near-duplicate rows).
+        ridge: Tikhonov regularization for the least-squares fit, as an
+            absolute parameter. ``None`` (default) picks it from the working
+            dtype: ``1e-8`` in float32, and in float64 machine epsilon times
+            the mean diagonal of the Gram matrix, the size of its own
+            round-off. That default only guards against a singular design
+            and does not bias a direction the data resolves, also when the
+            inputs do not fill their declared bounds. A float64 design that
+            is singular to round-off (a two-level input, say) gets ``1e-12``
+            times the mean diagonal instead: the minimum-norm fit. The ridge
+            varies smoothly between the two. See
+            :func:`jaxgsa.pce._engine.resolve_ridge`.
+            Increase it if coefficients look unstable (noisy Y,
+            near-duplicate rows). In float64, a ridge whose doubling moves
+            ``ST`` by more than 1e-3 warns: it then sets the indices.
             A large ridge (about 1e-3 or more) also hides a singular design
             from the rank check, because it keeps the pivot share up. The
             indices of such a design can be wrong with no warning, apart from
@@ -1251,7 +1467,7 @@ def analyze(
             blocks, clamped to ``N``. ``None`` (default) keeps the
             single-shot fit unless its estimated resident memory (design
             matrix, QR factorization, LOO residuals) exceeds the active
-            memory budget (~512 MiB, see
+            memory budget (~2 GiB, see
             ``jaxgsa.config.set_memory_budget``), in which case the fit
             streams over auto-sized row batches. An explicit
             ``batch_size < N`` streams over row blocks of that many rows;
@@ -1358,7 +1574,7 @@ def analyze(
             at_least("ridge", ridge, 0.0),
             at_least("fit_ratio", fit_ratio, 0.0),
             require(fit_ratio <= 1.0, f"fit_ratio must be <= 1, got {fit_ratio}"),
-            at_least("batch_size", batch_size, 1),
+            positive_int("batch_size", batch_size),
             *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
         ),
         min_kept=_MIN_ROWS,
@@ -1439,6 +1655,13 @@ def analyze(
             fit.pivot_share,
             advice="Remove duplicated or constant inputs, lower order, or add rows.",
         )
+        assert fit.R is not None and fit.lam is not None
+        warn_ridge_dominance(
+            namespace,
+            ridge_sensitivity(fit.R, fit.coefficients, fit.lam, fit.multi_index),
+            fit.pivot_share,
+            advice=_RIDGE_ADVICE,
+        )
         check_fit_finite(
             namespace,
             fit.coefficients,
@@ -1486,7 +1709,7 @@ def analyze(
     ci: CIInfo | None = None
     if n_bootstrap > 0:
         assert key is not None  # checked above, before the fit ran
-        S1_draws, ST_draws, S2_draws, share_draws = _bootstrap_indices(
+        S1_draws, ST_draws, S2_draws, share_draws, ratio_draws = _bootstrap_indices(
             problem,
             X,
             ctx.Y3,
@@ -1505,6 +1728,7 @@ def analyze(
                 share_draws,
                 advice="Remove duplicated or constant inputs, lower order, or add rows.",
             )
+            warn_ridge_dominance(namespace, ratio_draws, share_draws, advice=_RIDGE_ADVICE)
         # Squeeze before calling interval(): it reads no shape of its own, so
         # points and draws must already be at the layout the result reports
         # (the leading replicate axis on the draws survives the squeeze,
@@ -1558,10 +1782,13 @@ def analyze(
 
     if verbose:
         elapsed = _verbose.stop(t0, result.ST)
-        batch_note = (
-            f"batch_size: {batch_size} (user-set)"
-            if batch_size is not None
-            else "batch_size: auto (resolved from the memory budget)"
+        batch_note = _batch_note(
+            problem,
+            int(X.shape[0]),
+            T * K,
+            jnp.result_type(X.dtype, ctx.Y3.dtype),
+            fit.order,
+            batch_size,
         )
         _verbose.analysis_summary(
             method="jaxgsa.pce.analyze",

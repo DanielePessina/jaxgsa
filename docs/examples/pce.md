@@ -83,7 +83,7 @@ jaxgsa.pce.analyze
     fit + estimator (includes compile on the first call): 1.297 s
     order: 8
     fit: single-pass
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 2000 (resolved from the memory budget)
   results: top 3 of 3 parameters by ST
     1. x1  ST=0.5571
     2. x2  ST=0.4429
@@ -145,7 +145,7 @@ jaxgsa.pce.analyze
     fit + estimator (includes compile on the first call): 1.434 s
     order: 3
     fit: single-pass
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 2000 (resolved from the memory budget)
   results: top 3 of 3 parameters by ST
     1. x1  ST=0.9375
     2. x3  ST=0.3023

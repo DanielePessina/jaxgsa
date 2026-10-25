@@ -370,11 +370,11 @@ jaxgsa.pce.analyze(problem5, X5, Y5, order=6)
 ```
     order: 6
     fit: single-pass
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 20000 (resolved from the memory budget)
 
     order: 6
     fit: streamed
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 94 (resolved from the memory budget)
 ```
 
 Read the `fit:` line if you care which one ran. Streaming trades passes over

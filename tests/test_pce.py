@@ -276,9 +276,47 @@ class TestLooRmse:
         assert np.all(np.isfinite(np.asarray(result32.cv_rmse)))
 
         with jax.enable_x64():
-            result64 = _fit()
-            assert result64.cv_rmse is not None
-            assert np.all(np.isfinite(np.asarray(result64.cv_rmse)))
+            key = jax.random.PRNGKey(3)
+            bounds = jnp.array(ishigami.PROBLEM.bounds)
+            X = jax.random.uniform(key, shape=(10, 3), minval=bounds[:, 0], maxval=bounds[:, 1])
+            Y = ishigami.evaluate(X)
+            fits = []
+            for batch_size in (None, 4):
+                with pytest.warns(JaxgsaWarning, match="cv_rmse is"):
+                    fits.append(
+                        pce.analyze(
+                            ishigami.PROBLEM,
+                            X,
+                            Y,
+                            order=2,
+                            fit_ratio=1.0,
+                            batch_size=batch_size,
+                            verbose=False,
+                        )
+                    )
+            # Brute-force leave-one-out: the minimum-norm fit on the other
+            # nine rows predicts the left-out one. The hat-matrix shortcut
+            # must agree; a round-off ridge once made it read 8e-4 here.
+            Xr = (
+                2.0
+                * (np.asarray(X) - np.asarray(bounds[:, 0]))
+                / np.asarray(bounds[:, 1] - bounds[:, 0])
+                - 1.0
+            )
+            Phi = np.asarray(
+                build_design_matrix(jnp.asarray(Xr), build_multi_index(3, 2), ("uniform",) * 3, 2)
+            )
+            Yn = np.asarray(Y)
+            errors = []
+            for i in range(10):
+                keep = np.arange(10) != i
+                c, *_ = np.linalg.lstsq(Phi[keep], Yn[keep], rcond=None)
+                errors.append(Phi[i] @ c - Yn[i])
+            brute = float(np.sqrt(np.mean(np.square(errors))))
+            for fit in fits:
+                assert isinstance(fit, pce.PCEResult)
+                assert fit.cv_rmse is not None
+                np.testing.assert_allclose(float(fit.cv_rmse), brute, rtol=1e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -305,22 +343,23 @@ class TestGaussianInputs:
         Y_pred = gaussian_pce_result.predict(X)
         np.testing.assert_allclose(np.asarray(Y_pred), np.asarray(Y), atol=0.5, rtol=0.1)
 
-    def test_basis_dtype_promotes_float32_inputs_under_x64(self):
-        """A float32 x must not downgrade the PCE basis to float32 under x64.
+    def test_basis_keeps_float32_inputs_under_x64(self):
+        """A float32 x keeps a float32 PCE basis under x64.
 
-        Both recurrences run in the default float dtype, exactly like the
-        Hermite seed matrix. A float32 sample matrix then still yields a
-        float64 design matrix, and mixed uniform/Gaussian problems get one
-        consistent basis dtype.
+        Both recurrences, and the truncated-normal one, follow the input
+        dtype, so every input family gives the same basis dtype and float32
+        data is fitted in float32. Integer input is cast to the default float.
         """
         with jax.enable_x64():
             x = jnp.linspace(-0.9, 0.9, 8, dtype=jnp.float32)
-            assert _hermite_1d(x, 3).dtype == jnp.float64
-            assert _legendre_1d(x, 3).dtype == jnp.float64
+            assert _hermite_1d(x, 3).dtype == jnp.float32
+            assert _legendre_1d(x, 3).dtype == jnp.float32
             X = jnp.stack([x, x], axis=1)
             Phi = build_design_matrix(X, build_multi_index(2, 2), ("uniform", "gaussian"), 2)
-            assert Phi.dtype == jnp.float64
-        # The NumPy path promotes the same way (float64 is NumPy's default).
+            assert Phi.dtype == jnp.float32
+            assert _hermite_1d(jnp.arange(3), 2).dtype == jnp.float64
+            assert _legendre_1d(jnp.arange(3), 2).dtype == jnp.float64
+        # The NumPy path (VKOGA) always runs in float64.
         P = _legendre_1d(np.linspace(-0.9, 0.9, 8, dtype=np.float32), 3)
         assert P.dtype == np.float64
 

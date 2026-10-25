@@ -64,6 +64,8 @@ def _call(method: str, keyword: str, value: object, verbose: bool = False) -> ob
         return jaxgsa.vkoga.analyze(PROBLEM, X, Y, **VKOGA_KWARGS, **kw)
     if method == "shapley":
         return jaxgsa.shapley.analyze(PROBLEM, X, Y, backend="hdmr", order=1, **kw)
+    if method == "shapley_pce":
+        return jaxgsa.shapley.analyze(PROBLEM, X, Y, backend="pce", **kw)
     if method == "hdmr":
         return jaxgsa.hdmr.analyze(PROBLEM, X, Y, order=1, **kw)
     fn: Callable[..., object] = getattr(jaxgsa, method).analyze
@@ -86,6 +88,8 @@ CASES = [
     ("rank", "slice_chunk_size"),
     ("shapley", "slice_chunk_size"),
     ("shapley", "batch_size"),
+    ("pce", "batch_size"),
+    ("shapley_pce", "batch_size"),
 ]
 
 
@@ -105,6 +109,7 @@ def test_bad_chunk_value_raises_value_error_naming_keyword(method, keyword, bad)
         ("optimal_transport", "slice_chunk_size"),
         ("dgsm", "batch_size"),
         ("morris", "resample_chunk_size"),
+        ("pce", "batch_size"),
     ],
 )
 def test_numpy_integer_accepted(method, keyword):
@@ -121,6 +126,8 @@ VERBOSE_CASES = [
     ("morris", "resample_chunk_size"),
     ("shapley", "slice_chunk_size"),
     ("shapley", "batch_size"),
+    ("pce", "batch_size"),
+    ("shapley_pce", "batch_size"),
 ]
 
 
@@ -230,3 +237,24 @@ def test_efast_verbose_prints_output_slices(efast_case, capsys):
     assert "slice_chunk_size: 15 (user-set)" in capsys.readouterr().out
     jaxgsa.efast.analyze(design, Y, verbose=True)
     assert "slice_chunk_size: 15 (resolved from the memory budget)" in capsys.readouterr().out
+
+
+@pytest.mark.verbose_output
+@pytest.mark.parametrize("method", ["pce", "shapley_pce"])
+def test_pce_verbose_reports_the_single_pass_width(method, capsys):
+    """A user batch_size at or above N runs the single pass, reported as N."""
+    _call(method, "batch_size", 10 * N, verbose=True)
+    out = capsys.readouterr().out
+    assert f"batch_size: {N} (user-set)" in out, out
+
+
+@pytest.mark.parametrize("bad", [2.0, True, 0])
+def test_surrogate_predict_bad_batch_size_raises_value_error(bad):
+    """SurrogateResult.predict follows the same rule as the analysis keywords."""
+    X, Y = _xy()
+    result = jaxgsa.pce.analyze(PROBLEM, X, Y, verbose=False)
+    assert isinstance(result, jaxgsa.pce.PCEResult)
+    numpy_int: Any = np.int64(32)
+    with pytest.raises(ValueError, match="batch_size must be an integer >= 1"):
+        result.predict(X, batch_size=bad)
+    result.predict(X, batch_size=numpy_int)
