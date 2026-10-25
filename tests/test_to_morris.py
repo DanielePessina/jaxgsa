@@ -178,7 +178,7 @@ class TestGaussianInputs:
 
     def test_delta_matches_unit_design_for_gaussians(self):
         s = sobol.sample(self.PROBLEM, base_n=256, seed=1, verbose=False)
-        with pytest.warns(UserWarning, match="unbounded gaussian"):
+        with pytest.warns(UserWarning, match="unbounded marginals"):
             m = s.to_morris(verbose=False)
         assert s.unit is not None and s.expanded_to_unit is not None
         saltelli_step = 2 * D + 2

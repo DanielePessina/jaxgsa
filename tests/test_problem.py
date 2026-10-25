@@ -71,7 +71,7 @@ def test_from_dict_accepts_uniform_and_gaussian_typed_dict_specs():
             "low < high",
         ),
         (
-            {"x": {"dist": "beta", "alpha": 1.0, "beta": 2.0}},
+            {"x": {"dist": "gamma", "alpha": 1.0, "beta": 2.0}},
             "Unsupported input distribution",
         ),
     ],
@@ -189,10 +189,11 @@ class TestTruncateGaussians:
         p = Problem.from_dict(
             {"g": {"dist": "gaussian", "mean": 0.0, "variance": 1.0}}, truncate_gaussians=1e-3
         )
-        spec = _normalized_input_to_dict(p.input_specs[0])
+        spec = p.input_specs[0]
+        assert isinstance(spec, GaussianSpec)
         sr = morris.sample(p, n_trajectories=25, seed=1, verbose=False)
-        assert float(np.min(sr.samples[:, 0])) == pytest.approx(spec["low"])
-        assert float(np.max(sr.samples[:, 0])) == pytest.approx(spec["high"])
+        assert float(np.min(sr.samples[:, 0])) == pytest.approx(spec.low)
+        assert float(np.max(sr.samples[:, 0])) == pytest.approx(spec.high)
 
 
 # ---------------------------------------------------------------------------

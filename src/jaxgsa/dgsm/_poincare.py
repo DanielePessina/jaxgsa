@@ -25,12 +25,67 @@ References:
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from functools import lru_cache
+from types import MappingProxyType
 
 import numpy as np
 from scipy.stats import truncnorm
 
-from jaxgsa.problem import CategoricalSpec, GaussianSpec, InputSpec, Problem, UniformSpec
+from jaxgsa._core.validation import refused_marginal_message
+from jaxgsa.problem import (
+    CategoricalSpec,
+    GaussianSpec,
+    InputSpec,
+    Problem,
+    UniformSpec,
+)
+
+_NOT_YET = (
+    "jaxgsa.dgsm does not compute the Poincare constant of a triangular or beta "
+    "marginal yet. Both have finite constants that a later release may add."
+)
+
+REFUSED_MARGINALS: Mapping[str, str] = MappingProxyType(
+    {
+        "lognormal": (
+            "A lognormal marginal has no finite Poincare constant, so the DGSM "
+            "upper bound on ST does not exist."
+        ),
+        "weibull": (
+            "A Weibull marginal has no finite Poincare constant when shape < 1, and "
+            "jaxgsa.dgsm does not compute one for any shape yet."
+        ),
+        "triangular": _NOT_YET,
+        "beta": _NOT_YET,
+    }
+)
+"""The marginal families DGSM refuses, with the reason, for its registry record."""
+
+
+def _refuse_family(spec: InputSpec, method: str) -> None:
+    """Raise the DGSM refusal for a marginal family the DGSM record refuses.
+
+    The message is the one ``dgsm.analyze`` gives for a whole problem
+    (:func:`jaxgsa._core.validation.refused_marginal_message`), built from the
+    same reasons, so the two refusals read the same.
+
+    Args:
+        spec: Marginal spec of one parameter.
+        method: Fully qualified function name for the message.
+
+    Raises:
+        ValueError: If ``spec`` is lognormal, Weibull, triangular or beta.
+    """
+    if spec.dist in REFUSED_MARGINALS:
+        raise ValueError(
+            refused_marginal_message(
+                method,
+                "cannot compute a value for this marginal",
+                {spec.dist: ()},
+                REFUSED_MARGINALS,
+            )
+        )
 
 
 def poincare_constant(spec: InputSpec) -> float:
@@ -46,8 +101,10 @@ def poincare_constant(spec: InputSpec) -> float:
 
     Raises:
         ValueError: If the marginal is categorical, which has no Poincare
-            constant, or if the distribution type is unknown.
+            constant, lognormal, Weibull, triangular or beta, which
+            ``jaxgsa.dgsm`` does not support, or of an unknown type.
     """
+    _refuse_family(spec, "jaxgsa.dgsm.poincare_constant")
     if isinstance(spec, UniformSpec):
         return (spec.high - spec.low) ** 2 / math.pi**2
     if isinstance(spec, GaussianSpec):
@@ -277,6 +334,7 @@ def marginal_variance(spec: InputSpec) -> float:
             variance meaningful to the bounds, or if the distribution type is
             unknown.
     """
+    _refuse_family(spec, "jaxgsa.dgsm.marginal_variance")
     if isinstance(spec, UniformSpec):
         return (spec.high - spec.low) ** 2 / 12.0
     if isinstance(spec, GaussianSpec):

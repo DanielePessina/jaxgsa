@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.3.0 (2026-10-25)
+
+### Added
+
+- `result.to_pandas()` on every result object. It returns a pandas `DataFrame` built from `to_dataset()`, with one row per input on a `param` index level named from `problem.names`. Each column is an index with its dataset name. When the result has confidence intervals, each index is followed by its `*_lower` and `*_upper` columns. Results with several outputs or time points add `output` and `time` index levels. `IrregularResult` stacks its channels under an `output` level. A channel with no `time` axis gets a `time` level of missing values, and a channel with several outputs keeps them on a `channel_output` level. Second-order matrices such as `S2` stay in the dataset. pandas comes with xarray, so there is no new dependency.
+- Four new marginal families: `LognormalSpec(mu, sigma)`, `WeibullSpec(shape, scale)`, `TriangularSpec(low, mode, high)` and `BetaSpec(a, b, low=0, high=1)`. Each one uses the SciPy parameterisation (`lognorm`, `weibull_min`, `triang`, `beta`). Sampling uses the inverse CDF. The specs have a dict form, `support()`, and save and load with the problem. In the dict form of a beta input, `low` and `high` default to 0 and 1, as in `BetaSpec`.
+- `SobolSamples.transform(theta)` differentiates every parameter of the new families. For `BetaSpec`, only `low` and `high` are differentiable, because the inverse CDF runs on the host. The design computes the beta quantiles once, so repeated and jitted `transform` calls do not call SciPy again.
+- `pce` maps the new families onto Legendre polynomials through their CDF.
+- `morris.sample` accepts the new families. Lognormal and Weibull inputs are open above, so the design pulls in only their upper side by `q`. Triangular and beta inputs are bounded and do not move. `SobolSamples.to_morris()` warns for lognormal and Weibull inputs, as it does for an unbounded Gaussian.
+
+### Changed
+
+- `dgsm` refuses all four new families with a `ValueError`. A lognormal input has no finite Poincare constant. A Weibull input has none when `shape < 1`, and jaxgsa does not compute one for any shape yet. Triangular and beta inputs have finite constants, but jaxgsa does not compute them yet.
+- `efast` refuses lognormal and Weibull inputs with a `ValueError`. A long tail makes S1 biased low, and more samples do not remove the bias. Against an exact S1 of 0.53, eFAST gave 0.36 for `LognormalSpec(0, 1)` and 0.45 for `WeibullSpec(0.8, 1)`.
+- `hdmr` refuses lognormal and Weibull inputs with a `ValueError`. So does `shapley` with `backend="hdmr"`, in `analyze` and `indices`. A long tail makes S1 biased low, and more samples do not remove the bias. On `Y = a + b` with `b` uniform, HDMR gave S1 = 0.79 at N = 2000 and 0.67 at N = 8000 for `LognormalSpec(0, 1)`, against an exact 0.98. Triangular and beta inputs are accepted: they are as accurate as a Gaussian input.
+- `hdmr.indices` now applies the same input checks as `hdmr.analyze`.
+- Each refusal message gives the reason and lists the methods that accept the family.
+
 ## 1.2.1 (2026-10-25)
 
 ### Documentation

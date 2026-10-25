@@ -40,13 +40,17 @@ EXPECTED_COLUMNS = [
     "Own design",
     "Correlated",
     "Categorical",
+    "Lognormal, Weibull, triangular, beta",
     "Bootstrap CI",
 ]
+
+NEW_FAMILIES = ("lognormal", "weibull", "triangular", "beta")
+"""Tags of the 1.3 families, in the order the column header names them."""
 
 YES = "✓"
 NO = "✗"
 DASH = "—"
-FOOTNOTE_MARKERS = "†‡§"
+FOOTNOTE_MARKERS = "†‡§¶‖"
 
 NAME_IN_CELL = re.compile(r"\[`([a-z_]+)`\]")
 
@@ -193,6 +197,21 @@ class TestEveryCellIsTrue:
                 f"the docs say {name} "
                 f"{'accepts' if documented else 'refuses'} a categorical problem, "
                 f"but the registry declares categorical={spec.categorical!r}"
+            )
+
+            column = "Lognormal, Weibull, triangular, beta"
+            cell = row[EXPECTED_COLUMNS.index(column)].strip(FOOTNOTE_MARKERS + " ")
+            accepted = [f for f in NEW_FAMILIES if f not in spec.refused_marginals]
+            if len(accepted) == len(NEW_FAMILIES):
+                expected = YES
+            elif not accepted:
+                expected = NO
+            else:
+                expected = ", ".join(accepted)
+            assert cell.lower() == expected.lower(), (
+                f"the {column!r} cell for {name} is {cell!r}, but the registry "
+                f"declares refused_marginals={sorted(spec.refused_marginals)}, so it "
+                f"must read {expected!r}"
             )
 
             cell = row[EXPECTED_COLUMNS.index("Bootstrap CI")]

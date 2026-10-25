@@ -43,7 +43,12 @@ from jaxgsa._core.copula import (
     latent_to_physical,
 )
 from jaxgsa._core.transforms import cdf_to_unit_interval
-from jaxgsa.problem import CategoricalSpec, InputSpec, Problem, UniformSpec
+from jaxgsa.problem import (
+    CategoricalSpec,
+    GaussianSpec,
+    InputSpec,
+    Problem,
+)
 
 # Keeps the probit and the marginal inverse CDFs finite at exact 0 and 1.
 _UNIT_CLIP = 1e-12
@@ -183,14 +188,9 @@ def _check_support(
     high = np.full(len(input_specs), np.inf)
     levels: dict[int, int] = {}
     for i, spec in enumerate(input_specs):
+        low[i], high[i] = spec.support()
         if isinstance(spec, CategoricalSpec):
-            low[i], high[i] = 0.0, len(spec.probs) - 1
             levels[i] = len(spec.probs)
-        else:
-            if spec.low is not None:
-                low[i] = spec.low
-            if spec.high is not None:
-                high[i] = spec.high
     continuous = [i for i in range(len(input_specs)) if i not in levels]
     if continuous:
         lo, hi = low[continuous], high[continuous]
@@ -222,7 +222,8 @@ def _check_support(
         support = f"categorical, integer codes 0 to {levels[i] - 1}"
     else:
         wrong = (column < low[i]) | (column > high[i])
-        kind = "uniform" if isinstance(spec, UniformSpec) else "truncated Gaussian"
+        # An unbounded Gaussian cannot get here, so a Gaussian is truncated.
+        kind = "truncated Gaussian" if isinstance(spec, GaussianSpec) else spec.display_name
         support = f"{kind} on [{low[i]:g}, {high[i]:g}]"
     first = int(np.flatnonzero(wrong)[0])
     raise ValueError(

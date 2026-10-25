@@ -18,7 +18,8 @@ distributions you declare. A model can therefore have different, internally
 valid indices under different assumptions about its inputs.
 
 `jaxgsa.Problem.from_dict(...)` takes the `(low, high)` uniform shorthand and
-tagged specs for Gaussian and truncated Gaussian inputs. A truncated Gaussian
+tagged specs for Gaussian and truncated Gaussian inputs. It also takes
+[lognormal, Weibull, triangular and beta inputs](#lognormal-weibull-triangular-and-beta-inputs). A truncated Gaussian
 is a bell-shaped distribution restricted to an interval.
 
 The full script is [`examples/oakley_ohagan_15d.py`](https://github.com/danielepessina/jaxgsa/blob/master/examples/oakley_ohagan_15d.py), run with `uv run examples/oakley_ohagan_15d.py`.
@@ -278,6 +279,50 @@ decomposition at 15 dimensions. Pick RS-HDMR when the dataset already
 exists as plain samples: 3000 draws found the block, with one ranking
 error. Pick DGSM when the model is differentiable: 10000 Monte Carlo rows
 and one autodiff sweep recover the exact top five.
+
+## Lognormal, Weibull, triangular and beta inputs
+
+Four more families use the SciPy parameters. Pass the dataclass, or the plain
+dict with the matching `dist` tag.
+
+| Spec | Dict `dist` | SciPy equivalent | Support |
+| --- | --- | --- | --- |
+| `LognormalSpec(mu, sigma)` | `"lognormal"` | `lognorm(s=sigma, scale=exp(mu))` | $(0, \infty)$ |
+| `WeibullSpec(shape, scale)` | `"weibull"` | `weibull_min(c=shape, scale=scale)` | $[0, \infty)$ |
+| `TriangularSpec(low, mode, high)` | `"triangular"` | `triang(c=(mode - low) / (high - low), loc=low, scale=high - low)` | $[low, high]$ |
+| `BetaSpec(a, b, low=0, high=1)` | `"beta"` (dict needs `low` and `high`) | `beta(a, b, loc=low, scale=high - low)` | $[low, high]$ |
+
+```python
+import jaxgsa
+
+problem = jaxgsa.Problem.from_dict(
+    {
+        "load": jaxgsa.LognormalSpec(mu=0.0, sigma=0.4),
+        "wind": jaxgsa.WeibullSpec(shape=2.0, scale=8.0),
+        "cost": jaxgsa.TriangularSpec(low=1.0, mode=1.5, high=3.0),
+        "yield": {"dist": "beta", "a": 2.0, "b": 5.0, "low": 0.0, "high": 1.0},
+    }
+)
+samples = jaxgsa.sobol.sample(problem, 1024, verbose=False)
+print(samples.samples.min(axis=0))
+```
+
+`mu` and `sigma` of a lognormal input are the mean and standard deviation of
+`log(x)`, not of `x`. A declared `correlation` sets the dependence of the
+latent Gaussian variables (with `correlation_type="spearman"`, the rank
+dependence). It does not set the Pearson correlation of the physical inputs.
+For skewed marginals the two can differ a lot.
+
+Three methods refuse some of these families. `jaxgsa.dgsm` refuses all four,
+because it has no Poincare constant for them. `jaxgsa.efast` and
+`jaxgsa.hdmr` refuse lognormal and Weibull inputs, because a long upper tail
+biases their `S1` low. Shapley with `backend="hdmr"` refuses them for the same
+reason. These methods accept triangular and beta inputs. The error message lists the methods that
+accept the family. `jaxgsa.morris.sample` pulls in only the open upper side of
+a lognormal or Weibull input, by `truncation_quantile`. PCE and the PCE-backed
+Shapley analysis map these inputs through their CDF onto Legendre polynomials,
+so they converge slower than for a matched basis. See the
+[method capabilities table](/guide/methods#method-capabilities).
 
 ## Practical notes
 

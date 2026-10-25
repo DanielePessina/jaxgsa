@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 import warnings
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, Mapping, NamedTuple, overload
 
 import numpy as np
@@ -37,13 +38,18 @@ from jaxgsa._core.sampling import (
     _power_of_2_error,
     _stable_unique_rows,
     _transform_samples,
+    beta_unit_quantiles,
     check_budget_choice,
     check_seed,
     check_seed_scramble,
 )
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa._core.warning_types import JaxgsaWarning
-from jaxgsa.problem import CategoricalSpec, GaussianSpec, Problem, _categorical_dims
+from jaxgsa.problem import (
+    CategoricalSpec,
+    Problem,
+    _categorical_dims,
+)
 
 if TYPE_CHECKING:
     from jax import Array
@@ -149,6 +155,13 @@ class SobolSamples(UniqueDesignSamples):
                      "b": {"mean": 3.0, "variance": 9.0}}
             X = samples.transform(theta)
 
+        Lognormal (``mu``, ``sigma``), Weibull (``shape``, ``scale``) and
+        triangular (``low``, ``mode``, ``high``) inputs are closed forms in JAX
+        and differentiate in every field. A beta input differentiates in
+        ``low`` and ``high`` only: its standard quantiles are computed once on
+        the host once per design and reused on every call, so ``theta``
+        naming ``a`` or ``b`` raises ``ValueError``.
+
         Tier T4 (behavioural contract): the returned array must reproduce
         :attr:`samples` when ``theta`` is ``None``, and its Jacobian with
         respect to ``theta`` must match central finite differences. Both are
@@ -198,7 +211,22 @@ class SobolSamples(UniqueDesignSamples):
                 "re-transformed. Only a design returned by jaxgsa.sobol.sample has "
                 "one; a hand-built design does not."
             )
-        return _jax_transform_samples(self.problem, self.unit, theta)
+        return _jax_transform_samples(
+            self.problem, self.unit, theta, unit_quantiles=self._beta_unit_quantiles
+        )
+
+    @cached_property
+    def _beta_unit_quantiles(self) -> dict[int, np.ndarray]:
+        """The beta columns' standard quantiles of :attr:`unit`, computed once.
+
+        JAX has no beta inverse CDF, so :meth:`transform` reads these host
+        values instead of calling SciPy on every call. Only ``low`` and
+        ``high`` of a beta input are traced. Empty for a problem with no beta
+        parameter. Requires :attr:`unit`, which :meth:`transform` checks
+        first.
+        """
+        assert self.unit is not None
+        return beta_unit_quantiles(self.problem, self.unit)
 
     @overload
     def downsample(self, base_n: int) -> SobolSamples: ...
@@ -410,7 +438,7 @@ class SobolSamples(UniqueDesignSamples):
         block_rows[:, 0] = self.expanded_to_unique[starts]
         block_rows[:, 1:] = self.expanded_to_unique[offsets + 1 + params]
 
-        _warn_unbounded_gaussian(self.problem)
+        _warn_unbounded_marginals(self.problem)
         derived = _radial_samples_from_blocks(
             samples=self.samples,
             block_rows=block_rows,
@@ -599,29 +627,35 @@ def _dedupe_design(problem: Problem, expanded_unit: np.ndarray) -> _DedupedDesig
     return _DedupedDesign(unit, expanded_to_unit, collapsed, unit_to_unique[expanded_to_unit])
 
 
-def _warn_unbounded_gaussian(problem: Problem) -> None:
-    """Warn that an unbounded Gaussian gives ``mu_star`` no fixed scale.
+def _warn_unbounded_marginals(problem: Problem) -> None:
+    """Warn that a marginal with an open tail gives ``mu_star`` no fixed scale.
 
-    ``GaussianInputSpec`` accepts ``low`` and/or ``high``, so a one-sided
-    truncation still leaves the opposite tail unbounded and is reported. Only
-    uniforms and two-sided-truncated Gaussians stay silent.
+    A Gaussian is open on every side it does not bound with ``low`` or
+    ``high``, so a one-sided truncation still leaves the opposite tail open
+    and is reported. Lognormal and Weibull are open above (their support is
+    ``[0, inf)``). Uniform, two-sided-truncated Gaussian, triangular, beta and
+    categorical marginals stay silent.
     """
-    # Only Gaussian marginals can be unbounded; categorical codes are bounded.
-    unbounded = [
-        name
-        for name, spec in zip(problem.names, problem.input_specs)
-        if isinstance(spec, GaussianSpec) and (spec.low is None or spec.high is None)
-    ]
+    unbounded: dict[str, list[str]] = {}
+    for name, spec in zip(problem.names, problem.input_specs, strict=True):
+        if any(math.isinf(side) for side in spec.support()):
+            unbounded.setdefault(spec.dist, []).append(name)
     if not unbounded:
         return
+    names = [name for group in unbounded.values() for name in group]
+    families = ", ".join(unbounded)
+    hint = (
+        " Use Problem.from_dict(..., truncate_gaussians=q) if magnitudes must be "
+        "comparable across designs"
+        if "gaussian" in unbounded
+        else ""
+    )
     warnings.warn(
-        f"jaxgsa.sobol.to_morris: parameters {unbounded} have unbounded gaussian "
-        "marginals. An elementary effect on an unbounded marginal has no fixed "
+        f"jaxgsa.sobol.to_morris: parameters {names} have unbounded marginals "
+        f"({families}). An elementary effect on an unbounded marginal has no fixed "
         "scale: how far the design reaches "
         "into the tail sets the magnitude of mu_star, and the Saltelli design and "
-        "morris.sample reach different distances. Rankings are unaffected. Use "
-        "Problem.from_dict(..., truncate_gaussians=q) if magnitudes must be comparable "
-        "across designs",
+        f"morris.sample reach different distances. Rankings are unaffected.{hint}",
         # Reached from SobolSamples.to_morris, so the user's frame is two up.
         stacklevel=3,
         category=JaxgsaWarning,

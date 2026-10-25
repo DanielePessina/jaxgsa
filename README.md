@@ -85,6 +85,7 @@ where to find a worked example:
 | Many outputs, or an output over time, in one call | all methods | [Multi-output example](https://danielepessina.github.io/jaxgsa/examples/multi-output) |
 | Correlated inputs | `borgonovo`, `hdmr`, `hsic`, `kucherenko`, `optimal_transport`, `pawn`, `rank`, `vkoga`, `shapley` with `backend="hdmr"` | [Dependent inputs](https://danielepessina.github.io/jaxgsa/guide/dependent-inputs) |
 | Categorical inputs | `borgonovo`, `optimal_transport`, `pawn`, `sobol` | [Categorical example](https://danielepessina.github.io/jaxgsa/examples/categorical-inputs) |
+| Lognormal, Weibull, triangular and beta inputs | every method except `dgsm`; `efast`, `hdmr` and `shapley` with `backend="hdmr"` take triangular and beta only | [Non-uniform inputs](https://danielepessina.github.io/jaxgsa/examples/non-uniform-inputs#lognormal-weibull-triangular-and-beta-inputs) |
 | Gradients of an index | differentiable estimator cores | [Differentiation guide](https://danielepessina.github.io/jaxgsa/guide/differentiation) |
 | Bootstrap confidence intervals (`n_bootstrap`) | every method except `efast` and `hsic` (HSIC reports permutation p-values) | [Bootstrap example](https://danielepessina.github.io/jaxgsa/examples/bootstrap) |
 
