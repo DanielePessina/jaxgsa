@@ -265,9 +265,10 @@ def test_hsic_gradient_memory_does_not_grow_with_chunking() -> None:
     differentiates the stored-kernel form instead.
     """
     n, d = 128, 24
-    mat = n * n * 4
     problem = Problem.from_dict({f"x{i}": (0.0, 1.0) for i in range(d)})
     X = jax.random.uniform(jax.random.key(8), (n, d))
+    # One (N, N) matrix in the working dtype (float64 when x64 is on).
+    mat = n * n * X.dtype.itemsize
     Y = jnp.sin(6 * X[:, 0]) + X[:, 1] * X[:, 2]
     old_budget = get_memory_budget()
     temps = []
