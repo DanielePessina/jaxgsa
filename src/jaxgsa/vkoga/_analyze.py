@@ -53,7 +53,6 @@ from jaxgsa._core.irregular import (
     _is_irregular_y,
     analyze_irregular,
 )
-from jaxgsa._core.precision import x64_enabled
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa._core.surrogate import _PredictPlan
@@ -99,13 +98,12 @@ _PREDICT_BUDGET_SHARE = 2
 # Hyperparameter search grid, following Hilhorst et al. Section 2.4.1: ten
 # log-spaced values each, cross-validated as a 10x10 product.
 _GAMMA_GRID = np.logspace(-2, np.log10(50.0), 10)
-# _engine._JITTER always adds an unconditional 1e-8 * mean(diag(AtA)) to the
-# solved system, on top of whatever ridge asks for. At a typical training
-# size (n ~ 1024) that jitter is about 2.2e-6. A ridge value below that scale
-# changes nothing: the jitter already dominates, so those candidates tie in
-# cross-validation and VKOGAResult.ridge would report a value smaller than
-# the regularisation actually in force. The grid starts at the jitter scale
-# instead, so every candidate is distinguishable.
+# _engine._JITTER always adds an unconditional 1e-8 * mean(diag(V^T V)) to the
+# Newton-basis system, on top of whatever ridge asks for. At a typical
+# training size (n ~ 1024) that acts as an extra ridge of about 3e-8 to 2e-7.
+# A ridge value below that scale changes nothing, so those candidates would
+# tie in cross-validation. The grid starts above it, at 1e-6, so every
+# candidate is distinguishable.
 _RIDGE_GRID = np.logspace(-6, -2, 10)
 
 # Cap on kernel centres when the caller does not choose one. Greedy selection
@@ -276,7 +274,8 @@ def analyze(
 
     Warns:
         JaxgsaWarning: In any of four cases. An output slice has zero variance.
-            JAX is in single precision, where the kernel solve loses accuracy
+            The surrogate is fitted in single precision (float32 inputs, or
+            JAX without x64), where the greedy centre selection stops early
             for small ``gamma`` (see :mod:`jaxgsa.vkoga`). The cross-validated
             surrogate error is a large fraction of the output standard
             deviation, which makes every index untrustworthy. ``S_U`` had to be
@@ -370,15 +369,15 @@ def analyze(
     n_time, n_out = Y_canonical.shape[1], Y_canonical.shape[2]
     Y_flat = Y_canonical.reshape(Y_canonical.shape[0], n_time * n_out)
 
-    _warn_single_precision()
+    # The RBF kernel is isotropic, so every column must share a scale; the
+    # marginal CDF map is the same transform HDMR uses for its basis.
+    U = cdf_to_unit_interval(X, problem)
+    _warn_single_precision(U.dtype)
     # The input draws are built once and shared by the point estimate and every
     # bootstrap replicate. The dependence comes from the problem alone, so the
     # result's ``dependence`` always equals ``problem.dependence``.
     input_draws = draws_for(problem)
 
-    # The RBF kernel is isotropic, so every column must share a scale; the
-    # marginal CDF map is the same transform HDMR uses for its basis.
-    U = cdf_to_unit_interval(X, problem)
     # VKOGA carries no constant term, so a non-zero output mean would have to
     # be reconstructed by the kernel expansion itself. Centring removes that
     # burden and measurably improves the fit.
@@ -414,14 +413,19 @@ def analyze(
 
     _warn_nonfinite_coefficients(state.coefficients, stacklevel=_user_stacklevel())
 
+    # The index estimators run on the host in float64. Every float field is
+    # returned in the dtype the surrogate was fitted in, so float32 inputs
+    # give float32 results under x64 too.
+    work_dtype = state.centers.dtype
+
     def _shape_index(flat: np.ndarray) -> Array:
         """Reshape an ``(..., S, D)`` index block to the output contract."""
-        arr = jnp.asarray(flat.reshape(*flat.shape[:-2], n_time, n_out, D))
+        arr = jnp.asarray(flat.reshape(*flat.shape[:-2], n_time, n_out, D), dtype=work_dtype)
         return ctx.squeeze(arr, n_trailing=1)
 
     def _shape_slice(flat: np.ndarray) -> Array:
         """Reshape an ``(S,)`` per-slice diagnostic to the output contract."""
-        arr = jnp.asarray(flat.reshape(n_time, n_out))
+        arr = jnp.asarray(flat.reshape(n_time, n_out), dtype=work_dtype)
         return ctx.squeeze(arr, n_trailing=0)
 
     confs: dict[str, Array | None] = dict.fromkeys(_INTERVAL_FIELDS)
@@ -741,19 +745,26 @@ def _seed_from_key(key: Array) -> int:
     return int(np.bitwise_xor.reduce(words))
 
 
-def _warn_single_precision() -> None:
-    """Warn that float32 limits the kernel solve's accuracy.
+def _warn_single_precision(dtype: Any) -> None:
+    """Warn that a float32 fit limits the surrogate's accuracy.
 
-    The regularised normal equations square the condition number of the cross
-    kernel, which for small ``gamma`` exceeds what float32 can carry. Cross
-    validation partly self-corrects by scoring in the same arithmetic and so
-    avoiding the blown-up corner of the grid, but the ceiling is real.
+    The coefficient solve is stable in float32 (it runs in the Newton basis).
+    The greedy centre selection is not: for small ``gamma`` the power function
+    falls to float32 rounding level after fewer centres than float64 would
+    select, and the greedy stops there. Cross-validation scores in the same
+    arithmetic, so it steers away from that corner of the grid, but an
+    explicit small ``gamma`` can still land in it.
+
+    Args:
+        dtype: Working dtype of the fit (the unit-cube inputs). The fit runs
+            in this dtype whatever the x64 flag says, so float32 inputs under
+            x64 warn too.
     """
-    if not x64_enabled():
+    if jnp.finfo(dtype).bits < 64:
         warnings.warn(
-            "jaxgsa.vkoga: JAX is in single precision; the kernel solve is ill-conditioned for "
-            "small gamma and the surrogate may be inaccurate. Enable float64 with "
-            'jax.config.update("jax_enable_x64", True) before fitting.',
+            "jaxgsa.vkoga: the surrogate is fitted in single precision; for small gamma the "
+            "greedy centre selection stops early and the surrogate may be inaccurate. Enable "
+            'float64 with jax.config.update("jax_enable_x64", True) and pass float64 inputs.',
             stacklevel=3,
             category=JaxgsaWarning,
         )
@@ -887,7 +898,7 @@ def _unit_evaluator(state, y_mean: Array):
     """
     n_centers = int(state.centers.shape[0])
     n_slices = int(state.coefficients.shape[1])
-    itemsize = int(jnp.zeros(()).itemsize)
+    itemsize = int(state.centers.dtype.itemsize)
 
     def kernel(U: Array) -> Array:
         return _predict_vkoga(state, U) + y_mean
@@ -960,7 +971,11 @@ def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
                 rows = np.concatenate(
                     [rows, np.zeros((batch - n_valid, rows.shape[1]), dtype=rows.dtype)]
                 )
-            out[start : start + n_valid] = np.asarray(compiled(jnp.asarray(rows)))[:n_valid]
+            # The estimators hand over float64 host rows. Evaluate them in the
+            # fit's own dtype: a float32 fit under x64 would otherwise run a
+            # float64 kernel matrix, about 2.5 times slower for no accuracy.
+            batch_rows = jnp.asarray(rows, dtype=state.centers.dtype)
+            out[start : start + n_valid] = np.asarray(compiled(batch_rows))[:n_valid]
         return out
 
     if len(_PREDICTOR_CACHE) >= _PREDICTOR_CACHE_MAX:
@@ -987,7 +1002,7 @@ def _vkoga_predict_plan(result: VKOGAResult, X_new: Array) -> _PredictPlan:
     if state is None or result._y_mean is None:
         raise ValueError("VKOGAResult does not contain a fitted surrogate")
 
-    U = cdf_to_unit_interval(X_new, result.problem)
+    U = cdf_to_unit_interval(X_new, result.problem).astype(state.centers.dtype)
     unit_kernel, bytes_per_row = _unit_evaluator(state, result._y_mean)
     output_shape = result._output_shape
 

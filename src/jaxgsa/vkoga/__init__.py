@@ -50,9 +50,11 @@ Example::
     result.S_TU   # total uncorrelated: rank parameters to fix
     Y_pred = result.predict(X_new)
 
-Use float64. The kernel solve squares the condition number of the cross kernel,
-and single precision cannot carry that for small shape parameters. Call
-``jax.config.update("jax_enable_x64", True)`` before fitting.
+Prefer float64. The coefficient solve is stable in float32, but for small shape
+parameters the greedy centre selection reaches float32 rounding and stops with
+fewer centres than float64 would select. Call
+``jax.config.update("jax_enable_x64", True)`` and pass float64 inputs before
+fitting.
 
 References:
     Hilhorst, Quicken, van de Vosse & Huberts (2024). Int. J. Numer. Meth.

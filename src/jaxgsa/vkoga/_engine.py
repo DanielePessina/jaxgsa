@@ -22,17 +22,17 @@ Everything here is a pure function on arrays. There are no result classes and
 no ``Problem``. Outputs arrive as ``(n, S)`` with ``S = T*K`` output slices
 already flattened by the caller.
 
-The coefficient step forms the normal matrix ``A_nm^T A_nm``, which squares the
-condition number of the cross-kernel. Under JAX's default float32 that is the
-accuracy ceiling of this module. It bites whenever the kernel Gram is
-ill-conditioned, which means a small ``gamma`` or a centre count close to
-``n``. There the fitted surrogate can be an order of magnitude worse than the
-same equations solved in double precision. Enabling
-``jax.config.update("jax_enable_x64", True)`` removes the ceiling, and the code
-carries ``X.dtype`` throughout so it needs no other change. Grid-searching the
-hyperparameters with :func:`_cross_validate` also helps, because the scores are
-computed in the same arithmetic and so penalise the ill-conditioned corner of
-the grid.
+The coefficient step solves the regularised least-squares problem in the
+Newton basis the greedy builds, not through the kernel-translate normal matrix
+``A_nm^T A_nm``. That matrix squares the condition number of the cross-kernel,
+which for a Gaussian kernel exceeds what float32 can carry at ordinary
+settings; the Newton basis is the stable pivoted-Cholesky factor of the
+kernel, so the solve keeps float32 results close to float64 ones. The
+remaining float32 limit is the greedy itself: its power function
+``1 - sum(V**2)`` reaches float32 rounding for small ``gamma`` or many
+centres, and the greedy then stops with fewer centres than float64 selects.
+The code carries ``X.dtype`` throughout, so float64 inputs under
+``jax.config.update("jax_enable_x64", True)`` need no other change.
 
 References:
     De Marchi, Schaback & Wendland (2005). Adv. Comput. Math. 23:317-330.
@@ -78,10 +78,10 @@ _DEFAULT_RIDGE = 1e-10
 _DEFAULT_TOL_POWER = 5e-8
 _DEFAULT_TOL_RESIDUAL = 1e-4
 
-# Relative jitter on the active diagonal of the normal matrix. The greedy
-# centres are chosen to be maximally distinct, but with the default
-# lambda = 1e-10 the RKHS term does almost nothing, so the kernel Gram can
-# still be numerically singular in float32 once many centres are selected.
+# Relative jitter on the active diagonal of the Newton-basis normal matrix
+# V^T V. With the default lambda = 1e-10 the ridge term does almost nothing,
+# and late Newton columns carry little power, so V^T V can still be close to
+# singular once many centres are selected.
 _JITTER = 1e-8
 
 # Narrowest basis width of the greedy loop's first phase (see _phase_widths).
@@ -159,6 +159,38 @@ def _select_centers(
 ) -> tuple[Array, Array]:
     """Select kernel centres by the P-greedy rule.
 
+    The selection half of :func:`_newton_greedy`, for callers that do not
+    need the Newton basis. See there for the rule and the argument contract.
+
+    Returns:
+        ``(idx, m)``: the int32 buffer of selected row indices, shape
+        ``(max_centers,)``, and the scalar count actually selected.
+    """
+    idx, m, _ = _newton_greedy(
+        X,
+        Y,
+        gamma=gamma,
+        max_centers=max_centers,
+        tol_power=tol_power,
+        tol_residual=tol_residual,
+        train_mask=train_mask,
+    )
+    return idx, m
+
+
+@functools.partial(jax.jit, static_argnames=("max_centers",))
+def _newton_greedy(
+    X: Array,
+    Y: Array,
+    *,
+    gamma: Array | float,
+    max_centers: int,
+    tol_power: Array | float = _DEFAULT_TOL_POWER,
+    tol_residual: Array | float = _DEFAULT_TOL_RESIDUAL,
+    train_mask: Array | None = None,
+) -> tuple[Array, Array, Array]:
+    """Select kernel centres by the P-greedy rule and return the Newton basis.
+
     Centres are picked one at a time at the current maximiser of the power
     function (Hilhorst et al. 2024, eq. 8). The rule is expressed in the Newton
     basis of Pazouki & Schaback, which keeps the basis nested: adding a centre
@@ -192,9 +224,12 @@ def _select_centers(
             shapes.
 
     Returns:
-        ``(idx, m)``. ``idx`` is the int32 buffer of selected row indices,
+        ``(idx, m, V)``. ``idx`` is the int32 buffer of selected row indices,
         shape ``(max_centers,)``. ``m`` is the scalar count of centres actually
-        selected. Slots ``>= m`` are unused.
+        selected. Slots ``>= m`` are unused. ``V`` is the Newton basis at every
+        row (held-out rows included), shape ``(n, max_centers)``; its columns
+        ``>= m`` are zero. :func:`_solve_ridge` solves for the coefficients in
+        this basis.
     """
     n, _ = X.shape
     # Never ask for more centres than there are points to pick from: the
@@ -284,6 +319,12 @@ def _select_centers(
         k_col = _gaussian_kernel(X, X[i][None, :], gamma)[:, 0]
         V_i = jax.lax.optimization_barrier(V[i])
         v = (k_col - V @ V_i) / sqrt_p
+        # At its own centre the new basis function equals the power there,
+        # so set that entry exactly. Recomputed as (1 - V_i @ V_i) / sqrt_p it
+        # can round to zero in float32 once the power nears rounding level,
+        # and a zero there makes the triangular factor in _solve_ridge
+        # singular.
+        v = v.at[i].set(sqrt_p)
 
         # Interpolation residual in the same basis: one coefficient row per
         # output slice, since all slices share this basis. The residual at
@@ -338,8 +379,8 @@ def _select_centers(
             *rest,
         )
         state = jax.lax.while_loop(lambda s, width=width: _cond(s) & (s[6] < width), _body, state)
-    *_, idx, m, _, _, _ = state
-    return idx, m
+    V, *_, idx, m, _, _, _ = state
+    return idx, m, V
 
 
 def _phase_widths(max_centers: int) -> tuple[int, ...]:
@@ -366,6 +407,18 @@ def _phase_widths(max_centers: int) -> tuple[int, ...]:
 class _NormalEquations(NamedTuple):
     """Ridge-independent pieces of the regularised coefficient solve.
 
+    The system is posed in the Newton basis ``V`` the greedy built, not in the
+    kernel translates. With ``A_nm = V L^T`` and ``A_mm = L L^T``, where ``L``
+    is ``V`` at the centres (lower triangular), the RKHS-regularised problem
+    ``min ||Y - A_nm alpha||^2 + ridge * alpha^T A_mm alpha`` becomes
+    ``min ||Y - V beta||^2 + ridge * ||beta||^2`` with ``beta = L^T alpha``.
+    The two are equal in exact arithmetic. In floating point they are not:
+    ``A_nm^T A_nm`` squares the condition number of the cross-kernel, which
+    for a Gaussian kernel exceeds ``1 / eps`` of float32 at ordinary settings
+    (measured: ``6e8`` on Ishigami, ``N=600``, 60 centres). The Newton basis
+    is the stable pivoted-Cholesky factor of the kernel, so ``V^T V`` stays
+    well conditioned (``cond(V) = 145`` on the same case).
+
     Everything here depends on ``X``, ``Y``, the selected centres, and
     ``gamma``, but not on ``ridge``. :func:`_cross_validate` builds one per
     ``(fold, gamma)`` and reuses it for every ridge in the grid. Only the cheap
@@ -376,20 +429,19 @@ class _NormalEquations(NamedTuple):
             ``(max_centers,)``.
         centers: Selected centres, shape ``(max_centers, D)``, padded with
             duplicates.
-        A_nm: Masked cross-kernel between training points and centres, shape
-            ``(n, max_centers)``.
-        A_mm: Masked centre Gram, shape ``(max_centers, max_centers)``.
-        AtA: ``A_nm^T A_nm``, shape ``(max_centers, max_centers)``.
-        AtY: ``A_nm^T Y`` over the training rows, shape ``(max_centers, S)``.
+        L: Newton basis at the centres, lower triangular, shape
+            ``(max_centers, max_centers)``. Inactive slots hold the identity.
+        VtV: ``V^T V`` over the training rows, shape
+            ``(max_centers, max_centers)``.
+        VtY: ``V^T Y`` over the training rows, shape ``(max_centers, S)``.
         m: Scalar count of centres actually selected.
     """
 
     active: Array
     centers: Array
-    A_nm: Array
-    A_mm: Array
-    AtA: Array
-    AtY: Array
+    L: Array
+    VtV: Array
+    VtY: Array
     m: Array
 
 
@@ -398,20 +450,20 @@ def _normal_equations(
     Y: Array,
     idx: Array,
     m: Array,
+    V: Array,
     *,
-    gamma: Array | float,
     train_mask: Array | None = None,
 ) -> _NormalEquations:
-    """Build the ridge-independent normal-equation matrices.
+    """Build the ridge-independent normal-equation matrices in the Newton basis.
 
     Args:
         X: Training inputs, shape ``(n, D)``.
         Y: Training outputs, shape ``(n, S)``, output slices already flattened.
-        idx: Selected row indices from :func:`_select_centers`, shape
+        idx: Selected row indices from :func:`_newton_greedy`, shape
             ``(max_centers,)``.
         m: Scalar count of centres actually selected.
-        gamma: Positive Gaussian shape parameter the centres were selected
-            with.
+        V: Newton basis from :func:`_newton_greedy`, shape
+            ``(n, max_centers)``.
         train_mask: Boolean mask, shape ``(n,)``, or ``None``. ``False`` rows
             are excluded from the solve.
 
@@ -422,27 +474,31 @@ def _normal_equations(
     max_centers = idx.shape[0]
     mask = jnp.ones((n,), dtype=bool) if train_mask is None else train_mask.astype(bool)
 
-    # Unused slots point at row 0; masking their kernel columns to zero (and
-    # putting a 1 on their diagonal in _solve_ridge) forces their coefficients
-    # to be exactly zero, so the duplicate centre is inert.
+    # Unused slots point at row 0. Their V columns are exact zeros, and an
+    # identity block in L (plus a 1 on their diagonal in _solve_ridge) forces
+    # their coefficients to be exactly zero, so the duplicate centre is inert.
     active = jnp.arange(max_centers) < m
-    centers = X[idx]
-    A_nm = _gaussian_kernel(X, centers, gamma) * active[None, :] * mask[:, None]
-    A_mm = _gaussian_kernel(centers, centers, gamma) * active[None, :] * active[:, None]
+    both = active[:, None] & active[None, :]
+    # A Newton basis function vanishes at every earlier centre, so V[idx] is
+    # lower triangular up to rounding; tril makes that exact.
+    L = jnp.where(both, jnp.tril(V[idx]), 0.0) + jnp.diag(jnp.where(active, 0.0, 1.0))
+    V_train = jnp.where(mask[:, None], V, 0.0)
     Y_train = jnp.where(mask[:, None], Y, 0.0)
     return _NormalEquations(
         active=active,
-        centers=centers,
-        A_nm=A_nm,
-        A_mm=A_mm,
-        AtA=A_nm.T @ A_nm,
-        AtY=A_nm.T @ Y_train,
+        centers=X[idx],
+        L=L.astype(V.dtype),
+        VtV=V_train.T @ V_train,
+        VtY=V_train.T @ Y_train,
         m=m,
     )
 
 
 def _solve_ridge(eq: _NormalEquations, ridge: Array | float) -> Array:
     """Assemble the regularised system for one ridge value and solve it.
+
+    Solves ``(V^T V + ridge * I + JITTER * diag_mean * I) beta = V^T Y`` and
+    maps back to kernel-translate coefficients by ``L^T alpha = beta``.
 
     Args:
         eq: Ridge-independent matrices from :func:`_normal_equations`.
@@ -452,39 +508,41 @@ def _solve_ridge(eq: _NormalEquations, ridge: Array | float) -> Array:
         Expansion coefficients, shape ``(max_centers, S)``. Inactive rows are
         zero.
     """
-    G = eq.AtA + ridge * eq.A_mm
-    # Relative jitter: scale-free against gamma and the number of rows, which
-    # both move the magnitude of A_nm^T A_nm by orders of magnitude.
+    G = eq.VtV + jnp.diag(jnp.where(eq.active, ridge, 0.0)).astype(eq.VtV.dtype)
+    # Relative jitter: scale-free against the number of rows, which moves the
+    # magnitude of V^T V by orders of magnitude.
     diag_mean = jnp.sum(jnp.where(eq.active, jnp.diagonal(G), 0.0)) / jnp.maximum(eq.m, 1)
-    alpha = jnp.linalg.solve(G + jnp.diag(jnp.where(eq.active, _JITTER * diag_mean, 1.0)), eq.AtY)
-    # The default jitter is below float32 eps, so a singular Gram can still
+    beta = jnp.linalg.solve(G + jnp.diag(jnp.where(eq.active, _JITTER * diag_mean, 1.0)), eq.VtY)
+    # The default jitter is below float32 eps, so a singular system can still
     # give NaN there. Only then, re-solve with a larger jitter. A finite first
     # solve is returned unchanged, and the retry costs nothing unless it runs.
-    finite = jnp.all(jnp.isfinite(alpha))
+    finite = jnp.all(jnp.isfinite(beta))
     if isinstance(finite, jax.core.Tracer):
         # Traced (the cross-validation scorer): branch on the device.
-        return jax.lax.cond(
-            finite, lambda: alpha, lambda: _retry_solve(G, eq.AtY, eq.active, diag_mean)
+        beta = jax.lax.cond(
+            finite, lambda: beta, lambda: _retry_solve(G, eq.VtY, eq.active, diag_mean)
         )
-    # Eager (the final fit): branch on the host. An eager lax.cond would
-    # compile again on every call, because its branch closures are new.
-    return alpha if bool(finite) else _retry_solve(G, eq.AtY, eq.active, diag_mean)
+    elif not bool(finite):
+        # Eager (the final fit): branch on the host. An eager lax.cond would
+        # compile again on every call, because its branch closures are new.
+        beta = _retry_solve(G, eq.VtY, eq.active, diag_mean)
+    return jax.scipy.linalg.solve_triangular(eq.L.T, beta, lower=False)
 
 
-def _retry_solve(G: Array, AtY: Array, active: Array, diag_mean: Array) -> Array:
+def _retry_solve(G: Array, rhs: Array, active: Array, diag_mean: Array) -> Array:
     """Solve the ridge system again with a jitter of ``_JITTER_EPS`` epsilons.
 
     Args:
         G: Regularised normal matrix without jitter, ``(max_centers, max_centers)``.
-        AtY: Right-hand side, ``(max_centers, S)``.
+        rhs: Right-hand side, ``(max_centers, S)``.
         active: Boolean mask of the filled centre slots, ``(max_centers,)``.
         diag_mean: Mean of the active diagonal of ``G``.
 
     Returns:
-        Expansion coefficients, shape ``(max_centers, S)``.
+        Newton-basis coefficients ``beta``, shape ``(max_centers, S)``.
     """
     eps_jitter = jnp.maximum(_JITTER, _JITTER_EPS * jnp.finfo(G.dtype).eps)
-    return jnp.linalg.solve(G + jnp.diag(jnp.where(active, eps_jitter * diag_mean, 1.0)), AtY)
+    return jnp.linalg.solve(G + jnp.diag(jnp.where(active, eps_jitter * diag_mean, 1.0)), rhs)
 
 
 def _solve_coefficients(
@@ -492,6 +550,7 @@ def _solve_coefficients(
     Y: Array,
     idx: Array,
     m: Array,
+    V: Array,
     *,
     gamma: Array | float,
     ridge: Array | float,
@@ -499,32 +558,34 @@ def _solve_coefficients(
 ) -> _VKOGAState:
     """Solve for the expansion coefficients over already-selected centres.
 
-    Coefficients solve the RKHS-regularised normal equations over the
+    Coefficients solve the RKHS-regularised least-squares problem over the
     selected centres::
 
-        (A_nm^T A_nm + ridge * A_mm + JITTER * diag_mean * I) alpha = A_nm^T Y
+        min_alpha ||Y - A_nm alpha||^2 + ridge * alpha^T A_mm alpha
 
     ``A_nm`` is the ``(n, m)`` cross-kernel between training points and
-    centres, and ``A_mm`` is the ``(m, m)`` centre Gram. When ``m = n`` and
-    ``ridge`` dominates the jitter term this collapses to the paper's eq. (6):
-    ``A_nm = A_mm = A`` is then symmetric, so the system is
-    ``A (A + ridge*I) alpha = A Y``, that is ``(A + ridge*I) alpha = Y``.
+    centres, and ``A_mm`` is the ``(m, m)`` centre Gram. When ``m = n`` this
+    is the paper's eq. (6), ``(A + ridge*I) alpha = Y``. The solve itself runs
+    in the Newton basis ``V`` (see :class:`_NormalEquations`), because the
+    kernel-translate normal matrix ``A_nm^T A_nm`` is too ill-conditioned for
+    float32.
 
-    The ``JITTER * diag_mean * I`` term (see :func:`_solve_ridge`) is added
-    unconditionally, not just when the Gram is singular. ``diag_mean`` is the
-    mean active diagonal of ``A_nm^T A_nm + ridge * A_mm``, so this term
-    scales with the problem the same way ``ridge * A_mm`` does. At the module
-    default ``_JITTER = 1e-8`` it is about 2.2e-6 at a training size of 1024
-    rows. A caller-supplied ``ridge`` below that scale is therefore not the
-    regularisation in force: the jitter already dominates the diagonal, and
-    the reported ``VKOGAResult.ridge`` undercounts it.
+    A ``JITTER * diag_mean * I`` term (see :func:`_solve_ridge`) is added to
+    the Newton-basis system unconditionally. ``diag_mean`` is the mean active
+    diagonal of ``V^T V + ridge * I``, so the term acts as an extra ridge of
+    ``JITTER * diag_mean``: about 3e-8 to 2e-7 at 1024 training rows on
+    uniform inputs. A caller-supplied ``ridge`` below that scale is therefore
+    not the regularisation in force, and the reported ``VKOGAResult.ridge``
+    undercounts it.
 
     Args:
         X: Training inputs, shape ``(n, D)``.
         Y: Training outputs, shape ``(n, S)``, output slices already flattened.
-        idx: Selected row indices from :func:`_select_centers`, shape
+        idx: Selected row indices from :func:`_newton_greedy`, shape
             ``(max_centers,)``.
         m: Scalar count of centres actually selected.
+        V: Newton basis from :func:`_newton_greedy`, shape
+            ``(n, max_centers)``.
         gamma: Positive Gaussian shape parameter the centres were selected
             with.
         ridge: RKHS regularisation parameter (the paper's lambda).
@@ -541,12 +602,15 @@ def _solve_coefficients(
     mask = jnp.ones((n,), dtype=bool) if train_mask is None else train_mask.astype(bool)
     n_train = jnp.sum(mask)
 
-    eq = _normal_equations(X, Y, idx, m, gamma=gamma, train_mask=mask)
+    eq = _normal_equations(X, Y, idx, m, V, train_mask=mask)
     centers = eq.centers
     alpha = _solve_ridge(eq, ridge)  # (max_centers, S)
 
-    # Training-fit diagnostic, per slice, over the rows actually fitted.
-    sq_err = jnp.where(mask[:, None], (Y - eq.A_nm @ alpha) ** 2, 0.0)
+    # Training-fit diagnostic, per slice, over the rows actually fitted. It
+    # evaluates the kernel translates, as predict does, so it scores the
+    # surrogate the caller gets.
+    A_nm = _gaussian_kernel(X, centers, gamma) * eq.active[None, :]
+    sq_err = jnp.where(mask[:, None], (Y - A_nm @ alpha) ** 2, 0.0)
     rmse = jnp.sqrt(jnp.sum(sq_err, axis=0) / jnp.maximum(n_train, 1))
     rmse = jnp.where(n_train > 0, rmse, jnp.full((n_slices,), jnp.nan))
 
@@ -593,7 +657,7 @@ def _fit_vkoga(
     Returns:
         The fitted :class:`_VKOGAState`.
     """
-    idx, m = _select_centers(
+    idx, m, V = _newton_greedy(
         X,
         Y,
         gamma=gamma,
@@ -602,7 +666,7 @@ def _fit_vkoga(
         tol_residual=tol_residual,
         train_mask=train_mask,
     )
-    return _solve_coefficients(X, Y, idx, m, gamma=gamma, ridge=ridge, train_mask=train_mask)
+    return _solve_coefficients(X, Y, idx, m, V, gamma=gamma, ridge=ridge, train_mask=train_mask)
 
 
 def _predict_vkoga(state: _VKOGAState, X_new: Array) -> Array:
@@ -684,7 +748,7 @@ def _cv_fold_sse(
     n = X.shape[0]
     train = fold_of != fold
     # One greedy sweep per (fold, gamma): selection is ridge-free.
-    idx, m = _select_centers(
+    idx, m, V = _newton_greedy(
         X,
         Y,
         gamma=gamma,
@@ -696,7 +760,7 @@ def _cv_fold_sse(
     # The normal-equation matrices and the prediction kernel are also
     # ridge-free: build them once per (fold, gamma) and reuse them for
     # the whole ridge grid. Only the assembly-and-solve repeats.
-    eq = _normal_equations(X, Y, idx, m, gamma=gamma, train_mask=train)
+    eq = _normal_equations(X, Y, idx, m, V, train_mask=train)
     block = -(-n // n_folds)
     (held_idx,) = jnp.nonzero(~train, size=block, fill_value=0)
     valid = jnp.arange(block) < jnp.sum(~train)
