@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import dataclasses
 import warnings
-from functools import lru_cache, partial
+from functools import partial
 from typing import Literal, NamedTuple, cast
 
 import jax
@@ -73,6 +73,7 @@ from jax import Array
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import interval
+from jaxgsa._core.column_chunks import map_column_chunks
 from jaxgsa._core.entry import (
     at_least,
     bootstrap_checks,
@@ -392,7 +393,9 @@ def _ks_from_sorted(y_sorted: Array, bin_idx_sorted: Array, n_classes: int) -> A
     dtype = jnp.result_type(y_sorted.dtype, jnp.float32)
     param_bins = jnp.arange(n_classes)
     is_group_end = jnp.concatenate([y_sorted[:-1] != y_sorted[1:], jnp.array([True])])
-    oh = (bin_idx_sorted[:, :, None] == param_bins[None, None, :]).astype(dtype)
+    # 0/1 flags with block sums of at most _CUMSUM_BLOCK, so float32 is exact
+    # here at any working dtype, and runs faster than float64 under x64.
+    oh = (bin_idx_sorted[:, :, None] == param_bins[None, None, :]).astype(jnp.float32)
     cnt = oh.sum(axis=0, dtype=jnp.int32)
     cum = _count_cumsum(oh)
     pos = jnp.arange(1, N + 1, dtype=jnp.int32)[:, None, None]
@@ -425,46 +428,64 @@ def _ks_from_sorted(y_sorted: Array, bin_idx_sorted: Array, n_classes: int) -> A
     return jnp.where(cnt >= 2, ks, jnp.nan)
 
 
-@lru_cache(maxsize=32)
-def _get_pawn_ks(n_classes: int):
-    """Return a JIT-compiled KS kernel for the given ``n_classes``.
-
-    The kernel maps precomputed bin indices and a batch of output columns
-    to per-bin KS statistics, vmapped over the output columns.
+def _ks_columns(bin_idx: Array, Y_cols: Array, n_classes: int) -> Array:
+    """Compute per-bin KS statistics for every output column.
 
     Args:
-        n_classes: Number of equal-width conditioning bins (static).
+        bin_idx: Integer bin indices, shape ``(N, D)``, where ``-1`` marks an
+            excluded sample.
+        Y_cols: Output columns, shape ``(N, M)``.
+        n_classes: Number of bins (static).
 
     Returns:
-        A jitted callable that maps ``bin_idx`` of shape ``(N, D)`` and
-        ``Y_cols`` of shape ``(N, M)`` to KS statistics of shape
-        ``(M, D, n_classes)``, where ``M`` is the number of output columns.
+        KS statistics, shape ``(M, D, n_classes)``, with ``NaN`` where a bin
+        has fewer than two samples.
     """
 
-    def _impl(bin_idx: Array, Y_cols: Array) -> Array:
-        """Compute per-bin KS statistics for every output column.
+    def _ks_one_col(y: Array) -> Array:
+        """Compute KS statistics of shape ``(D, n_classes)`` for one output column."""
+        # The sort is deliberately unstable: any valid sorted permutation
+        # gives the same statistic (see ``_ks_from_sorted``). Measured
+        # ~1.4-1.8x faster than the stable argsort on the CPU backend.
+        order = jnp.argsort(y, stable=False)
+        return _ks_from_sorted(y[order], bin_idx[order], n_classes)
 
-        Args:
-            bin_idx: Integer bin indices, shape ``(N, D)``, where ``-1``
-                marks an excluded sample.
-            Y_cols: Output columns, shape ``(N, M)``.
+    return jax.vmap(_ks_one_col, in_axes=1)(Y_cols)
 
-        Returns:
-            KS statistics, shape ``(M, D, n_classes)``, with ``NaN`` where a bin
-            has fewer than two samples.
-        """
 
-        def _ks_one_col(y: Array) -> Array:
-            """Compute KS statistics of shape ``(D, n_classes)`` for one output column."""
-            # The sort is deliberately unstable: any valid sorted permutation
-            # gives the same statistic (see ``_ks_from_sorted``). Measured
-            # ~1.4-1.8x faster than the stable argsort on the CPU backend.
-            order = jnp.argsort(y, stable=False)
-            return _ks_from_sorted(y[order], bin_idx[order], n_classes)
+@partial(jax.jit, static_argnames=("n_classes", "statistic", "chunk"))
+def _pawn_columns(
+    bin_idx: Array,
+    Y_3d: Array,
+    n_classes: int,
+    statistic: Literal["median", "max", "mean"],
+    chunk: int,
+) -> Array:
+    """PAWN indices of every output column, one chunk of columns at a time.
 
-        return jax.vmap(_ks_one_col, in_axes=1)(Y_cols)
+    The chunks run under :func:`jax.lax.map` inside this one program (see
+    :func:`jaxgsa._core.column_chunks.map_column_chunks`), so the transient
+    memory is one chunk wide in :func:`analyze` and under an outer ``jit``
+    alike.
 
-    return jax.jit(_impl)
+    Args:
+        bin_idx: Integer bin indices, shape ``(N, D)``.
+        Y_3d: Output array, shape ``(N, T, K)``.
+        n_classes: Number of bins (static).
+        statistic: Aggregation across bins (static).
+        chunk: Output columns per step (static).
+
+    Returns:
+        PAWN indices, shape ``(T, K, D)``.
+    """
+    N, T, K = Y_3d.shape
+    pawn = map_column_chunks(
+        lambda cols: _aggregate_ks(_ks_columns(bin_idx, cols, n_classes), statistic),
+        Y_3d.reshape(N, T * K),
+        chunk,
+        axis=0,
+    )  # (T*K, D)
+    return pawn.reshape(T, K, bin_idx.shape[1])
 
 
 @partial(jax.jit, static_argnames=("n_bootstrap",))
@@ -495,14 +516,17 @@ def _bootstrap_subkeys(key: Array, n_bootstrap: int) -> Array:
     return subkeys
 
 
-@lru_cache(maxsize=32)
-def _get_pawn_boot(n_classes: int, statistic: Literal["median", "max", "mean"]):
-    """Return a JIT-compiled bootstrap kernel for PAWN.
+def _boot_columns(
+    bin_idx: Array,
+    Y_cols: Array,
+    subkeys: Array,
+    n_classes: int,
+    statistic: Literal["median", "max", "mean"],
+) -> Array:
+    """PAWN indices of a chunk of output columns on every bootstrap resample.
 
-    One call runs every replicate for a chunk of output columns: draw the
-    rows, gather, compute the KS statistics and aggregate over bins. The
-    replicates run one after another under ``lax.map``, so the working set is
-    that of a single replicate.
+    The replicates run one after another under ``lax.map``, so the working
+    set is that of a single replicate.
 
     Each column is sorted once on the full sample. A replicate then sorts the
     integer ranks of its drawn rows instead of re-sorting floats, and reads
@@ -510,64 +534,69 @@ def _get_pawn_boot(n_classes: int, statistic: Literal["median", "max", "mean"]):
     order of the resample, so the statistic is the same.
 
     Args:
+        bin_idx: Integer bin indices, shape ``(N, D)``.
+        Y_cols: Output columns, shape ``(N, M)``.
+        subkeys: One PRNG key per replicate, shape ``(R,)``.
         n_classes: Number of bins (static).
         statistic: Aggregation across bins (static).
 
     Returns:
-        A jitted callable mapping ``bin_idx`` ``(N, D)``, ``Y_cols``
-        ``(N, M)`` and ``subkeys`` ``(R,)`` to PAWN indices ``(R, M, D)``.
+        PAWN indices, shape ``(R, M, D)``.
     """
+    N, M = Y_cols.shape
+    order = jnp.argsort(Y_cols, axis=0, stable=False)
+    y_full = jnp.take_along_axis(Y_cols, order, axis=0)
+    rank = (
+        jnp.zeros((N, M), dtype=jnp.int32)
+        .at[order, jnp.arange(M)[None, :]]
+        .set(jnp.arange(N, dtype=jnp.int32)[:, None])
+    )
 
-    def _impl(bin_idx: Array, Y_cols: Array, subkeys: Array) -> Array:
-        N, M = Y_cols.shape
-        order = jnp.argsort(Y_cols, axis=0, stable=False)
-        y_full = jnp.take_along_axis(Y_cols, order, axis=0)
-        rank = (
-            jnp.zeros((N, M), dtype=jnp.int32)
-            .at[order, jnp.arange(M)[None, :]]
-            .set(jnp.arange(N, dtype=jnp.int32)[:, None])
-        )
+    def _one_replicate(subkey: Array) -> Array:
+        rows = jax.random.choice(subkey, N, shape=(N,), replace=True)
+        bins_rep = bin_idx[rows]
 
-        def _one_replicate(subkey: Array) -> Array:
-            rows = jax.random.choice(subkey, N, shape=(N,), replace=True)
-            bins_rep = bin_idx[rows]
+        def _ks_one_col(rank_c: Array, y_c: Array) -> Array:
+            r = rank_c[rows]
+            o = jnp.argsort(r, stable=False)
+            return _ks_from_sorted(y_c[r[o]], bins_rep[o], n_classes)
 
-            def _ks_one_col(rank_c: Array, y_c: Array) -> Array:
-                r = rank_c[rows]
-                o = jnp.argsort(r, stable=False)
-                return _ks_from_sorted(y_c[r[o]], bins_rep[o], n_classes)
+        ks = jax.vmap(_ks_one_col, in_axes=(1, 1))(rank, y_full)  # (M, D, C)
+        return _aggregate_ks(ks, statistic)
 
-            ks = jax.vmap(_ks_one_col, in_axes=(1, 1))(rank, y_full)  # (M, D, C)
-            return _aggregate_ks(ks, statistic)
-
-        return jax.lax.map(_one_replicate, subkeys)
-
-    return jax.jit(_impl)
+    return jax.lax.map(_one_replicate, subkeys)
 
 
-def _pad_columns(Y_cols: Array, width: int) -> Array:
-    """Zero-pad the output-column axis of ``Y_cols`` up to ``width`` columns.
-
-    The KS kernel is jitted and ``vmap``ped over the column axis, so a
-    trailing chunk narrower than the rest traces it a second time. Padding the
-    chunk back to the full width keeps the kernel at one compilation. Each
-    column is its own ``vmap`` lane and no reduction crosses lanes, so the
-    padded columns cannot reach the real ones; the caller drops them.
+@partial(jax.jit, static_argnames=("n_classes", "statistic", "chunk"))
+def _pawn_boot_columns(
+    bin_idx: Array,
+    Y_3d: Array,
+    subkeys: Array,
+    n_classes: int,
+    statistic: Literal["median", "max", "mean"],
+    chunk: int,
+) -> Array:
+    """Bootstrap PAWN indices of every output column, one chunk at a time.
 
     Args:
-        Y_cols: Output columns, shape ``(N, m)`` with ``m <= width``.
-        width: Target number of columns.
+        bin_idx: Integer bin indices, shape ``(N, D)``.
+        Y_3d: Output array, shape ``(N, T, K)``.
+        subkeys: One PRNG key per replicate, shape ``(R,)``.
+        n_classes: Number of bins (static).
+        statistic: Aggregation across bins (static).
+        chunk: Output columns per step (static).
 
     Returns:
-        ``Y_cols`` unchanged when it is already ``width`` wide, otherwise a
-        ``(N, width)`` array with zero-filled trailing columns. The dtype is
-        preserved, so the padded call reuses the full chunk's compilation.
+        PAWN indices per replicate, shape ``(R, T, K, D)``.
     """
-    n_cols = Y_cols.shape[1]
-    if n_cols == width:
-        return Y_cols
-    pad = jnp.zeros((Y_cols.shape[0], width - n_cols), dtype=Y_cols.dtype)
-    return jnp.concatenate([Y_cols, pad], axis=1)
+    N, T, K = Y_3d.shape
+    boot = map_column_chunks(
+        lambda cols: _boot_columns(bin_idx, cols, subkeys, n_classes, statistic),
+        Y_3d.reshape(N, T * K),
+        chunk,
+        axis=1,
+    )  # (R, T*K, D)
+    return boot.reshape(subkeys.shape[0], T, K, bin_idx.shape[1])
 
 
 def _aggregate_ks(
@@ -621,7 +650,7 @@ def _pawn_core(
         n_eff: Number of bins the kernel is compiled at.
         statistic: Aggregation method across bins.
         slice_chunk_size: Maximum number of flattened ``T*K`` output columns
-            per kernel call, or ``None`` to derive one from the memory
+            per ``lax.map`` step, or ``None`` to derive one from the memory
             budget. An explicit value must be at least 1.
 
     Returns:
@@ -630,9 +659,6 @@ def _pawn_core(
     N, T, K = Y_3d.shape
     D = bin_idx.shape[1]
 
-    # Bin assignment depends only on the inputs, so it is built once by the
-    # caller and every output column runs through the same vmapped kernel.
-    Y_cols = Y_3d.reshape(N, T * K)
     total = T * K
     # The kernel promotes its working dtype to at least float32.
     itemsize = jnp.result_type(Y_3d.dtype, jnp.float32).itemsize
@@ -641,23 +667,11 @@ def _pawn_core(
     # the kernel, so the per-column byte estimate below carries a factor of
     # two.
     cs = resolve_batch_size(2 * D * N * n_eff * itemsize, total, slice_chunk_size)
-    kernel = _get_pawn_ks(n_eff)
-
+    # Bin assignment depends only on the inputs, so it is built once by the
+    # caller and every output column runs through the same vmapped kernel.
     # The KS values of one output column depend on no other column, so the
-    # aggregation runs inside the loop and only the (chunk, D) result is kept.
-    pawn_parts: list[Array] = []
-    for start in range(0, total, cs):
-        actual = min(cs, total - start)
-        # The trailing chunk is padded back to `cs` columns so the jitted
-        # kernel traces once rather than once more for the ragged tail. The
-        # padded columns are separate vmap lanes and are dropped here, before
-        # anything reads them.
-        padded = _pad_columns(Y_cols[:, start : start + cs], cs)
-        ks = kernel(bin_idx, padded)[:actual]  # (actual, D, n_eff)
-        pawn_parts.append(_aggregate_ks(ks, statistic))  # (actual, D)
-
-    pawn = jnp.concatenate(pawn_parts, axis=0)  # (T*K, D)
-    return pawn.reshape(T, K, D)
+    # aggregation runs per chunk and only the (chunk, D) result is kept.
+    return _pawn_columns(bin_idx, Y_3d, n_eff, statistic, cs)
 
 
 def _pawn_bootstrap(
@@ -675,8 +689,9 @@ def _pawn_bootstrap(
     Inside the jitted kernel, ``lax.map`` runs the replicates one after
     another. Each replicate draws ``N`` row indices with replacement by
     ``jax.random.choice``. The same row indices apply to every output column
-    of the chunk. Each chunk of output columns runs all replicates in one
-    jitted call. Chunking and the memory estimate match
+    of the chunk. One jitted call walks the chunks of output columns under
+    ``lax.map`` and runs all replicates per chunk. Chunking and the memory
+    estimate match
     :func:`_pawn_core`, because a replicate has the same working set as one
     point-estimate call.
 
@@ -686,7 +701,7 @@ def _pawn_bootstrap(
         n_eff: Number of bins the kernel is compiled at.
         statistic: Aggregation method across bins.
         slice_chunk_size: Maximum number of flattened output columns per
-            kernel call, or ``None`` to derive one from the memory budget.
+            ``lax.map`` step, or ``None`` to derive one from the memory budget.
         key: PRNG key for the row draws.
         n_bootstrap: Number of replicates, at least 1.
 
@@ -695,20 +710,11 @@ def _pawn_bootstrap(
     """
     N, T, K = Y_3d.shape
     D = bin_idx.shape[1]
-    Y_cols = Y_3d.reshape(N, T * K)
     total = T * K
     itemsize = jnp.result_type(Y_3d.dtype, jnp.float32).itemsize
     cs = resolve_batch_size(2 * D * N * n_eff * itemsize, total, slice_chunk_size)
-    kernel = _get_pawn_boot(n_eff, statistic)
     subkeys = _bootstrap_subkeys(key, n_bootstrap)
-
-    parts: list[Array] = []
-    for start in range(0, total, cs):
-        actual = min(cs, total - start)
-        padded = _pad_columns(Y_cols[:, start : start + cs], cs)
-        parts.append(kernel(bin_idx, padded, subkeys)[:, :actual])  # (R, actual, D)
-    boot = jnp.concatenate(parts, axis=1)  # (R, T*K, D)
-    return boot.reshape(n_bootstrap, T, K, D)
+    return _pawn_boot_columns(bin_idx, Y_3d, subkeys, n_eff, statistic, cs)
 
 
 def _warn_all_empty(n_valid: np.ndarray) -> None:
@@ -802,7 +808,7 @@ def indices(
             choice does not affect what ``jit``, ``vmap`` or ``jacrev`` can do
             with this function.
         slice_chunk_size: Number of flattened ``T*K`` output columns per
-            kernel call. ``None`` (default) derives one from the active memory
+            step. ``None`` (default) derives one from the active memory
             budget. It changes no index.
 
     Returns:
@@ -927,7 +933,7 @@ def analyze(
             when ``n_bootstrap > 0``. Pass ``jax.random.key(0)`` if you have
             an integer seed.
         slice_chunk_size: Number of flattened ``T*K`` output columns
-            processed per kernel call. ``None`` (default) derives one from
+            processed per step. ``None`` (default) derives one from
             the active memory budget, which
             :func:`jaxgsa.config.set_memory_budget` sets. Pass a positive
             integer to override it. Peak memory is dominated by the kernel's

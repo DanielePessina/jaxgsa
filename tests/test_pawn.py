@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, cast
 
 import jax
@@ -12,7 +13,7 @@ from _fixtures_givendata import BOOT, invalid_sample
 
 from jaxgsa import JaxgsaWarning
 from jaxgsa.benchmarks import ishigami
-from jaxgsa.pawn import PAWNIndices, analyze, indices
+from jaxgsa.pawn import PAWNIndices, PAWNResult, analyze, indices
 from jaxgsa.problem import InputSpecValue, Problem
 from jaxgsa.sampling import monte_carlo
 
@@ -117,18 +118,16 @@ class TestPAWNBasic:
         indistinguishable from a no-op. This is not a mirror of the
         implementation; it is the only place the memory bound is asserted.
 
-        The recorded per-call column widths are the contract, not merely
-        the number of calls: ``T*K == 6`` columns at a chunk size of 4 must
-        arrive as two calls, and both must be 4 columns wide. A loop that
-        passed all six columns in one call and sliced afterwards would give
-        the same indices and fail here.
+        The traced column width is the contract, not merely the values:
+        ``T*K == 6`` columns at a chunk size of 4 must reach the KS kernel
+        as 4-wide chunks only. A path that passed all six columns at once
+        and sliced afterwards would give the same indices and fail here.
 
-        Both calls are 4 wide because the short trailing chunk is padded
-        back to the chunk width and the answer sliced out again. The kernel
-        is jitted and traced per input shape, so a 2-column tail would
-        compile it a second time. The padded columns are separate ``vmap``
-        lanes, so the indices are unchanged, which is why the width and not
-        the values is what this test can see.
+        The chunks run under ``lax.map`` inside one jitted program, so the
+        kernel is traced once, at the chunk width. The last chunk is taken
+        flush with the end and overlaps the first, so no column is padded.
+        The jitted wrapper is swapped for its plain function here, so the
+        recorder sees a fresh trace whatever ran before.
         """
         from jaxgsa.pawn import _analyze as pawn_analyze
 
@@ -147,21 +146,25 @@ class TestPAWNBasic:
         assert Y_3d.shape[1] * Y_3d.shape[2] == 6
 
         widths: list[int] = []
-        real_get = pawn_analyze._get_pawn_ks
+        real_ks = pawn_analyze._ks_columns
 
-        def recording_get(n_classes: int):
-            kernel = real_get(n_classes)
+        def recorder(bin_idx, Y_cols, n_classes):
+            widths.append(int(Y_cols.shape[1]))
+            return real_ks(bin_idx, Y_cols, n_classes)
 
-            def recorder(bin_idx, Y_cols):
-                widths.append(int(Y_cols.shape[1]))
-                return kernel(bin_idx, Y_cols)
+        monkeypatch.setattr(pawn_analyze, "_ks_columns", recorder)
+        monkeypatch.setattr(
+            pawn_analyze, "_pawn_columns", inspect.unwrap(pawn_analyze._pawn_columns)
+        )
+        chunked = analyze(ishigami.PROBLEM, X, Y_3d, slice_chunk_size=4, n_bootstrap=0)
 
-            return recorder
-
-        monkeypatch.setattr(pawn_analyze, "_get_pawn_ks", recording_get)
-        analyze(ishigami.PROBLEM, X, Y_3d, slice_chunk_size=4, n_bootstrap=0)
-
-        assert widths == [4, 4], f"expected two calls of the full chunk width, got {widths}"
+        assert widths and set(widths) == {4}, f"expected 4-wide chunks only, got {widths}"
+        monkeypatch.undo()
+        full = analyze(ishigami.PROBLEM, X, Y_3d, n_bootstrap=0)
+        assert isinstance(chunked, PAWNResult) and isinstance(full, PAWNResult)
+        np.testing.assert_allclose(
+            np.asarray(chunked.pawn), np.asarray(full.pawn), rtol=1e-6, atol=1e-7
+        )
 
     def test_slice_chunk_size_must_be_positive(self, given_ishigami_xy):
         """Tier T4 (internal consistency): an unusable chunk size is refused."""

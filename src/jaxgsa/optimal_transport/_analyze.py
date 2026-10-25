@@ -62,6 +62,7 @@ from jax.typing import DTypeLike
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
 from jaxgsa._core.bootstrap import draw_row_matrix, interval
+from jaxgsa._core.column_chunks import map_column_chunks
 from jaxgsa._core.entry import (
     _user_stacklevel,
     at_least,
@@ -93,6 +94,7 @@ from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     _join_capped,
     _prepare_Y,
+    _reshape_without_copy,
     _standardize_outputs,
     _validate_output,
     _zero_variance_stats,
@@ -100,7 +102,7 @@ from jaxgsa._core.validation import (
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.optimal_transport._result import OTResult
-from jaxgsa.optimal_transport._solver import _sinkhorn_w2
+from jaxgsa.optimal_transport._solver import _sinkhorn_potential, _sinkhorn_w2
 from jaxgsa.problem import Problem, _categorical_dims
 
 # Keyword-only parameters the irregular engine forwards unchanged to the
@@ -347,7 +349,6 @@ def _slot_tables(sizes: np.ndarray, N: int) -> tuple[np.ndarray, ...]:
     return idx, w, a, cmap
 
 
-@functools.partial(jax.jit, static_argnames=("group_levels",))
 def _ot_1d_kernel(
     Y_cols: Array,
     all_idx: Array,
@@ -409,9 +410,14 @@ def _ot_1d_kernel(
     # kernel call instead of once per (replicate, column). Sorting int32 ranks
     # is far cheaper on XLA CPU than sorting the float32 values, and gathering
     # the pre-sorted column back at those ranks yields the same order
-    # statistics to the last bit.
-    Y_sorted = jax.lax.sort(Y_cols, dimension=0, is_stable=False)  # (N, C)
-    order = jnp.argsort(Y_cols, axis=0).astype(jnp.int32)  # (N, C)
+    # statistics to the last bit. One two-operand sort gives both the sorted
+    # values and the sorting permutation, so every column is sorted once.
+    Y_sorted, order = jax.lax.sort(
+        (Y_cols, jax.lax.broadcasted_iota(jnp.int32, Y_cols.shape, 0)),
+        dimension=0,
+        is_stable=False,
+        num_keys=1,
+    )  # (N, C) twice
     # Inverting the permutation by scatter replaces a second argsort.
     pos2rank = jnp.put_along_axis(
         jnp.zeros_like(order),
@@ -511,7 +517,7 @@ def _ot_1d_kernel(
         # Order statistics only, so sorting the int32 ranks and gathering
         # from the pre-sorted column is bitwise equal to a float sort; see
         # the class sort in _group_stats.
-        y_sorted = jax.lax.sort(y_r, dimension=-1, is_stable=False)
+        y_sorted = y_sorted_col[jax.lax.sort(pos2rank_col[r], dimension=-1, is_stable=False)]
         mean_r = y_r.mean()
         V = 2.0 * jnp.var(y_r, ddof=1)
         # Same predicate the aggregation zeroes on, so the CI
@@ -555,6 +561,47 @@ def _ot_1d_kernel(
     scan_xs = (jnp.arange(R), all_idx, cls_list)
     _, (ot, adv, diff, degen) = jax.lax.scan(_one_replicate, None, scan_xs)
     return ot, adv, diff, degen
+
+
+@functools.partial(jax.jit, static_argnames=("group_levels", "chunk"))
+def _ot_1d_columns(
+    Y_3d: Array,
+    all_idx: Array,
+    groups: tuple[tuple[Array, Array], ...],
+    group_levels: tuple[tuple[int, ...] | None, ...],
+    chunk: int,
+) -> tuple[Array, Array, Array, Array]:
+    """Run :func:`_ot_1d_kernel` over every output column, one chunk at a time.
+
+    The chunks run under :func:`jax.lax.map` inside this one program (see
+    :func:`jaxgsa._core.column_chunks.map_column_chunks`), so the transient
+    memory is one chunk wide in :func:`analyze` and under an outer ``jit``
+    alike.
+
+    Args:
+        Y_3d: Output array, shape ``(N, T, K)``.
+        all_idx: Replicate row indices, shape ``(R, N)``.
+        groups: Canonical partition groups; see
+            :mod:`jaxgsa._core.partition`.
+        group_levels: Static level counts per group, as in
+            :func:`_ot_1d_kernel`.
+        chunk: Output columns per step (static).
+
+    Returns:
+        ``(ot, advective, diffusive, degenerate)`` of shapes ``(R, T*K, D)``
+        three times and ``(R, T*K)``, parameters in group order.
+    """
+    N = Y_3d.shape[0]
+    # The checkpoint makes reverse mode save only each chunk's input columns
+    # and recompute the rest, one chunk at a time. Without it the gradient
+    # kept every chunk's intermediates, about 1 MiB per output column at
+    # N=4096. A forward-only run is unchanged.
+    return map_column_chunks(
+        jax.checkpoint(lambda cols: _ot_1d_kernel(cols, all_idx, groups, group_levels)),
+        Y_3d.reshape(N, -1),
+        chunk,
+        axis=1,
+    )
 
 
 @jax.jit
@@ -630,8 +677,8 @@ def _joint_kernel(
         safe_counts = jnp.maximum(counts_r, 1.0)
         log_b_all = jnp.where(mask_r, -jnp.log(safe_counts)[..., None], -jnp.inf)  # (G, M, P)
 
-        def _one_class(dm: Array):
-            """Transport cost of the full cloud onto class dm % M of parameter dm // M."""
+        def _class_problem(dm: Array):
+            """Cost block, target weights and class data of class dm % M of parameter dm // M."""
             m = dm % M
             g = dm // M  # G is always Dg (per D4), so no clamp is needed
             idx = cls_idx[dm // M, m]  # (P,)
@@ -660,7 +707,18 @@ def _joint_kernel(
             # reverse-mode gradient. So hand it 1.0 in that case; V > 0 passes
             # through unchanged, bit for bit.
             safe_V = jnp.where(V > 0, V, jnp.ones_like(V))
-            cost, err = _sinkhorn_w2(C, log_b, epsilon, max_iter, tol, safe_V)
+            return C, log_b, safe_V, Z_c, mask_dm, count_dm, empty
+
+        # Rematerialized under reverse mode: the backward pass rebuilds this
+        # class's (N, P) blocks instead of saving those of every class, which
+        # grew the gradient's memory as N**2 (3.6 GiB at N=4096 against 8 MiB
+        # for the forward pass). Only the class index and the converged
+        # potential are saved per class.
+        @jax.checkpoint
+        def _class_cost(dm: Array, potential: tuple[Array, Array]):
+            """Transport cost of the full cloud onto one class, from its solved potential."""
+            C, log_b, safe_V, Z_c, mask_dm, count_dm, empty = _class_problem(dm)
+            cost, err = _sinkhorn_w2(C, log_b, epsilon, max_iter, tol, safe_V, potential)
             cls_mean = (Z_c * mask_dm[:, None]).sum(axis=0) / jnp.maximum(count_dm, 1.0)
             adv = ((cls_mean - mean_all) ** 2).sum()
             # An empty class carries zero weight; discard its (junk) solve
@@ -671,6 +729,22 @@ def _joint_kernel(
                 jnp.where(empty, zero, adv),
                 jnp.where(empty, zero, err),
             )
+
+        def _one_class(dm: Array):
+            """Solve one class outside the derivative, then take its cost."""
+            # The loop is never differentiated (the implicit derivative in
+            # _sinkhorn_w2 replaces it), so it runs on stopped values, once,
+            # and the checkpointed cost below never runs it again.
+            C, log_b, safe_V = jax.lax.stop_gradient(_class_problem(dm)[:3])
+            potential = _sinkhorn_potential(
+                C,
+                log_b,
+                jax.lax.stop_gradient(epsilon),
+                max_iter,
+                jax.lax.stop_gradient(tol),
+                safe_V,
+            )
+            return _class_cost(dm, potential)
 
         # Sequential map keeps peak memory at one (N, P) cost block.
         costs, advs, errs = jax.lax.map(_one_class, dm_grid)
@@ -722,6 +796,54 @@ def _joint_kernel(
     return ot, adv, diff, n_bad, degen
 
 
+@functools.partial(jax.jit, static_argnames=("mode", "standardize_outputs"))
+def _joint_cloud_kernel(
+    Y_3d: Array,
+    k: Array,
+    mode: str,
+    standardize_outputs: bool,
+    all_idx: Array,
+    groups: tuple[tuple[Array, Array], ...],
+    dm_grids: tuple[Array, ...],
+    epsilon: Array,
+    max_iter: Array,
+    tol: Array,
+) -> tuple[Array, Array, Array, Array, Array]:
+    """Build one point cloud from ``Y_3d`` and run :func:`_joint_kernel` on it.
+
+    The cloud is cut and standardized inside this program, so no eager copy
+    of the output is made per cloud.
+
+    Args:
+        Y_3d: Output promoted to ``(N, T, K)``.
+        k: Output index of the cloud in ``"trajectory"`` mode (traced, so
+            every output shares one compiled program). Ignored in
+            ``"multivariate"`` mode.
+        mode: ``"multivariate"`` (the flattened ``(N, T*K)`` cloud) or
+            ``"trajectory"`` (the ``(N, T)`` time course of output ``k``).
+        standardize_outputs: Divide each cloud column by its standard
+            deviation first, so no single output dominates the joint
+            distance through its units.
+        all_idx: Replicate row indices ``(R, N)``.
+        groups: Canonical partition groups.
+        dm_grids: Per-group class slots to solve.
+        epsilon: Entropic regularization strength.
+        max_iter: Sinkhorn iteration cap.
+        tol: Sinkhorn marginal stopping tolerance.
+
+    Returns:
+        The outputs of :func:`_joint_kernel` for this cloud.
+    """
+    N, T, K = Y_3d.shape
+    if mode == "multivariate":
+        Z = Y_3d.reshape(N, T * K)
+    else:
+        Z = jax.lax.dynamic_index_in_dim(Y_3d, k, axis=2, keepdims=False)
+    if standardize_outputs:
+        Z = _standardize_outputs(Z)[0]
+    return _joint_kernel(Z, all_idx, groups, dm_grids, epsilon, max_iter, tol)
+
+
 def _static_dm_grid(group: tuple[Array, Array], levels: list[int] | None) -> Array:
     """Flat ``d * Mg + m`` class slots the joint kernel must solve.
 
@@ -748,9 +870,7 @@ def _static_dm_grid(group: tuple[Array, Array], levels: list[int] | None) -> Arr
 
 
 def _run_univariate(
-    Y_cols: Array,
-    T: int,
-    K: int,
+    Y_3d: Array,
     all_idx: Array,
     groups: list[tuple[Array, Array]],
     group_levels: list[list[int] | None],
@@ -766,9 +886,7 @@ def _run_univariate(
     different numbers.
 
     Args:
-        Y_cols: Output columns, shape ``(N, T*K)``.
-        T: Time axis length of the promoted ``Y``.
-        K: Output axis length of the promoted ``Y``.
+        Y_3d: Output promoted to ``(N, T, K)``.
         all_idx: Replicate row indices ``(R, N)``. Row 0 is the identity.
         groups: Canonical partition groups; see
             :mod:`jaxgsa._core.partition`.
@@ -776,14 +894,15 @@ def _run_univariate(
             continuous group, in the same order as ``groups``.
         col_order: Gather that restores the problem's column order, or
             ``None`` when the groups are already in order.
-        slice_chunk_size: Output columns per kernel call, or ``None`` for a
-            memory-aware default.
+        slice_chunk_size: Output columns per ``lax.map`` step, or ``None``
+            for a memory-aware default.
 
     Returns:
         ``(ot, advective, diffusive, degenerate)`` of shapes
         ``(R, T, K, D)`` three times and ``(R, T, K)``.
     """
-    N, total = Y_cols.shape
+    N, T, K = Y_3d.shape
+    total = T * K
     R_run = all_idx.shape[0]
     D_run = sum(g[0].shape[1] for g in groups)
     # Peak memory scales with the summed per-group D_g * M_g
@@ -799,31 +918,15 @@ def _run_univariate(
         for g, lv in zip(groups, group_levels)
         if lv is None
     )
-    itemsize = jnp.dtype(jnp.result_type(Y_cols.dtype, jnp.float32)).itemsize
+    itemsize = jnp.dtype(jnp.result_type(Y_3d.dtype, jnp.float32)).itemsize
     bytes_per_column = (
         _CHUNK_LIVE_TENSORS * layout_elems * N + _CONT_LIVE_TENSORS * cont_elems
     ) * itemsize
     cs = resolve_batch_size(bytes_per_column, total, slice_chunk_size)
     levels_static = tuple(tuple(lv) if lv is not None else None for lv in group_levels)
-    parts: tuple[list[Array], list[Array], list[Array], list[Array]] = ([], [], [], [])
-    for start in range(0, total, cs):
-        chunk = Y_cols[:, start : start + cs]
-        n_real = chunk.shape[1]
-        if n_real < cs:
-            # Pad the ragged trailing chunk back to the full width so the
-            # jitted kernel compiles for one shape only. Output columns are
-            # scored independently, so a repeated column cannot change a real
-            # column's answer, and the padding is sliced off straight away.
-            pad = jnp.broadcast_to(chunk[:, :1], (chunk.shape[0], cs - n_real))
-            chunk = jnp.concatenate([chunk, pad], axis=1)
-        merged = list(_ot_1d_kernel(chunk, all_idx, tuple(groups), levels_static))
-        if n_real < cs:
-            merged = [arr[:, :n_real] for arr in merged]
-        if col_order is not None:
-            merged[:3] = [arr[..., col_order] for arr in merged[:3]]
-        for part, arr in zip(parts, merged):
-            part.append(arr)
-    ot, adv, diff, degen = (jnp.concatenate(p, axis=1) for p in parts)
+    ot, adv, diff, degen = _ot_1d_columns(Y_3d, all_idx, tuple(groups), levels_static, cs)
+    if col_order is not None:
+        ot, adv, diff = (arr[..., col_order] for arr in (ot, adv, diff))
     return (
         ot.reshape(R_run, T, K, D_run),
         adv.reshape(R_run, T, K, D_run),
@@ -832,31 +935,10 @@ def _run_univariate(
     )
 
 
-def _build_clouds(Y_3d: Array, mode: str, standardize_outputs: bool) -> list[Array]:
-    """Split the promoted output into the point clouds a joint mode scores.
-
-    Args:
-        Y_3d: Output promoted to ``(N, T, K)``.
-        mode: ``"multivariate"`` (one flattened cloud) or ``"trajectory"``
-            (one cloud per output, each output's time course).
-        standardize_outputs: Divide each column by its standard deviation first, so
-            no single output dominates the joint distance through its units.
-
-    Returns:
-        The clouds, each of shape ``(N, E)``.
-    """
-    N, T, K = Y_3d.shape
-    clouds = (
-        [Y_3d.reshape(N, T * K)] if mode == "multivariate" else [Y_3d[:, :, k] for k in range(K)]
-    )
-    if standardize_outputs:
-        clouds = [_standardize_outputs(Z)[0] for Z in clouds]
-    return clouds
-
-
 def _run_joint(
-    clouds: list[Array],
+    Y_3d: Array,
     mode: str,
+    standardize_outputs: bool,
     all_idx: Array,
     groups: list[tuple[Array, Array]],
     group_levels: list[list[int] | None],
@@ -874,9 +956,13 @@ def _run_joint(
     :func:`indices` drops them without reading either.
 
     Args:
-        clouds: Output point clouds from :func:`_build_clouds`.
-        mode: ``"multivariate"`` or ``"trajectory"``. It decides only
-            whether the per-cloud results stack onto a new output axis.
+        Y_3d: Output promoted to ``(N, T, K)``.
+        mode: ``"multivariate"`` (one flattened cloud) or ``"trajectory"``
+            (one cloud per output, each output's time course, stacked onto
+            a new output axis).
+        standardize_outputs: Divide each cloud column by its standard
+            deviation first, so no single output dominates the joint
+            distance through its units.
         all_idx: Replicate row indices ``(R, N)``. Row 0 is the identity.
         groups: Canonical partition groups; see
             :mod:`jaxgsa._core.partition`.
@@ -896,18 +982,28 @@ def _run_joint(
         stayed above ``tol``, and ``n_solves`` is how many ran.
     """
     dm_grids = tuple(_static_dm_grid(group, levels) for group, levels in zip(groups, group_levels))
-    n_solves = len(clouds) * all_idx.shape[0] * sum(grid.shape[0] for grid in dm_grids)
+    n_clouds = 1 if mode == "multivariate" else Y_3d.shape[2]
+    n_solves = n_clouds * all_idx.shape[0] * sum(grid.shape[0] for grid in dm_grids)
 
-    def _one_cloud(Z: Array) -> tuple[Array, Array, Array, Array, Array]:
-        ot, adv, diff, n_bad, degen = _joint_kernel(
-            Z, all_idx, tuple(groups), dm_grids, eps_s, max_iter_s, tol_s
+    def _one_cloud(k: int) -> tuple[Array, Array, Array, Array, Array]:
+        ot, adv, diff, n_bad, degen = _joint_cloud_kernel(
+            Y_3d,
+            jnp.asarray(k, jnp.int32),
+            mode,
+            standardize_outputs,
+            all_idx,
+            tuple(groups),
+            dm_grids,
+            eps_s,
+            max_iter_s,
+            tol_s,
         )
         merged = [ot, adv, diff]
         if col_order is not None:
             merged = [arr[..., col_order] for arr in merged]
         return merged[0], merged[1], merged[2], n_bad.sum(), degen
 
-    cloud_outs = [_one_cloud(Z) for Z in clouds]
+    cloud_outs = [_one_cloud(k) for k in range(n_clouds)]
     n_bad_total = jnp.stack([o[3] for o in cloud_outs]).sum()
     if mode == "multivariate":
         ot, adv, diff, _, degen = cloud_outs[0]  # (R, D) / (R,)
@@ -1151,7 +1247,7 @@ def _warn_joint_zero_variance(
         stacklevel: Passed to :func:`warnings.warn`, so the warning points at
             the caller's own line.
     """
-    flat = Y.reshape(Y.shape[0], -1)
+    flat = _reshape_without_copy(Y, (Y.shape[0], -1))
     mask, n_dev = _zero_variance_stats(flat)
     n_zero = int(n_dev)
     if n_zero == 0:
@@ -1542,95 +1638,30 @@ def analyze(
     group_levels = plan.group_levels
     col_order = plan.col_order
 
-    # `_run` maps replicate indices and partition-layout groups to
-    # (ot, advective, diffusive, degenerate) arrays with the parameter axis
-    # last, in problem column order, plus a Sinkhorn convergence count (0 in
-    # "univariate" mode, which needs no solver). Every caller -- the real
-    # run and each dummy baseline below -- appends that count itself, so no
-    # closure here needs to carry mutable state of its own.
-    _Groups = list[tuple[Array, Array]]
-    Y_cols = Y_3d.reshape(N, T * K) if mode == "univariate" else None
-    if mode != "univariate":
-        eps_s = jnp.asarray(epsilon, dtype)
-        max_iter_s = jnp.asarray(max_iter, jnp.int32)
-        tol_s = jnp.asarray(tol, dtype)
-        clouds = _build_clouds(Y_3d, mode, standardize_outputs)
-        P_est = max(
-            [-(-N // M)] * bool(cont_dims) + [plan._cat_pad] * bool(cat_dims),
-            default=1,
-        )
-        _warn_joint_memory(N, P_est, dtype, M, stacklevel=2)
-
-    def _run(
-        idx: Array,
-        run_groups: _Groups,
-        run_levels: list[list[int] | None],
-        order: Array | None,
-    ) -> tuple[Array, Array, Array, Array, Array, int]:
-        if mode == "univariate":
-            assert Y_cols is not None
-            ot, adv, diff, degen = _run_univariate(
-                Y_cols, T, K, idx, run_groups, run_levels, order, slice_chunk_size
-            )
-            return ot, adv, diff, degen, jnp.zeros((), jnp.int32), 0
-        return _run_joint(
-            clouds, mode, idx, run_groups, run_levels, order, eps_s, max_iter_s, tol_s
-        )
-
-    n_bad_parts: list[Array] = []
-    n_solves_parts: list[int] = []
-    block_outs: list[tuple[Array, Array, Array, Array]] = []
-    for idx_block, groups_block in replicate_blocks(plan):
-        ot_b, adv_b, diff_b, degen_b, n_bad_b, solves_b = _run(
-            idx_block, groups_block, group_levels, col_order
-        )
-        block_outs.append((ot_b, adv_b, diff_b, degen_b))
-        n_bad_parts.append(n_bad_b)
-        n_solves_parts.append(solves_b)
-        del groups_block  # free this block's class tensors before the next
-    ot_all, adv_all, diff_all, degen_all = (
-        jnp.concatenate(parts, axis=0) if len(parts) > 1 else parts[0]
-        for parts in zip(*block_outs)
-    )
-
-    ot_dummy: Array | None = None
+    # The dummy floors (M4) are synthetic parameters, each a random-membership
+    # permutation baseline whose class structure matches the real parameter
+    # it stands in for, because the finite-sample OT bias scales with class
+    # size, not with the parameter itself. Continuous parameters share one
+    # floor, built from the equal-frequency M-class layout every continuous
+    # column already uses. Categorical parameters cannot share that floor: a
+    # 3-level column's finite-sample bias is nothing like a 25-class
+    # continuous column's, so each gets its own matched dummy, built from
+    # that column's own observed level counts. Each dummy is one more
+    # partition group of one parameter, so they run through the identical
+    # estimator, on the original sample only, because the baseline needs no
+    # bootstrap interval.
+    dummy_groups: list[tuple[Array, Array]] = []
+    dummy_levels: list[list[int] | None] = []
     if dummy:
-        # A synthetic, per-parameter irrelevance floor (M4). Each floor is
-        # a random-membership permutation baseline whose class structure
-        # matches the real parameter it stands in for, because the
-        # finite-sample OT bias scales with class size, not with the
-        # parameter itself. Continuous parameters share one floor, built
-        # from the equal-frequency M-class layout every continuous column
-        # already uses. Categorical parameters cannot share that floor: a
-        # 3-level column's finite-sample bias is nothing like a 25-class
-        # continuous column's, so each gets its own matched dummy solve,
-        # built from that column's own observed level counts. Every dummy
-        # runs through the identical estimator as a single-replicate pass,
-        # because the baseline needs no bootstrap interval.
         assert key_dummy is not None  # a missing key was refused above
         dummy_keys = jax.random.split(key_dummy, 1 + len(cat_dims))
-
-        def _dummy_value(group: PartitionGroup, levels: list[int] | None) -> Array:
-            """Point-estimate OT of one synthetic parameter, slice-shaped.
-
-            ``levels`` is ``None`` for the continuous floor, whose classes
-            follow the equal-frequency layout. A categorical floor passes
-            its level count, so the estimator uses the group's own class
-            sizes instead of the equal-frequency ones.
-            """
-            ot, _, _, _, n_bad, solves = _run(identity, [group], [levels], None)
-            n_bad_parts.append(n_bad)
-            n_solves_parts.append(solves)
-            return ot[0][..., 0]
-
-        dummy_vals: list[Array] = []
         if cont_dims:
             take_np, sizes_np = _class_layout(N, M)
             dummy_col = jax.random.permutation(dummy_keys[0], N)[:, None]
             dummy_cls_idx = _build_class_indices(dummy_col, identity, jnp.asarray(take_np))
-            cont_group = (dummy_cls_idx, jnp.asarray(sizes_np)[None, None, :])  # (1, 1, M, P)
-            cont_dummy = _dummy_value(cont_group, None)
-            dummy_vals.extend([cont_dummy] * len(cont_dims))
+            # (1, 1, M, P) and (1, 1, M)
+            dummy_groups.append((dummy_cls_idx, jnp.asarray(sizes_np)[None, None, :]))
+            dummy_levels.append(None)
         if cat_dims:
             # The plan keeps the level counts of replicate 0, which give each real column's
             # own observed, non-empty level sizes to match.
@@ -1642,10 +1673,94 @@ def analyze(
             for j, key_j in enumerate(dummy_keys[1:]):
                 sizes_j = cat_counts0[j]
                 sizes_j = sizes_j[sizes_j > 0]
-                dummy_group = _matched_dummy_group(key_j, N, sizes_j)
-                dummy_vals.append(_dummy_value(dummy_group, [len(sizes_j)]))
-        ot_dummy_grouped = jnp.stack(dummy_vals, axis=-1)  # (..., D) in group order
-        ot_dummy = ot_dummy_grouped if col_order is None else ot_dummy_grouped[..., col_order]
+                dummy_groups.append(_matched_dummy_group(key_j, N, sizes_j))
+                dummy_levels.append([len(sizes_j)])
+
+    # `_run` maps replicate indices and partition-layout groups to
+    # (ot, advective, diffusive, degenerate) arrays with the parameter axis
+    # last, in group order, plus a Sinkhorn convergence count (0 in
+    # "univariate" mode, which needs no solver) and the number of solves.
+    if mode != "univariate":
+        eps_s = jnp.asarray(epsilon, dtype)
+        max_iter_s = jnp.asarray(max_iter, jnp.int32)
+        tol_s = jnp.asarray(tol, dtype)
+        P_est = max(
+            [-(-N // M)] * bool(cont_dims) + [plan._cat_pad] * bool(cat_dims),
+            default=1,
+        )
+        _warn_joint_memory(N, P_est, dtype, M, stacklevel=2)
+
+    def _run(
+        idx: Array,
+        run_groups: list[tuple[Array, Array]],
+        run_levels: list[list[int] | None],
+    ) -> tuple[Array, Array, Array, Array, Array, int]:
+        if mode == "univariate":
+            ot, adv, diff, degen = _run_univariate(
+                Y_3d, idx, run_groups, run_levels, None, slice_chunk_size
+            )
+            return ot, adv, diff, degen, jnp.zeros((), jnp.int32), 0
+        return _run_joint(
+            Y_3d,
+            mode,
+            standardize_outputs,
+            idx,
+            run_groups,
+            run_levels,
+            None,
+            eps_s,
+            max_iter_s,
+            tol_s,
+        )
+
+    def _restore(arr: Array) -> Array:
+        return arr if col_order is None else arr[..., col_order]
+
+    # Without a bootstrap the real run is the original sample alone, so the
+    # dummy groups join it as extra parameters and share its per-column work
+    # (the sorts, the moments). With a bootstrap they run once, together,
+    # on the original sample.
+    fold_dummy = bool(dummy_groups) and n_bootstrap == 0
+    D_real = problem.n_params
+    n_bad_parts: list[Array] = []
+    n_solves_parts: list[int] = []
+    block_outs: list[tuple[Array, Array, Array, Array]] = []
+    dummy_ot: Array | None = None
+    for idx_block, groups_block in replicate_blocks(plan):
+        if fold_dummy and dummy_ot is None:
+            ot_b, adv_b, diff_b, degen_b, n_bad_b, solves_b = _run(
+                idx_block, groups_block + dummy_groups, group_levels + dummy_levels
+            )
+            dummy_ot = ot_b[0][..., D_real:]
+            ot_b, adv_b, diff_b = (arr[..., :D_real] for arr in (ot_b, adv_b, diff_b))
+        else:
+            ot_b, adv_b, diff_b, degen_b, n_bad_b, solves_b = _run(
+                idx_block, groups_block, group_levels
+            )
+        block_outs.append((_restore(ot_b), _restore(adv_b), _restore(diff_b), degen_b))
+        n_bad_parts.append(n_bad_b)
+        n_solves_parts.append(solves_b)
+        del groups_block  # free this block's class tensors before the next
+    ot_all, adv_all, diff_all, degen_all = (
+        jnp.concatenate(parts, axis=0) if len(parts) > 1 else parts[0]
+        for parts in zip(*block_outs)
+    )
+
+    ot_dummy: Array | None = None
+    if dummy_groups:
+        if dummy_ot is None:
+            ot_d, _, _, _, n_bad_d, solves_d = _run(identity, dummy_groups, dummy_levels)
+            n_bad_parts.append(n_bad_d)
+            n_solves_parts.append(solves_d)
+            dummy_ot = ot_d[0]
+        # One floor per synthetic group: the continuous floor (if any) first,
+        # shared by every continuous parameter, then one per categorical
+        # parameter, which is the group order the real parameters come in.
+        n_cont_dummy = 1 if cont_dims else 0
+        dummy_vals = [dummy_ot[..., 0]] * len(cont_dims) + [
+            dummy_ot[..., n_cont_dummy + j] for j in range(len(cat_dims))
+        ]
+        ot_dummy = _restore(jnp.stack(dummy_vals, axis=-1))  # (..., D)
 
     # n_solves_parts is plain Python ints (0 in "univariate" mode, which
     # needs no solver), so this check costs no host sync; only the joint
@@ -1922,9 +2037,7 @@ def indices(
 
     if mode == "univariate":
         ot, adv, diff, _ = _run_univariate(
-            Y_3d.reshape(N, T * K),
-            T,
-            K,
+            Y_3d,
             all_idx,
             groups,
             group_levels,
@@ -1940,8 +2053,9 @@ def indices(
 
     tol_v = _resolve_tol(tol, dtype)
     ot, adv, diff, _, _, _ = _run_joint(
-        _build_clouds(Y_3d, mode, standardize_outputs),
+        Y_3d,
         mode,
+        standardize_outputs,
         all_idx,
         groups,
         group_levels,
