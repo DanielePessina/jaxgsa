@@ -88,3 +88,53 @@ def test_singular_solve_retries_eager_and_traced():
     eq = _normal_equations(U, Y, idx, jnp.asarray(5, dtype=jnp.int32), gamma=1.0)
     assert np.isfinite(np.asarray(_solve_ridge(eq, 0.0))).all()
     assert np.isfinite(np.asarray(jax.jit(_solve_ridge)(eq, 0.0))).all()
+
+
+def test_cross_validation_workers_follow_thread_local_x64(monkeypatch) -> None:
+    """Pool workers run under the caller's ``with jax.enable_x64(...)`` value.
+
+    The cross-validation runs most (gamma, fold) pairs on pool threads, which
+    do not inherit thread-local JAX config. Without re-entering it, a float64
+    analysis inside ``with jax.enable_x64():`` in a float32 process scored
+    most of the grid in float32 and picked other hyperparameters.
+    """
+    import jax
+
+    from jaxgsa.vkoga import _analyze, _engine
+
+    local_x64 = not bool(getattr(jax.config, "jax_enable_x64", False))
+    problem = jaxgsa.Problem.from_dict({f"x{i}": (0.0, 1.0) for i in range(3)})
+    X = np.asarray(jaxgsa.sampling.monte_carlo(problem, 256, seed=0))
+    seen: list[str] = []
+    real = _engine._cv_fold_sse
+
+    def _spy(*args, **kwargs):
+        out = real(*args, **kwargs)
+        seen.append(out[0].dtype.name)
+        return out
+
+    def _scores(workers: int):
+        monkeypatch.setattr(_engine, "_cv_workers", lambda *a, **k: workers)
+        with jax.enable_x64(local_x64):
+            dtype = jnp.float64 if local_x64 else jnp.float32
+            U = jnp.asarray(X, dtype=dtype)
+            Y = (jnp.sin(3 * U[:, 0]) + U[:, 1] ** 2 * U[:, 2])[:, None]
+            per_slice, pooled = _engine._cross_validate(
+                U,
+                Y - Y.mean(),
+                gammas=_analyze._GAMMA_GRID[:4],
+                ridges=_analyze._RIDGE_GRID[:3],
+                max_centers=20,
+                n_folds=4,
+            )
+            return np.asarray(per_slice), np.asarray(pooled)
+
+    monkeypatch.setattr(_engine, "_cv_fold_sse", _spy)
+    pooled_threads = _scores(4)
+    expected = "float64" if local_x64 else "float32"
+    assert set(seen) == {expected}
+    pooled_serial = _scores(1)
+    rtol = 1e-6 if local_x64 else 1e-4
+    np.testing.assert_allclose(pooled_threads[0], pooled_serial[0], rtol=rtol)
+    np.testing.assert_allclose(pooled_threads[1], pooled_serial[1], rtol=rtol)
+    assert np.argmin(pooled_threads[1]) == np.argmin(pooled_serial[1])

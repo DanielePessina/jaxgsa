@@ -51,9 +51,13 @@ References:
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
-from typing import NamedTuple
+import os
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, NamedTuple
 
 import jax
 import jax.core
@@ -61,6 +65,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 from numpy.typing import ArrayLike
+
+from jaxgsa._core.batching import get_memory_budget
 
 # Paper defaults (Hilhorst et al. 2024): tau_P = 5e-8 on the power function,
 # tau_R = 1e-4 on the interpolation residual, lambda = 1e-10 on the RKHS term.
@@ -77,6 +83,9 @@ _DEFAULT_TOL_RESIDUAL = 1e-4
 # lambda = 1e-10 the RKHS term does almost nothing, so the kernel Gram can
 # still be numerically singular in float32 once many centres are selected.
 _JITTER = 1e-8
+
+# Narrowest basis width of the greedy loop's first phase (see _phase_widths).
+_FIRST_PHASE_WIDTH = 64
 
 # Relative jitter, in machine epsilons of the working dtype, for the retry
 # solve after a non-finite first solve.
@@ -208,16 +217,39 @@ def _select_centers(
     res_scale = jnp.where(y_norm > 0.0, y_norm, 1.0)
 
     eps = jnp.finfo(dtype).eps
-    init = (
-        jnp.zeros((n, max_centers), dtype=dtype),  # Newton basis at all points
-        residual0,
+    n_slices = Y.shape[1]
+    # The residual rule needs only "is any slice still above tau_R". One
+    # slice that is above it answers that, so only that "witness" slice's
+    # residual is carried over all n rows. The other slices are carried as
+    # their Newton coefficients C, shape (max_centers, S): the residual at
+    # the next centre is then one (max_centers,) x (max_centers, S) product,
+    # not an (n, S) update per step. The full (n, S) residual is rebuilt,
+    # as one GEMM, only when the witness drops to tau_R. Then the rule is
+    # decided on every slice and the worst slice becomes the next witness.
+    # Y[i] - V[i] @ C rounds differently from a running (n, S) update, so the
+    # stopping step can differ by one centre when tau_R lands within rounding
+    # of a residual norm. The selection order itself does not read Y.
+    rel0 = y_norm / res_scale
+    witness0 = jnp.argmax(rel0).astype(jnp.int32)
+    # The basis V only has m non-zero columns after m steps, but every step
+    # reads all of its columns. So V (and C) start narrow and widen in a
+    # few static phases, each its own while loop. The extra columns of a
+    # wider phase are exact zeros, which add nothing to the products and
+    # sums below. On the checked cases (f32 and f64) the selected centres
+    # matched a single full-width loop exactly.
+    widths = _phase_widths(max_centers)
+    state = (
+        jnp.zeros((n, widths[0]), dtype=dtype),  # Newton basis at all points
+        jnp.zeros((widths[0], n_slices), dtype=dtype),  # Newton coefficients
+        residual0[:, witness0],  # residual of the witness slice
+        witness0,
         blocked0,
         jnp.zeros((max_centers,), dtype=jnp.int32),  # selected row indices
         jnp.zeros((), dtype=jnp.int32),  # centres selected so far
         # K(x, x) = 1 for the Gaussian kernel, so the power function starts at
         # 1 everywhere; the empty basis subtracts nothing.
         jnp.ones((), dtype=dtype),
-        jnp.max(y_norm / res_scale),
+        jnp.max(rel0),
         # Squared power function at every point, carried so the loop body reads
         # it instead of rebuilding it. The empty basis subtracts nothing, so an
         # open point starts at 1 and a blocked point is never a candidate.
@@ -225,12 +257,19 @@ def _select_centers(
     )
 
     def _cond(state: tuple) -> Array:
-        _, _, _, _, m, power, res, _ = state
+        _, _, _, _, _, _, m, power, res, _ = state
         # All three stopping rules, first to trigger wins.
         return (m < max_centers) & (power > tol_power) & (res > tol_residual)
 
+    def _all_slices(V: Array, C: Array) -> tuple[Array, Array, Array]:
+        """Rebuild every slice's residual and pick the worst as the witness."""
+        residual = jnp.where(mask[:, None], residual0 - V @ C, 0.0)
+        rel = jnp.sqrt(jnp.sum(residual**2, axis=0)) / res_scale
+        worst = jnp.argmax(rel).astype(jnp.int32)
+        return rel[worst], residual[:, worst], worst
+
     def _body(state: tuple) -> tuple:
-        V, residual, blocked, idx, m, _, _, p2 = state
+        V, C, r_w, w, blocked, idx, m, _, _, p2 = state
 
         i = jnp.argmax(p2)
         # p2 = 1 - sum(V^2) is a cancellation: once the basis nearly spans the
@@ -243,15 +282,19 @@ def _select_centers(
         # kernel translate against the existing basis, then normalise by the
         # power function at the new centre.
         k_col = _gaussian_kernel(X, X[i][None, :], gamma)[:, 0]
-        v = (k_col - V @ V[i]) / sqrt_p
+        V_i = jax.lax.optimization_barrier(V[i])
+        v = (k_col - V @ V_i) / sqrt_p
 
         # Interpolation residual in the same basis: one coefficient row per
-        # output slice, since all slices share this basis. Re-mask after the
-        # update: v is dense, so the outer product writes minus-interpolant
-        # values into held-out rows. Without the mask those rows accumulate
-        # and the stopping norm below never converges inside cross-validation.
-        c = residual[i] / sqrt_p  # (S,)
-        residual = jnp.where(mask[:, None], residual - jnp.outer(v, c), 0.0)
+        # output slice, since all slices share this basis. The residual at
+        # the new centre is Y[i] minus the interpolant so far, V[i] @ C. The
+        # witness residual is re-masked after its update: v is dense, so the
+        # update writes minus-interpolant values into held-out rows. Without
+        # the mask those rows accumulate and the stopping norm below never
+        # converges inside cross-validation.
+        c = (residual0[i] - V_i @ C) / sqrt_p  # (S,)
+        C = C.at[m].set(c)
+        r_w = jnp.where(mask, r_w - v * c[w], 0.0)
 
         V = V.at[:, m].set(v)
         # Also block every exact copy of the new centre. At a copy the true
@@ -275,12 +318,49 @@ def _select_centers(
         # Held-out rows are re-masked to exactly zero above, and selected
         # points are interpolated exactly, so summing over all rows equals
         # summing over the active training rows. Relative to each slice's own
-        # norm, so the rule is scale-free.
-        res = jnp.max(jnp.sqrt(jnp.sum(residual**2, axis=0)) / res_scale)
-        return (V, residual, blocked, idx, m, power, res, p2_next)
+        # norm, so the rule is scale-free. While the witness is above tau_R
+        # the maximum over the slices is too, so the loop goes on either way.
+        res = jnp.sqrt(jnp.sum(r_w**2)) / res_scale[w]
+        if n_slices > 1:
+            res, r_w, w = jax.lax.cond(
+                res > tol_residual,
+                lambda: (res, r_w, w),
+                lambda: _all_slices(V, C),
+            )
+        return (V, C, r_w, w, blocked, idx, m, power, res, p2_next)
 
-    _, _, _, idx, m, _, _, _ = jax.lax.while_loop(_cond, _body, init)
+    for width in widths:
+        V, C, *rest = state
+        pad = width - V.shape[1]
+        state = (
+            jnp.pad(V, ((0, 0), (0, pad))),
+            jnp.pad(C, ((0, pad), (0, 0))),
+            *rest,
+        )
+        state = jax.lax.while_loop(lambda s, width=width: _cond(s) & (s[6] < width), _body, state)
+    *_, idx, m, _, _, _ = state
     return idx, m
+
+
+def _phase_widths(max_centers: int) -> tuple[int, ...]:
+    """Return the static basis widths the greedy loop grows through.
+
+    Widths double from ``_FIRST_PHASE_WIDTH`` and end at ``max_centers``, so
+    a step never reads more than about twice the columns it needs.
+
+    Args:
+        max_centers: Final number of basis columns.
+
+    Returns:
+        Increasing widths, the last equal to ``max_centers``.
+    """
+    widths = []
+    width = _FIRST_PHASE_WIDTH
+    while width < max_centers:
+        widths.append(width)
+        width *= 2
+    widths.append(max_centers)
+    return tuple(widths)
 
 
 class _NormalEquations(NamedTuple):
@@ -566,12 +646,194 @@ def _content_digest(*arrays: ArrayLike) -> bytes:
 @functools.partial(
     jax.jit, static_argnames=("max_centers", "n_folds", "tol_power", "tol_residual")
 )
+def _cv_fold_sse(
+    X: Array,
+    Y: Array,
+    fold_of: Array,
+    fold: Array,
+    ridge_vec: Array,
+    gamma: Array,
+    *,
+    max_centers: int,
+    n_folds: int,
+    tol_power: float,
+    tol_residual: float,
+) -> tuple[Array, Array]:
+    """Held-out squared errors of one ``(gamma, fold)`` pair, for every ridge.
+
+    The data are arguments, not frozen constants, so the program compiles once
+    per shape, dtype and static setting and is reused by every new dataset
+    and every grid point.
+
+    Args:
+        X: Training inputs, shape ``(n, D)``.
+        Y: Training outputs, shape ``(n, S)``.
+        fold_of: Fold index of each row, shape ``(n,)``.
+        fold: Scalar index of the held-out fold.
+        ridge_vec: Ridge grid, shape ``(R,)``.
+        gamma: Scalar Gaussian shape parameter.
+        max_centers: Centre cap passed through to each fit.
+        n_folds: Number of folds.
+        tol_power: Absolute power-function stopping tolerance.
+        tol_residual: Relative residual stopping tolerance.
+
+    Returns:
+        ``(sse_slice, sse_total)`` of shapes ``(R, S)`` and ``(R,)``: the
+        held-out sum of squared errors per slice, and over all slices.
+    """
+    n = X.shape[0]
+    train = fold_of != fold
+    # One greedy sweep per (fold, gamma): selection is ridge-free.
+    idx, m = _select_centers(
+        X,
+        Y,
+        gamma=gamma,
+        max_centers=max_centers,
+        tol_power=tol_power,
+        tol_residual=tol_residual,
+        train_mask=train,
+    )
+    # The normal-equation matrices and the prediction kernel are also
+    # ridge-free: build them once per (fold, gamma) and reuse them for
+    # the whole ridge grid. Only the assembly-and-solve repeats.
+    eq = _normal_equations(X, Y, idx, m, gamma=gamma, train_mask=train)
+    block = -(-n // n_folds)
+    (held_idx,) = jnp.nonzero(~train, size=block, fill_value=0)
+    valid = jnp.arange(block) < jnp.sum(~train)
+    K_pred = _gaussian_kernel(X[held_idx], eq.centers, gamma)
+    Y_held = Y[held_idx]
+
+    def _ridge_sse(ridge: Array) -> tuple[Array, Array]:
+        err = Y_held - K_pred @ _solve_ridge(eq, ridge)
+        held = jnp.where(valid[:, None], err**2, 0.0)
+        # Per-slice sums for cv_rmse; the pooled sum is reduced
+        # straight from the full array so the grid choice keeps
+        # its original summation order.
+        return jnp.sum(held, axis=0), jnp.sum(held)
+
+    return jax.lax.map(_ridge_sse, ridge_vec)  # ((n_ridges, S), (n_ridges,))
+
+
+@functools.partial(jax.jit, static_argnames=("n",))
+def _cv_reduce(sse_slice: Array, sse_total: Array, *, n: int) -> tuple[Array, Array]:
+    """Pool the per-fold squared errors into RMSE scores.
+
+    Args:
+        sse_slice: Per-slice sums, shape ``(G, F, R, S)``.
+        sse_total: Pooled sums, shape ``(G, F, R)``.
+        n: Training rows. The folds partition them, so every row is held out
+            exactly once.
+
+    Returns:
+        ``(per_slice, pooled)`` of shapes ``(G, R, S)`` and ``(G, R)``.
+    """
+    n_slices = sse_slice.shape[-1]
+    per_slice = jnp.sqrt(jnp.sum(sse_slice, axis=1) / n)
+    pooled = jnp.sqrt(jnp.sum(sse_total, axis=1) / (n * n_slices))
+    return per_slice, pooled
+
+
+def _cv_workers(
+    n: int, n_slices: int, max_centers: int, n_ridges: int, itemsize: int, n_tasks: int
+) -> int:
+    """Return how many ``(gamma, fold)`` programs may run at the same time.
+
+    Each program is one long greedy loop of small kernels, so one program
+    keeps about one core busy. Running several from a thread pool uses the
+    other cores. Each running program holds its own buffers, so the count
+    is also capped by the memory budget.
+
+    Args:
+        n: Training rows.
+        n_slices: Output slices ``S``.
+        max_centers: Centre cap.
+        n_ridges: Ridge grid size.
+        itemsize: Bytes per element of the working dtype.
+        n_tasks: Number of ``(gamma, fold)`` programs to run.
+
+    Returns:
+        Worker count in ``[1, n_tasks]``.
+    """
+    # The Newton basis, the cross-kernel and the masked copies of it (about
+    # 4 n x m), the outputs and their masked copy (2 n x S), the centre
+    # matrices (3 m x m), and the right-hand sides and solutions of the
+    # ridge grid ((R + 4) m x S).
+    per_task = itemsize * (
+        4 * n * max_centers
+        + 2 * n * n_slices
+        + 3 * max_centers * max_centers
+        + (n_ridges + 4) * max_centers * n_slices
+    )
+    by_memory = get_memory_budget() // max(per_task, 1)
+    return int(max(1, min(n_tasks, _usable_cpus(), by_memory)))
+
+
+def _usable_cpus() -> int:
+    """Return the number of CPUs this process may run on.
+
+    Respects affinity and cgroup limits where the platform reports them,
+    and falls back to the machine's CPU count.
+
+    Returns:
+        A CPU count of at least 1.
+    """
+    process_cpu_count = getattr(os, "process_cpu_count", None)
+    if process_cpu_count is not None:
+        return process_cpu_count() or 1
+    sched_getaffinity = getattr(os, "sched_getaffinity", None)
+    if sched_getaffinity is not None:
+        return len(sched_getaffinity(0)) or 1
+    return os.cpu_count() or 1
+
+
+def _thread_local_config() -> list[tuple[Any, Any]] | None:
+    """Capture the JAX config values set on the calling thread only.
+
+    Context managers such as ``jax.enable_x64()`` or ``jax.default_device()``
+    set a thread-local value, which a pool thread does not see. Each pair
+    here is re-entered in the worker by :func:`_in_config`.
+
+    Returns:
+        ``(state, value)`` pairs for every config option with a thread-local
+        value, or ``None`` if this JAX version does not expose them. The
+        caller then runs everything on its own thread.
+    """
+    try:
+        from jax._src import config as jax_config  # noqa: PLC0415
+
+        unset = jax_config.config_ext.unset
+        states = list(jax_config.config_states.values())
+        return [(state, value) for state in states if (value := state.get_local()) is not unset]
+    except AttributeError:
+        return None
+
+
+def _in_config(
+    local: list[tuple[Any, Any]], fn: Callable[[], tuple[Array, Array]]
+) -> tuple[Array, Array]:
+    """Run ``fn`` with the captured thread-local config values entered.
+
+    Args:
+        local: Pairs from :func:`_thread_local_config`.
+        fn: Zero-argument function to run.
+
+    Returns:
+        ``fn()``.
+    """
+    from jax._src import config as jax_config  # noqa: PLC0415
+
+    with contextlib.ExitStack() as stack:
+        for state, value in local:
+            stack.enter_context(jax_config.StateContextManager(state, value))
+        return fn()
+
+
 def _cv_scores(
     X: Array,
     Y: Array,
     fold_of: Array,
     ridge_vec: Array,
-    gammas: Array,
+    gammas: np.ndarray,
     *,
     max_centers: int,
     n_folds: int,
@@ -580,15 +842,19 @@ def _cv_scores(
 ) -> tuple[Array, Array]:
     """Score every ``(gamma, ridge)`` pair by k-fold held-out RMSE.
 
-    The data are arguments, not frozen constants, so the program compiles once
-    per shape, dtype and static setting and is reused by every new dataset.
+    Each ``(gamma, fold)`` pair is one call of :func:`_cv_fold_sse`. The
+    pairs are independent, so after the first call (which compiles the
+    program) they run from a thread pool, several at a time, each under the
+    caller's thread-local JAX config. Each pair runs the same program
+    whichever thread runs it, so the scores do not depend on the number of
+    workers.
 
     Args:
         X: Training inputs, shape ``(n, D)``.
         Y: Training outputs, shape ``(n, S)``.
         fold_of: Fold index of each row, shape ``(n,)``.
         ridge_vec: Ridge grid, shape ``(R,)``.
-        gammas: Gamma grid, shape ``(G,)``.
+        gammas: Gamma grid, host array of shape ``(G,)`` in ``X.dtype``.
         max_centers: Centre cap passed through to each fit.
         n_folds: Number of folds.
         tol_power: Absolute power-function stopping tolerance.
@@ -597,52 +863,49 @@ def _cv_scores(
     Returns:
         ``(per_slice, pooled)`` of shapes ``(G, R, S)`` and ``(G, R)``.
     """
-    n = X.shape[0]
-    n_slices = Y.shape[1]
-    fold_ids = jnp.arange(n_folds)
+    n, n_slices = Y.shape
+    tasks = [(g, f) for g in range(len(gammas)) for f in range(n_folds)]
+    fold_dtype = fold_of.dtype
 
-    def _score_gamma(gamma: Array) -> tuple[Array, Array]:
-        def _fold_sse(fold: Array) -> tuple[Array, Array]:
-            train = fold_of != fold
-            # One greedy sweep per (fold, gamma): selection is ridge-free.
-            idx, m = _select_centers(
-                X,
-                Y,
-                gamma=gamma,
-                max_centers=max_centers,
-                tol_power=tol_power,
-                tol_residual=tol_residual,
-                train_mask=train,
-            )
-            # The normal-equation matrices and the prediction kernel are also
-            # ridge-free: build them once per (fold, gamma) and reuse them for
-            # the whole ridge grid. Only the assembly-and-solve repeats.
-            eq = _normal_equations(X, Y, idx, m, gamma=gamma, train_mask=train)
-            block = -(-n // n_folds)
-            (held_idx,) = jnp.nonzero(~train, size=block, fill_value=0)
-            valid = jnp.arange(block) < jnp.sum(~train)
-            K_pred = _gaussian_kernel(X[held_idx], eq.centers, gamma)
-            Y_held = Y[held_idx]
+    def _run(task: tuple[int, int]) -> tuple[Array, Array]:
+        g, f = task
+        out = _cv_fold_sse(
+            X,
+            Y,
+            fold_of,
+            np.asarray(f, dtype=fold_dtype),
+            ridge_vec,
+            gammas[g],
+            max_centers=max_centers,
+            n_folds=n_folds,
+            tol_power=tol_power,
+            tol_residual=tol_residual,
+        )
+        return jax.block_until_ready(out)
 
-            def _ridge_sse(ridge: Array) -> tuple[Array, Array]:
-                err = Y_held - K_pred @ _solve_ridge(eq, ridge)
-                held = jnp.where(valid[:, None], err**2, 0.0)
-                # Per-slice sums for cv_rmse; the pooled sum is reduced
-                # straight from the full array so the grid choice keeps
-                # its original summation order.
-                return jnp.sum(held, axis=0), jnp.sum(held)
-
-            return jax.lax.map(_ridge_sse, ridge_vec)  # ((n_ridges, S), (n_ridges,))
-
-        # lax.map runs the folds sequentially: vmap would hold n_folds
-        # copies of the (n, n) kernel work live at once, which is the
-        # memory wall here long before it is a speed win.
-        sse_slice, sse_total = jax.lax.map(_fold_sse, fold_ids)
-        per_slice = jnp.sqrt(jnp.sum(sse_slice, axis=0) / n)  # (n_ridges, n_slices)
-        pooled = jnp.sqrt(jnp.sum(sse_total, axis=0) / (n * n_slices))  # (n_ridges,)
-        return per_slice, pooled
-
-    return jax.lax.map(_score_gamma, gammas)
+    # The first call compiles; the pool then reuses that one program.
+    results = [_run(tasks[0])]
+    workers = _cv_workers(
+        n, n_slices, max_centers, int(ridge_vec.shape[0]), X.dtype.itemsize, len(tasks) - 1
+    )
+    # Pool threads do not inherit thread-local JAX config (for example
+    # ``with jax.enable_x64():``), so each task re-enters the caller's values.
+    local = _thread_local_config()
+    if workers > 1 and local is not None:
+        pool = ThreadPoolExecutor(max_workers=workers)
+        futures = [pool.submit(_in_config, local, functools.partial(_run, t)) for t in tasks[1:]]
+        try:
+            results.extend(future.result() for future in futures)
+        finally:
+            # On an error, drop the queued tasks so it surfaces promptly.
+            pool.shutdown(wait=True, cancel_futures=True)
+    else:
+        results.extend(_run(task) for task in tasks[1:])
+    sse_slice = jnp.stack([r[0] for r in results]).reshape(
+        len(gammas), n_folds, *results[0][0].shape
+    )
+    sse_total = jnp.stack([r[1] for r in results]).reshape(len(gammas), n_folds, -1)
+    return _cv_reduce(sse_slice, sse_total, n=n)
 
 
 def _cross_validate(
@@ -719,7 +982,7 @@ def _cross_validate(
         Y,
         fold_of,
         ridge_vec,
-        jnp.asarray(gamma_grid, dtype=X.dtype),
+        gamma_grid.astype(X.dtype),
         max_centers=max_centers,
         n_folds=n_folds,
         tol_power=tol_power,

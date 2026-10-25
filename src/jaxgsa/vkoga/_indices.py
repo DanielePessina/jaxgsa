@@ -95,6 +95,11 @@ _MAX_QMC_DIM = 21201
 # parameters are near-perfectly correlated; this only covers that case.
 _COMPONENT_RIDGE = 1e-8
 
+# The prediction queue and each chunk of nested draws may each hold this
+# fraction (1 / share) of the memory budget. Together they use half of it;
+# the surrogate evaluation sizes its batches against the other half.
+_QUEUE_BUDGET_SHARE = 4
+
 # How far S_U may exceed S_TU before the clip is reported. Both are fractions
 # of V(Y), so this is one percent of the output variance: below it the excess
 # is estimator noise, above it the additive projection is genuinely inadequate.
@@ -279,10 +284,19 @@ def estimate_correlated_indices(
     # Every nested draw goes through one queue, so the surrogate sees a few
     # large calls instead of 2D small ones. Draws do not depend on the
     # predictions, so evaluation can wait until the queue is flushed.
+    #
+    # Without a caller's batch_size, the queue and the chunk of draws that
+    # feeds it each get a quarter of the memory budget, which leaves half
+    # for the surrogate evaluation itself (see vkoga._analyze). A queued row
+    # holds its unit-cube row twice (the block and the joined copy) and its S
+    # float64 predictions twice (the output and the reduction's temporary).
+    # The factor 3 on both leaves room for the chunk's own noise and
+    # conditioning rows. Chunks are capped at the same row count, so one
+    # oversized block cannot overrun the queue.
     flush_rows = (
         batch_size
         if batch_size is not None
-        else resolve_batch_size(8 * (2 * draws.dimension + n_slices), 1 << 62, None)
+        else resolve_batch_size(_QUEUE_BUDGET_SHARE * 8 * (3 * D + 3 * n_slices), 1 << 62, None)
     )
     queue = _PredictQueue(predict, flush_rows)
     finish_total: list[Callable[[], np.ndarray]] = []
@@ -297,7 +311,7 @@ def estimate_correlated_indices(
                 n_inner=n_inner,
                 n_slices=n_slices,
                 stream=streams.total_correlated[i],
-                batch_size=batch_size,
+                batch_size=flush_rows,
             )
         )
         finish_uncorrelated.append(
@@ -312,7 +326,7 @@ def estimate_correlated_indices(
                 n_inner=n_inner,
                 n_slices=n_slices,
                 stream=streams.total_uncorrelated[i],
-                batch_size=batch_size,
+                batch_size=flush_rows,
             )
         )
     queue.flush()

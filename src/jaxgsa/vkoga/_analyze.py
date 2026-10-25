@@ -33,7 +33,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.batching import apply_batched, resolve_batch_size
+from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.dependence import Draws, draws_for
 from jaxgsa._core.entry import (
@@ -90,6 +90,11 @@ _IRREGULAR_KWARGS = (
 # :func:`_make_unit_predictor`). Bounded so frozen fit state cannot accumulate.
 _PREDICTOR_CACHE_MAX = 4
 _PREDICTOR_CACHE: dict[tuple[Any, ...], Callable[[np.ndarray], np.ndarray]] = {}
+
+# The surrogate evaluation inside the index estimators sizes its batches
+# against 1 / share of the memory budget; the estimators' queue and draws
+# hold the rest (see vkoga._indices._QUEUE_BUDGET_SHARE).
+_PREDICT_BUDGET_SHARE = 2
 
 # Hyperparameter search grid, following Hilhorst et al. Section 2.4.1: ten
 # log-spaced values each, cross-validated as a 10x10 product.
@@ -933,9 +938,30 @@ def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
     compiled = jax.jit(kernel)
 
     def predict(U: np.ndarray) -> np.ndarray:
-        U_device = jnp.asarray(U)
-        batch = resolve_batch_size(bytes_per_row, U_device.shape[0], batch_size)
-        return apply_batched(compiled, U_device, batch, to_host=True)
+        n_rows = U.shape[0]
+        # Batches use half the budget: the index estimators' queue and draws
+        # hold the other half (see vkoga._indices._QUEUE_BUDGET_SHARE). The
+        # queue flushes blocks of many sizes, so each batch is padded to a
+        # power of two or to the budgeted width. The kernel then compiles for
+        # a few shapes, not once per block size.
+        batch = resolve_batch_size(
+            _PREDICT_BUDGET_SHARE * bytes_per_row, _next_power_of_2(n_rows), batch_size
+        )
+        # The batch width can change the rounding of the kernel products
+        # (about 3e-8 relative in float32 at a one-row batch), so results
+        # agree across memory budgets to rounding, not bit for bit.
+        # Float64 on the host, which is what the estimators read, so the
+        # queue does not need a second, converted copy.
+        out = np.empty((n_rows, int(state.coefficients.shape[1])), dtype=np.float64)
+        for start in range(0, n_rows, batch):
+            rows = U[start : start + batch]
+            n_valid = rows.shape[0]
+            if n_valid < batch:
+                rows = np.concatenate(
+                    [rows, np.zeros((batch - n_valid, rows.shape[1]), dtype=rows.dtype)]
+                )
+            out[start : start + n_valid] = np.asarray(compiled(jnp.asarray(rows)))[:n_valid]
+        return out
 
     if len(_PREDICTOR_CACHE) >= _PREDICTOR_CACHE_MAX:
         _PREDICTOR_CACHE.pop(next(iter(_PREDICTOR_CACHE)))
