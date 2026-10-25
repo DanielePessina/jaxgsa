@@ -208,6 +208,7 @@ def estimate_correlated_indices(
     entropy: int,
     batch_size: int | None,
     param_names: Sequence[str] | None = None,
+    predict_group_mean: Callable[[np.ndarray, int], np.ndarray] | None = None,
 ) -> CorrelatedIndices:
     """Estimate the five correlated variance-based indices by quasi-Monte-Carlo.
 
@@ -246,6 +247,10 @@ def estimate_correlated_indices(
             caller's value has to hold down.
         param_names: Parameter names for the ``S_U`` clip warning, or
             ``None`` to report column positions.
+        predict_group_mean: Optional evaluator of the surrogate's mean over
+            blocks of ``g`` consecutive rows, ``(U, g) -> (n / g, S)``. When
+            given, ``S_TC`` takes its inner means from it instead of from
+            ``predict``. ``None`` (default) averages ``predict``'s outputs.
 
     Returns:
         A :class:`CorrelatedIndices` whose index arrays have shape ``(S, D)``.
@@ -298,7 +303,7 @@ def estimate_correlated_indices(
         if batch_size is not None
         else resolve_batch_size(_QUEUE_BUDGET_SHARE * 8 * (3 * D + 3 * n_slices), 1 << 62, None)
     )
-    queue = _PredictQueue(predict, flush_rows)
+    queue = _PredictQueue(predict, flush_rows, predict_group_mean)
     finish_total: list[Callable[[], np.ndarray]] = []
     finish_uncorrelated: list[Callable[[], tuple[np.ndarray, np.ndarray]]] = []
     for i in range(D):
@@ -668,46 +673,100 @@ class _PredictQueue:
         flush_rows: Pending row count that triggers a flush.
     """
 
-    def __init__(self, predict: Callable[[np.ndarray], np.ndarray], flush_rows: int) -> None:
+    def __init__(
+        self,
+        predict: Callable[[np.ndarray], np.ndarray],
+        flush_rows: int,
+        group_mean: Callable[[np.ndarray, int], np.ndarray] | None = None,
+    ) -> None:
         """Create an empty queue.
 
         Args:
             predict: Fitted surrogate. It maps ``(n, D)`` unit-cube samples
                 to ``(n, S)`` outputs.
             flush_rows: Pending row count that triggers a flush, at least 1.
+            group_mean: Optional evaluator of block means, ``(U, g) ->
+                (n / g, S)``, for blocks submitted with ``group=g``. ``None``
+                averages ``predict``'s outputs instead.
         """
         self.predict = predict
         self.flush_rows = max(1, flush_rows)
+        self.group_mean = group_mean
         self._blocks: list[np.ndarray] = []
         self._callbacks: list[Callable[[np.ndarray], None]] = []
+        self._groups: list[int | None] = []
         self._pending = 0
 
-    def submit(self, U: np.ndarray, callback: Callable[[np.ndarray], None]) -> None:
+    def submit(
+        self,
+        U: np.ndarray,
+        callback: Callable[[np.ndarray], None],
+        group: int | None = None,
+    ) -> None:
         """Queue a block, flushing first if it would not fit.
 
         Args:
             U: Unit-cube rows, shape ``(n, D)``.
             callback: Called with the float64 predictions for ``U``, shape
-                ``(n, S)``, when the block is evaluated.
+                ``(n, S)``, when the block is evaluated. With ``group=g`` it
+                gets the means over consecutive blocks of ``g`` rows instead,
+                shape ``(n / g, S)``.
+            group: Block size to average over, or ``None`` for no averaging.
         """
         if self._pending + U.shape[0] > self.flush_rows:
             self.flush()
         self._blocks.append(U)
         self._callbacks.append(callback)
+        self._groups.append(group)
         self._pending += U.shape[0]
 
     def flush(self) -> None:
-        """Evaluate every pending block in one surrogate call."""
+        """Evaluate every pending block in at most two surrogate calls."""
         if not self._blocks:
             return
-        blocks, callbacks = self._blocks, self._callbacks
-        self._blocks, self._callbacks, self._pending = [], [], 0
+        blocks, callbacks, groups = self._blocks, self._callbacks, self._groups
+        self._blocks, self._callbacks, self._groups, self._pending = [], [], [], 0
+        if self.group_mean is not None and any(g is not None for g in groups):
+            plain = [k for k, g in enumerate(groups) if g is None]
+            grouped = [k for k, g in enumerate(groups) if g is not None]
+            self._evaluate([blocks[k] for k in plain], [callbacks[k] for k in plain], None)
+            for g in sorted({g for g in groups if g is not None}):
+                keep = [k for k in grouped if groups[k] == g]
+                joined = np.concatenate([blocks[k] for k in keep], axis=0)
+                means = np.asarray(self.group_mean(joined, g), dtype=np.float64)
+                start = 0
+                for k in keep:
+                    stop = start + blocks[k].shape[0] // g
+                    callbacks[k](means[start:stop])
+                    start = stop
+            return
+        self._evaluate(blocks, callbacks, groups)
+
+    def _evaluate(
+        self,
+        blocks: list[np.ndarray],
+        callbacks: list[Callable[[np.ndarray], None]],
+        groups: list[int | None] | None,
+    ) -> None:
+        """Predict ``blocks`` in one call and hand each callback its rows.
+
+        Args:
+            blocks: Unit-cube blocks.
+            callbacks: One callback per block.
+            groups: Per-block averaging size, or ``None`` for no averaging.
+        """
+        if not blocks:
+            return
         joined = blocks[0] if len(blocks) == 1 else np.concatenate(blocks, axis=0)
         Y = np.asarray(self.predict(joined), dtype=np.float64)
         start = 0
-        for block, callback in zip(blocks, callbacks, strict=True):
+        for k, (block, callback) in enumerate(zip(blocks, callbacks, strict=True)):
             stop = start + block.shape[0]
-            callback(Y[start:stop])
+            group = None if groups is None else groups[k]
+            if group is None:
+                callback(Y[start:stop])
+            else:
+                callback(Y[start:stop].reshape(-1, group, Y.shape[1]).mean(axis=1))
             start = stop
 
 
@@ -776,11 +835,10 @@ def _total_correlated(
         noise = np.tile(inner, (conditioning.shape[0] // n_inner, 1))
         rows = draws.rest_given_self(noise, conditioning, index)
 
-        def _store(Y: np.ndarray, start: int = start) -> None:
-            means = Y.reshape(-1, n_inner, n_slices).mean(axis=1)
+        def _store(means: np.ndarray, start: int = start) -> None:
             inner_mean[start : start + means.shape[0]] = means
 
-        queue.submit(draws.to_unit(rows), _store)
+        queue.submit(draws.to_unit(rows), _store, group=n_inner)
 
     # No inner-noise correction. The textbook term ``inner_var / n_inner``
     # assumes iid inner draws. Here the inner block is QMC and shared across

@@ -57,7 +57,7 @@ import hashlib
 import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import jax
 import jax.core
@@ -83,6 +83,11 @@ _DEFAULT_TOL_RESIDUAL = 1e-4
 # and late Newton columns carry little power, so V^T V can still be close to
 # singular once many centres are selected.
 _JITTER = 1e-8
+
+# How the greedy updates the squared power function after each centre: rebuilt
+# from the whole Newton basis ("exact") or by subtracting the new column
+# ("incremental"). See jaxgsa.vkoga.analyze.
+GreedyUpdate = Literal["exact", "incremental"]
 
 # Narrowest basis width of the greedy loop's first phase (see _phase_widths).
 _FIRST_PHASE_WIDTH = 64
@@ -146,13 +151,14 @@ def _gaussian_kernel(X1: Array, X2: Array, gamma: Array | float) -> Array:
     return jnp.exp(-gamma * jnp.maximum(d2, 0.0))
 
 
-@functools.partial(jax.jit, static_argnames=("max_centers",))
+@functools.partial(jax.jit, static_argnames=("max_centers", "greedy_update"))
 def _select_centers(
     X: Array,
     Y: Array,
     *,
     gamma: Array | float,
     max_centers: int,
+    greedy_update: GreedyUpdate = "exact",
     tol_power: Array | float = _DEFAULT_TOL_POWER,
     tol_residual: Array | float = _DEFAULT_TOL_RESIDUAL,
     train_mask: Array | None = None,
@@ -171,6 +177,7 @@ def _select_centers(
         Y,
         gamma=gamma,
         max_centers=max_centers,
+        greedy_update=greedy_update,
         tol_power=tol_power,
         tol_residual=tol_residual,
         train_mask=train_mask,
@@ -178,13 +185,14 @@ def _select_centers(
     return idx, m
 
 
-@functools.partial(jax.jit, static_argnames=("max_centers",))
+@functools.partial(jax.jit, static_argnames=("max_centers", "greedy_update"))
 def _newton_greedy(
     X: Array,
     Y: Array,
     *,
     gamma: Array | float,
     max_centers: int,
+    greedy_update: GreedyUpdate = "exact",
     tol_power: Array | float = _DEFAULT_TOL_POWER,
     tol_residual: Array | float = _DEFAULT_TOL_RESIDUAL,
     train_mask: Array | None = None,
@@ -209,6 +217,8 @@ def _newton_greedy(
         X: Training inputs, shape ``(n, D)``.
         Y: Training outputs, shape ``(n, S)``, output slices already flattened.
         gamma: Positive Gaussian shape parameter.
+        greedy_update: ``"exact"`` or ``"incremental"``; see
+            :func:`jaxgsa.vkoga.analyze`.
         max_centers: Hard cap on the number of centres, and the static size of
             the returned index buffer. Silently capped at ``n``.
         tol_power: Power-function stopping rule (tau_P). Stop once
@@ -354,7 +364,14 @@ def _newton_greedy(
         # Stopping quantities for the next iteration. Clamp the power at zero
         # so exhausted candidates (all -inf) terminate instead of producing a
         # NaN under the square root.
-        p2_next = jnp.where(blocked, -jnp.inf, 1.0 - jnp.sum(V * V, axis=1))
+        # "exact" rebuilds p2 from the whole basis each step. "incremental"
+        # subtracts the new column's square only: one fewer read of V per
+        # step, but different rounding, and the greedy is sensitive enough to
+        # rounding that it then often picks different centres.
+        if greedy_update == "incremental":
+            p2_next = jnp.where(blocked, -jnp.inf, p2 - v * v)
+        else:
+            p2_next = jnp.where(blocked, -jnp.inf, 1.0 - jnp.sum(V * V, axis=1))
         power = jnp.sqrt(jnp.maximum(jnp.max(p2_next), 0.0))
         # Held-out rows are re-masked to exactly zero above, and selected
         # points are interpolated exactly, so summing over all rows equals
@@ -630,6 +647,7 @@ def _fit_vkoga(
     *,
     gamma: Array | float,
     max_centers: int,
+    greedy_update: GreedyUpdate = "exact",
     ridge: Array | float = _DEFAULT_RIDGE,
     tol_power: Array | float = _DEFAULT_TOL_POWER,
     tol_residual: Array | float = _DEFAULT_TOL_RESIDUAL,
@@ -645,6 +663,8 @@ def _fit_vkoga(
         X: Training inputs, shape ``(n, D)``.
         Y: Training outputs, shape ``(n, S)``, output slices already flattened.
         gamma: Positive Gaussian shape parameter.
+        greedy_update: ``"exact"`` or ``"incremental"``; see
+            :func:`jaxgsa.vkoga.analyze`.
         max_centers: Hard cap on the number of centres, and the static array
             size of the returned state. Silently capped at ``n``.
         ridge: RKHS regularisation parameter (the paper's lambda).
@@ -662,6 +682,7 @@ def _fit_vkoga(
         Y,
         gamma=gamma,
         max_centers=max_centers,
+        greedy_update=greedy_update,
         tol_power=tol_power,
         tol_residual=tol_residual,
         train_mask=train_mask,
@@ -708,7 +729,8 @@ def _content_digest(*arrays: ArrayLike) -> bytes:
 
 
 @functools.partial(
-    jax.jit, static_argnames=("max_centers", "n_folds", "tol_power", "tol_residual")
+    jax.jit,
+    static_argnames=("max_centers", "n_folds", "tol_power", "tol_residual", "greedy_update"),
 )
 def _cv_fold_sse(
     X: Array,
@@ -719,6 +741,7 @@ def _cv_fold_sse(
     gamma: Array,
     *,
     max_centers: int,
+    greedy_update: GreedyUpdate = "exact",
     n_folds: int,
     tol_power: float,
     tol_residual: float,
@@ -736,6 +759,8 @@ def _cv_fold_sse(
         fold: Scalar index of the held-out fold.
         ridge_vec: Ridge grid, shape ``(R,)``.
         gamma: Scalar Gaussian shape parameter.
+        greedy_update: ``"exact"`` or ``"incremental"``; see
+            :func:`jaxgsa.vkoga.analyze`.
         max_centers: Centre cap passed through to each fit.
         n_folds: Number of folds.
         tol_power: Absolute power-function stopping tolerance.
@@ -753,6 +778,7 @@ def _cv_fold_sse(
         Y,
         gamma=gamma,
         max_centers=max_centers,
+        greedy_update=greedy_update,
         tol_power=tol_power,
         tol_residual=tol_residual,
         train_mask=train,
@@ -900,6 +926,7 @@ def _cv_scores(
     gammas: np.ndarray,
     *,
     max_centers: int,
+    greedy_update: GreedyUpdate = "exact",
     n_folds: int,
     tol_power: float,
     tol_residual: float,
@@ -919,6 +946,8 @@ def _cv_scores(
         fold_of: Fold index of each row, shape ``(n,)``.
         ridge_vec: Ridge grid, shape ``(R,)``.
         gammas: Gamma grid, host array of shape ``(G,)`` in ``X.dtype``.
+        greedy_update: ``"exact"`` or ``"incremental"``; see
+            :func:`jaxgsa.vkoga.analyze`.
         max_centers: Centre cap passed through to each fit.
         n_folds: Number of folds.
         tol_power: Absolute power-function stopping tolerance.
@@ -941,6 +970,7 @@ def _cv_scores(
             ridge_vec,
             gammas[g],
             max_centers=max_centers,
+            greedy_update=greedy_update,
             n_folds=n_folds,
             tol_power=tol_power,
             tol_residual=tol_residual,
@@ -979,6 +1009,7 @@ def _cross_validate(
     gammas: ArrayLike,
     ridges: ArrayLike,
     max_centers: int,
+    greedy_update: GreedyUpdate = "exact",
     n_folds: int = 10,
     tol_power: float = _DEFAULT_TOL_POWER,
     tol_residual: float = _DEFAULT_TOL_RESIDUAL,
@@ -1006,6 +1037,8 @@ def _cross_validate(
         Y: Training outputs, shape ``(n, S)``, output slices already flattened.
         gammas: Candidate Gaussian shape parameters, any 1-D array-like.
         ridges: Candidate RKHS regularisation parameters, any 1-D array-like.
+        greedy_update: ``"exact"`` or ``"incremental"``; see
+            :func:`jaxgsa.vkoga.analyze`.
         max_centers: Centre cap passed through to each fit.
         n_folds: Number of folds, at least 2. Capped at ``n``.
         tol_power: Absolute power-function stopping tolerance (tau_P).
@@ -1048,6 +1081,7 @@ def _cross_validate(
         ridge_vec,
         gamma_grid.astype(X.dtype),
         max_centers=max_centers,
+        greedy_update=greedy_update,
         n_folds=n_folds,
         tol_power=tol_power,
         tol_residual=tol_residual,

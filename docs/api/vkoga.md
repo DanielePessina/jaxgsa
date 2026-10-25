@@ -6,6 +6,7 @@ jaxgsa.vkoga.analyze(
     gamma=None,
     ridge=None,
     max_centers=None,
+    greedy_update="exact",
     n_folds=10,
     n_outer=512,
     n_inner=128,
@@ -210,6 +211,7 @@ See the [runnable custom-dependence example](/examples/correlated-inputs#custom-
 | `gamma` | `None` | Gaussian RBF shape parameter. `None` cross-validates over a grid. |
 | `ridge` | `None` | RKHS regularisation. `None` cross-validates over a grid. |
 | `max_centers` | `None` | Cap on greedily selected kernel centres. `None` means 300, itself capped at `N`. Lower it to cut fit time; too low and the surrogate underfits, which `cv_rmse` reports. |
+| `greedy_update` | `"exact"` | How the greedy updates the power function after each centre. `"exact"` rebuilds it from the whole Newton basis. `"incremental"` subtracts the new basis column only, which makes the greedy loop faster (cross-validation 4.2 s instead of 6.6 s in float64 on a D=8, N=4096 case). Its rounding differs, so it often selects different centres, and the indices move by about their Monte-Carlo error. |
 | `n_folds` | `10` | Folds for the hyperparameter cross-validation. At least 2. |
 | `n_outer` | `512` | Outer (conditioning) sample size per parameter. Rounded up to the next power of two for Sobol' balance. Raise this when `S_TU` looks noisy: it draws a fresh inner block per outer point, so its sampling error falls as `n_outer` grows. It does not help `S_TC`, which reuses one inner block across every outer point. |
 | `n_inner` | `128` | Inner (conditional) sample size per outer point, rounded up to a power of two. `S_TC` drops the i.i.d. inner-noise correction and leans on a large shared inner block, so do not lower `n_inner` to buy speed there: a small `n_inner` inflates a small `S_TC`, and raising `n_outer` will not fix it. |
@@ -219,8 +221,9 @@ See the [runnable custom-dependence example](/examples/correlated-inputs#custom-
 | `on_invalid` | `"raise"` | One training row is one unit, so `"drop"` removes the `(X, Y)` pair. The check runs before the hyperparameter search on purpose: one non-finite `Y` makes every cross-validation score non-finite, and the caller would otherwise meet a `RuntimeError` about failed kernel solves that names the wrong cause. `"drop"` needs at least `n_folds` rows to survive. |
 | `verbose` | `True` | Prints the summary block shown above. |
 
-Leaving both `gamma` and `ridge` to cross-validation costs a 10x10 grid of
-k-fold refits, which dominates the runtime. Pass both once you know good
+Leaving both `gamma` and `ridge` to cross-validation costs a grid of k-fold
+refits (10 `gamma` values by 10 `ridge` values in float32, 14 in float64, where
+the `ridge` grid continues down to about 1.7e-8), which dominates the runtime. Pass both once you know good
 values; the fitted values are reported on the result and in the verbose block.
 
 ## Confidence intervals
@@ -282,10 +285,14 @@ effects.
 
 ## Enable float64
 
-The coefficient solve forms $A^\top A$, which squares the condition number of
-the cross kernel. float32 cannot carry that for a small `gamma`. Call
-`jax.config.update("jax_enable_x64", True)` before fitting. `analyze` emits a
-`JaxgsaWarning` when x64 is off.
+The coefficient solve runs in the Newton basis that the greedy builds, so it
+stays stable in float32. Two float32 limits remain, both at small `gamma`: the
+greedy stops with fewer centres once the power function reaches float32
+rounding, and the kernel sum in prediction loses digits to cancellation. Call
+`jax.config.update("jax_enable_x64", True)` and pass float64 inputs before
+fitting. `analyze` emits a `JaxgsaWarning` whenever the fit runs in float32,
+including float32 inputs with x64 on. The fit runs in the wider dtype of `X`
+and `Y`, and every result field comes back in that dtype.
 
 ## What it refuses
 
@@ -305,7 +312,10 @@ method-specific cases:
 It raises `RuntimeError` when every cross-validation score is non-finite. Since
 the non-finite check now runs first, that is a genuine solver failure.
 
-It warns in four cases: a zero-variance output slice; float32; a cross-validated
+It warns in five cases: a zero-variance output slice, whose indices are NaN; a
+float32 fit; output slices with non-finite values under `on_invalid="propagate"`,
+whose indices are NaN while the other slices are fitted without them (under
+`"skip"` the same happens without a warning); a cross-validated
 error that is a large fraction of the output standard deviation, which makes
 every index untrustworthy; and `S_U` clipped to `S_TU` by a wide margin, which says
 the additive component functions cannot represent the model's interactions.

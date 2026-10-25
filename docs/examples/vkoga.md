@@ -53,9 +53,9 @@ Use VKOGA when:
 
 ## Enable float64 first
 
-The coefficient solve forms `A.T @ A`, squaring the condition number of the
-cross kernel. float32 cannot carry that for small `gamma`. Turn on double
-precision before you create any arrays:
+float32 fits stay stable, but at small `gamma` the greedy stops with fewer
+centres and prediction loses digits to cancellation. Turn on double precision
+before you create any arrays:
 
 ```python
 import jax
@@ -152,7 +152,7 @@ S_IU: [0.003 0.002 0.001]
 ```
 
 Almost all of that time is the hyperparameter search. The default run
-cross-validates `gamma` and `ridge` over a 10x10 grid, refitting each point
+cross-validates `gamma` and `ridge` over a 10x14 grid, refitting each point
 `n_folds` times. Cross-validation means the fit is scored on points it was not
 trained on. Both chosen values are reported in the summary block, so a first
 exploratory run tells you what to pin: pass `gamma=7.533, ridge=5.995e-05` on
@@ -515,11 +515,10 @@ aliases of `S_TC` and `S_TU`.
 - Training data must cover the analysis distribution well enough for accurate
   surrogate predictions. Independent and correlated designs are both allowed;
   see [above](#training-data-must-cover-the-analysis-distribution).
-- Use float64. The normal equations square the condition number of the cross
-  kernel, which float32 cannot carry for small `gamma`. Cross validation
-  partly self-corrects, since the scores are computed in the same arithmetic
-  and penalise the blown-up corner of the grid, but the ceiling is real.
-- The hyperparameter search dominates the cost. A 10x10 `gamma`/`ridge` grid,
+- Use float64. A float32 fit agrees with float64 at the cross-validated
+  settings, but at a small explicit `gamma` the greedy stops with fewer centres
+  and prediction loses digits to cancellation.
+- The hyperparameter search dominates the cost. A 10x14 `gamma`/`ridge` grid,
   each point refitted `n_folds` times, is the bulk of the runtime. Pass
   `gamma=` and `ridge=` explicitly once you know good values. Raising
   `n_outer`, `n_inner`, or `n_variance` is comparatively cheap, because those
