@@ -181,34 +181,58 @@ def _get_efast_kernel(N: int, M: int, omega_0: int, analysis_max: int):
 
 
 @lru_cache(maxsize=32)
-def _get_curve_chunk(D: int, N: int, width: int):
-    """Build the jitted gather of ``width`` rows of the flattened curve batch.
+def _get_slice_chunk(D: int, N: int, width: int):
+    """Build the jitted gather of ``width`` output slices, all ``D`` curves each.
 
-    Row ``f`` of the ``(D * T * K, N)`` batch is curve ``f // (T * K)`` and
-    output slice ``f % (T * K)``. The reshapes and the gather run inside one
-    executable, so the only new buffer is the ``(width, N)`` chunk. Done
-    eagerly, the reshape of ``Y`` to ``(D, N, T * K)`` alone writes a full
-    copy of ``Y`` on every chunk. The chunk start is a traced scalar, so every
-    chunk of a call shares one compilation, the ragged last one included.
+    The chunk holds every search curve of ``width`` consecutive output
+    slices, as ``D * width`` rows of length ``N``: row ``d * width + j`` is
+    curve ``d`` of slice ``start + j``. The reshapes and the gather run inside
+    one executable, so the only new buffer is the ``(D * width, N)`` chunk.
+    Done eagerly, the reshape of ``Y`` to ``(D, N, T * K)`` alone writes a
+    full copy of ``Y`` on every chunk. The chunk start is a traced scalar, so
+    every chunk of a call shares one compilation, the ragged last one
+    included.
 
     Args:
         D: Number of search curves.
         N: Number of samples per curve.
-        width: Rows per chunk.
+        width: Output slices per chunk.
 
     Returns:
         A jitted function of ``(Y, start)``, with ``Y`` the outputs at any
-        rank, ``(D * N, ...)``, returning the ``(width, N)`` chunk. Rows past
-        the end repeat the last row; the caller drops them.
+        rank, ``(D * N, ...)``, returning the ``(D * width, N)`` chunk.
+        Slices past the end repeat the last slice; the caller drops them.
     """
 
     def fn(Y: Array, start: Array) -> Array:
         flat = Y.reshape(D, N, -1)
         n_slices = flat.shape[2]
-        rows = jnp.minimum(start + jnp.arange(width), D * n_slices - 1)
-        return flat[rows // n_slices, :, rows % n_slices]
+        cols = jnp.minimum(start + jnp.arange(width), n_slices - 1)
+        return flat[:, :, cols].transpose(0, 2, 1).reshape(D * width, N)
 
     return jax.jit(fn)
+
+
+def _slice_width(
+    D: int, N: int, n_slices: int, dtype: np.dtype, slice_chunk_size: int | None
+) -> int:
+    """Resolve the output slices per vmapped batch.
+
+    One output slice costs ``D`` search curves, each a handful of length-N
+    arrays, so the automatic width follows the transient-memory budget.
+
+    Args:
+        D: Number of search curves.
+        N: Number of samples per curve.
+        n_slices: Flattened output slices ``T*K``.
+        dtype: dtype of the outputs.
+        slice_chunk_size: The caller's slices per batch, or ``None``.
+
+    Returns:
+        The width, between 1 and ``n_slices``.
+    """
+    itemsize = jnp.dtype(jnp.result_type(dtype, jnp.float32)).itemsize
+    return resolve_batch_size(_EFAST_LIVE_ARRAYS * D * N * itemsize, n_slices, slice_chunk_size)
 
 
 @partial(jax.jit, static_argnames=("D", "N"))
@@ -259,8 +283,9 @@ def _indices_from_outputs(
         M: Interference factor.
         omega_0: Primary frequency, from the design's frequency plan.
         analysis_max: Top of the analysis band, from the same plan.
-        slice_chunk_size: Output slices per vmapped batch, or ``None`` to
-            derive one from the memory budget.
+        slice_chunk_size: Output slices (of the ``T*K``) per vmapped batch,
+            each with all ``D`` search curves, or ``None`` to derive one from
+            the memory budget.
 
     Returns:
         ``(S1, ST)`` at the caller's own rank: ``(D,)``, ``(K, D)`` or
@@ -274,27 +299,24 @@ def _indices_from_outputs(
         kernel = _get_efast_kernel(N, M, omega_0, analysis_max)
         return kernel(Y.reshape(D, N))  # each (D,)
     T, K = (1, Y.shape[1]) if layout is YLayout.MULTI_OUTPUT else Y.shape[1:]
-    # Batched path: flatten (D, T, K) into a single vmap axis, gathered one
-    # chunk at a time below, so no full-size copy of Y exists.
-    total = D * T * K
-    # One vmapped slice costs a handful of length-N arrays, so the chunk
-    # follows the transient-memory budget when the caller gives no size.
-    itemsize = jnp.dtype(jnp.result_type(Y.dtype, jnp.float32)).itemsize
-    cs = resolve_batch_size(_EFAST_LIVE_ARRAYS * N * itemsize, total, slice_chunk_size)
+    # Batched path: chunk the T*K output slices; each chunk gathers all D
+    # curves of its slices, so no full-size copy of Y exists.
+    total = T * K
+    cs = _slice_width(D, N, total, Y.dtype, slice_chunk_size)
     batched = _get_efast_kernel(N, M, omega_0, analysis_max)
-    gather = _get_curve_chunk(D, N, cs)
+    gather = _get_slice_chunk(D, N, cs)
     s1_parts: list[Array] = []
     st_parts: list[Array] = []
     for start in range(0, total, cs):
-        # The last chunk is padded to cs rows by the gather (it repeats the
-        # final row), so the kernel traces once. Every row is its own vmap
-        # lane, so the padding cannot reach a real row, and it is dropped.
+        # The last chunk is padded to cs slices by the gather (it repeats the
+        # final slice), so the kernel traces once. Every curve is its own
+        # vmap lane, so the padding cannot reach a real one, and it is dropped.
         actual = min(cs, total - start)
         s1_chunk, st_chunk = batched(gather(Y, start))
-        s1_parts.append(s1_chunk[:actual])
-        st_parts.append(st_chunk[:actual])
-    S1_flat = jnp.concatenate(s1_parts)  # (D*T*K,)
-    ST_flat = jnp.concatenate(st_parts)
+        s1_parts.append(s1_chunk.reshape(D, cs)[:, :actual])
+        st_parts.append(st_chunk.reshape(D, cs)[:, :actual])
+    S1_flat = jnp.concatenate(s1_parts, axis=1)  # (D, T*K)
+    ST_flat = jnp.concatenate(st_parts, axis=1)
     # Reshape to (D, T, K), then transpose to the (T, K, D) convention.
     S1 = S1_flat.reshape(D, T, K).transpose(1, 2, 0)
     ST = ST_flat.reshape(D, T, K).transpose(1, 2, 0)
@@ -352,8 +374,10 @@ def indices(
             ``samples.samples``, in the same row order. Shapes are
             those :func:`analyze` accepts: ``(n_runs,)``, ``(n_runs, K)`` or
             ``(n_runs, T, K)``.
-        slice_chunk_size: Number of output slices per vmapped batch. ``None``
-            (default) derives one from the active memory budget. Lower it if
+        slice_chunk_size: Number of output slices (of the ``T*K``) per
+            vmapped batch; each batch runs all ``D`` search curves of its
+            slices. ``None`` (default) derives one from the active memory
+            budget. Lower it if
             you hit device out-of-memory errors. It changes no index.
 
     Returns:
@@ -438,8 +462,9 @@ def analyze(
             - ``(n_runs,)`` for scalar output
             - ``(n_runs, K)`` for K output variables
             - ``(n_runs, T, K)`` for K outputs over T time steps
-        slice_chunk_size: Maximum number of output slices to process in one
-            vmapped batch. It caps peak device memory for a large ``T * K``. A
+        slice_chunk_size: Maximum number of output slices (of the ``T*K``)
+            to process in one vmapped batch, each with all ``D`` search
+            curves, like the other methods. It caps peak device memory for a large ``T * K``. A
             smaller value trades speed for memory. ``None`` (default) derives
             one from the active memory budget
             (:func:`jaxgsa.config.set_memory_budget`). An explicit value must
@@ -557,9 +582,7 @@ def analyze(
         elapsed = _verbose.stop(t0, result.S1, result.ST)
         # Same resolver the kernel loop ran, on the same shapes: cheap
         # arithmetic, reported rather than re-derived by hand.
-        total = D * T * K
-        itemsize = jnp.dtype(jnp.result_type(Y.dtype, jnp.float32)).itemsize
-        cs = resolve_batch_size(_EFAST_LIVE_ARRAYS * N * itemsize, total, slice_chunk_size)
+        cs = _slice_width(D, N, T * K, Y.dtype, slice_chunk_size)
         origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
         chunk_note = f"slice_chunk_size: {cs} ({origin})"
         _verbose.analysis_summary(

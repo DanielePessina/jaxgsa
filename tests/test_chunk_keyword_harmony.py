@@ -154,3 +154,79 @@ def test_sobol_verbose_has_no_resample_chunk_size_line(capsys):
     out = capsys.readouterr().out
     assert "resample_chunk_size" not in out
     assert re.search(r"bootstrap resamples per call: \d+", out), out
+
+
+# --------------------------------------------------------------------------
+# efast: slice_chunk_size counts T*K output slices, each with all D curves
+# --------------------------------------------------------------------------
+
+T_E, K_E = 3, 5  # 15 output slices; widths 4 and 7 leave a ragged last chunk
+
+
+@pytest.fixture(scope="module")
+def efast_case() -> tuple[Any, jax.Array]:
+    design = jaxgsa.efast.sample(PROBLEM, n_per_curve=257, seed=0, verbose=False)
+    X = np.asarray(design.samples)
+    Y = np.stack(
+        [
+            np.stack(
+                [(t + 1) * X[:, 0] + k * X[:, 1] ** 2 + X[:, 0] * X[:, 2] for k in range(K_E)], -1
+            )
+            for t in range(T_E)
+        ],
+        axis=1,
+    )
+    return design, jnp.asarray(Y)
+
+
+def test_efast_widths_agree_with_per_slice_scalar(efast_case):
+    """Every width gives the indices of a scalar analysis of each slice."""
+    design, Y = efast_case
+    ref_S1 = np.empty((T_E, K_E, 3))
+    ref_ST = np.empty((T_E, K_E, 3))
+    for t in range(T_E):
+        for k in range(K_E):
+            r = jaxgsa.efast.analyze(design, Y[:, t, k], verbose=False)
+            assert isinstance(r, jaxgsa.efast.EFASTResult)
+            ref_S1[t, k], ref_ST[t, k] = np.asarray(r.S1), np.asarray(r.ST)
+    for width in (1, 4, 7, None):
+        res = jaxgsa.efast.analyze(design, Y, slice_chunk_size=width, verbose=False)
+        assert isinstance(res, jaxgsa.efast.EFASTResult)
+        np.testing.assert_allclose(np.asarray(res.S1), ref_S1, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(np.asarray(res.ST), ref_ST, rtol=1e-5, atol=1e-6)
+        idx = jaxgsa.efast.indices(design, Y, slice_chunk_size=width)
+        np.testing.assert_allclose(np.asarray(idx.S1), ref_S1, rtol=1e-5, atol=1e-6)
+
+
+def test_efast_width_counts_output_slices(efast_case, monkeypatch):
+    """A user width w gathers w output slices, that is D * w curve rows."""
+    from jaxgsa.efast import _analyze as efast_mod
+
+    design, Y = efast_case
+    rows: list[int] = []
+    real = efast_mod._get_slice_chunk
+
+    def spy(D: int, N: int, width: int):
+        fn = real(D, N, width)
+
+        def wrapped(Y_: jax.Array, start: Any) -> jax.Array:
+            out = fn(Y_, start)
+            rows.append(int(out.shape[0]))
+            return out
+
+        return wrapped
+
+    monkeypatch.setattr(efast_mod, "_get_slice_chunk", spy)
+    jaxgsa.efast.analyze(design, Y, slice_chunk_size=4, verbose=False)
+    assert rows == [3 * 4] * 4  # ceil(15 / 4) chunks of D * 4 rows
+
+
+@pytest.mark.verbose_output
+def test_efast_verbose_prints_output_slices(efast_case, capsys):
+    design, Y = efast_case
+    jaxgsa.efast.analyze(design, Y, slice_chunk_size=4, verbose=True)
+    assert "slice_chunk_size: 4 (user-set)" in capsys.readouterr().out
+    jaxgsa.efast.analyze(design, Y, slice_chunk_size=10**6, verbose=True)
+    assert "slice_chunk_size: 15 (user-set)" in capsys.readouterr().out
+    jaxgsa.efast.analyze(design, Y, verbose=True)
+    assert "slice_chunk_size: 15 (resolved from the memory budget)" in capsys.readouterr().out

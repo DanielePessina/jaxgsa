@@ -117,7 +117,7 @@ Ishigami's analytical answer is `S1 = [0.3139, 0.4424, 0.0]` and
 `ST = [0.5576, 0.4424, 0.2437]`, from 3072 runs here.
 
 `slice_chunk_size` caps how many `(T, K)` output slices go into one vmapped
-batch. It bounds peak device memory when `T * K` is large, and trades speed
+batch. Each batch runs all `D` search curves of its slices. It bounds peak device memory when `T * K` is large, and trades speed
 for memory. `None` derives a width from the memory budget. It changes no index
 beyond float summation order.
 
