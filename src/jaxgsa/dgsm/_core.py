@@ -184,11 +184,23 @@ def jacobian_of(fn: Callable, *, n_inputs: int, n_outputs: int) -> Callable:
         n_outputs: ``T*K``, the number of output slices.
 
     Returns:
-        A callable mapping one ``(D,)`` row to ``(jacobian, y)``.
+        A callable mapping one ``(D,)`` row to ``(jacobian, y)``, both in
+        ``result_type(x, y)``.
     """
     if jacobian_mode(n_inputs=n_inputs, n_outputs=n_outputs) == "forward":
-        return jax.jacfwd(_fn_with_aux(fn), has_aux=True)
-    return jax.jacrev(_fn_with_aux(fn), has_aux=True)
+        jac_fn = jax.jacfwd(_fn_with_aux(fn), has_aux=True)
+    else:
+        jac_fn = jax.jacrev(_fn_with_aux(fn), has_aux=True)
+
+    def promoted(x: Array) -> tuple[Array, Array]:
+        # The Jacobian takes X's dtype and the primal takes fn's. Both go to
+        # their common dtype, so float32 X with a float64 model accumulates
+        # and reports every field in float64, as JAX promotion would.
+        jac, y = jac_fn(x)
+        dtype = jnp.result_type(jac, y)
+        return jac.astype(dtype), jnp.asarray(y).astype(dtype)
+
+    return promoted
 
 
 def _is_hashable(obj: object) -> bool:

@@ -1601,7 +1601,8 @@ def _get_finalize(n: int, n1: int, n2: int, m1: int, m2: int, m3: int, N: int):
         # R <= p makes the test undefined; guard the denominator.
         R_minus_p = jnp.maximum(N - p1, 1.0)
         F_stat = ((SSR0 - SSR1) / p1) / (SSR1 / R_minus_p)
-        select = (F_stat > f_crit_per_term[None]).astype(jnp.float32)
+        # select is a count fraction; it takes the data dtype like every index.
+        select = (F_stat > f_crit_per_term[None]).astype(Sa.dtype)
 
         mse = acc_res2 / N
         # 1 - in-sample MSE / Var(Y), NaN on a zero-variance slice like the

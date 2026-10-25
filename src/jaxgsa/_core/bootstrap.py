@@ -162,9 +162,11 @@ def _replicate_rows(sub: Array, n: int) -> Array:
         n: Number of rows, ``N``.
 
     Returns:
-        An integer array of shape ``(n,)``.
+        An ``int32`` array of shape ``(n,)``. The dtype is fixed so the same
+        key draws the same rows with x64 on and off; with x64 off this is the
+        stream ``jax.random.choice(sub, n, shape=(n,), replace=True)`` draws.
     """
-    return jax.random.choice(sub, n, shape=(n,), replace=True)
+    return jax.random.randint(sub, (n,), 0, n, dtype=jnp.int32)
 
 
 _split_chain_jit = jax.jit(_split_chain, static_argnames=("n_bootstrap",))

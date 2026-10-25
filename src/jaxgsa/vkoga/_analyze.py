@@ -791,7 +791,9 @@ def _bootstrap_replicates(
     for replicate in range(n_bootstrap):
         stream = jax.random.fold_in(key, replicate)
         row_key, index_key = jax.random.split(stream)
-        rows = jax.random.randint(row_key, shape=(n_rows,), minval=0, maxval=n_rows)
+        rows = jax.random.randint(
+            row_key, shape=(n_rows,), minval=0, maxval=n_rows, dtype=jnp.int32
+        )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", JaxgsaWarning)
             _, indices = _fit_and_estimate(

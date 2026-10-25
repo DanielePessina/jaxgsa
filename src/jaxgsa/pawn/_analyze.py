@@ -554,7 +554,8 @@ def _boot_columns(
     )
 
     def _one_replicate(subkey: Array) -> Array:
-        rows = jax.random.choice(subkey, N, shape=(N,), replace=True)
+        # int32 keeps the draw identical with x64 on and off.
+        rows = jax.random.randint(subkey, (N,), 0, N, dtype=jnp.int32)
         bins_rep = bin_idx[rows]
 
         def _ks_one_col(rank_c: Array, y_c: Array) -> Array:

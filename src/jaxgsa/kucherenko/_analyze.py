@@ -642,6 +642,11 @@ def analyze(
     layout = ctx.layout
     n_time, n_out = ctx.Y3.shape[1], ctx.Y3.shape[2]
     out_axes = ctx.Y.shape[1:]
+    # The host estimators run in float64; the results come back in Y's dtype
+    # (float32 data stays float32 under x64).
+    out_dtype = (
+        ctx.Y.dtype if jnp.issubdtype(ctx.Y.dtype, jnp.floating) else jnp.result_type(float)
+    )
     n_slices = n_time * n_out
     # A host view of the caller's Y, blocks first. On a CPU backend this is
     # zero-copy, and NumPy's reshape of it is a view. ctx is dropped so the
@@ -732,7 +737,8 @@ def analyze(
         """Reshape a ``(..., M, S)`` block to the output contract, ``M`` last."""
         lead = index.shape[:-2]
         arr = jnp.asarray(
-            np.moveaxis(index, -2, -1).reshape(*lead, n_time, n_out, index.shape[-2])
+            np.moveaxis(index, -2, -1).reshape(*lead, n_time, n_out, index.shape[-2]),
+            dtype=out_dtype,
         )
         return layout.squeeze(arr, n_trailing=1)
 
@@ -771,7 +777,9 @@ def analyze(
         if all_subsets:
             closed_conf, subset_total_conf = confs["closed"], confs["subset_total"]
 
-    variance_shaped = layout.squeeze(jnp.asarray(variance.reshape(n_time, n_out)), n_trailing=0)
+    variance_shaped = layout.squeeze(
+        jnp.asarray(variance.reshape(n_time, n_out), dtype=out_dtype), n_trailing=0
+    )
     result = KucherenkoResult(
         S1=_shape(S1),
         ST=_shape(ST),
