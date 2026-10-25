@@ -255,9 +255,10 @@ jaxgsa.hsic.analyze(problem, X, Y, *, key, n_perms=200, bandwidth=1.0,
 
 Keep in mind:
 
-- **Use float64.** The V-statistic cancels three large sums against each other,
-  so float32 leaves three or four correct digits and the index changes with the
-  order of the sample rows. `analyze` warns.
+- **float32 is fine for HSIC.** The index is one sum over the product of two
+  centred kernels, so no large sums cancel. On Ishigami up to 4096 samples,
+  float32 stays within 3e-6 relative of float64 for every parameter, a dummy
+  input included. `analyze` does not warn in float32.
 - **Sweep `bandwidth` before reporting a ranking, and say which value you
   used.** It multiplies the median-heuristic length scale, and as the table
   shows it changes which parameter comes first. The result carries `bandwidth`

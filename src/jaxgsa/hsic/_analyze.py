@@ -451,8 +451,12 @@ def _hsic_centered(Kc: Array, Lc: Array) -> Array:
     With ``H = I - (1/n) 1 1^T``, ``tr(K H L H) = sum(HKH * HLH)``, so the
     estimate of :func:`_hsic_v` is one elementwise product sum once both
     kernels are centred. It needs one pass over each matrix instead of
-    three, and it does not subtract three large sums from each other, so it
-    keeps more digits in float32.
+    three, and it does not subtract three large sums from each other, so
+    float32 keeps its digits. Measured on Ishigami with a dummy fourth input
+    at ``N = 128, 2048, 4096``: every float32 ``R2`` is within ``3e-6``
+    relative of float64, the dummy input (``R2`` down to ``6e-4``)
+    included, and a reorder of the sample rows moves an index by at most
+    ``2e-7``. That is why :func:`analyze` does not warn in single precision.
 
     Args:
         Kc: Centred kernel matrix, shape ``(N, N)``.
@@ -1124,42 +1128,6 @@ def _warn_collapsed_median(problem: Problem, X: Array, Y3: Array, stacklevel: in
     )
 
 
-def _warn_single_precision() -> None:
-    """Warn that float32 costs the HSIC V-statistic most of its digits.
-
-    The V-statistic is a difference of three sums over the whole ``(N, N)``
-    kernel matrix, and the three are of the same magnitude while the answer is
-    small. Cancellation therefore eats the leading digits, and what survives
-    is set by the summation order. Reordering the sample rows -- a change that
-    cannot alter the true value -- moves a measured index. On Ishigami with
-    ``N = 2048`` the shift is ``4e-4`` relative in float32 against ``8e-13``
-    in float64, and it grows with ``N`` because the sums do. That is the same
-    size as the gap HSIC is often asked to resolve between two weak
-    parameters.
-
-    The damage is not spread evenly over the parameters. What the rounding
-    costs is roughly a fixed *absolute* amount, set by the epsilon of the
-    three sums, so the *relative* error on an index is that amount divided by
-    the index. On Ishigami at ``N = 128`` the three sums all sit between 0.3
-    and 0.65 while the indices they produce run from ``3e-4`` to ``1e-1``, a
-    cancellation ratio of 6 for the strongest parameter and 2100 for the
-    weakest. The measured relative shift follows that ratio times the machine
-    epsilon of the dtype in both precisions. So a strong parameter keeps most
-    of its float32 digits and a weak one keeps almost none, which is exactly
-    the wrong way round for reading a ranking off the small end.
-    """
-    if not x64_enabled():
-        warnings.warn(
-            "jaxgsa.hsic: JAX is in single precision; the HSIC V-statistic cancels three "
-            "large sums against each other, so float32 leaves only about three or four "
-            "correct digits and the index changes with the order of the sample rows. Small "
-            "indices and close rankings are not reliable. Enable float64 with "
-            'jax.config.update("jax_enable_x64", True) before the analysis.',
-            stacklevel=3,
-            category=JaxgsaWarning,
-        )
-
-
 class HSICIndices(NamedTuple):
     """HSIC indices as plain arrays, in the order :func:`indices` returns them.
 
@@ -1192,7 +1160,7 @@ def indices(
     This is the transformable core of :func:`analyze`. It builds the same
     kernels, runs the same permutation test and returns the same numbers, but
     it does nothing else: no non-finite check, no row dropping, no
-    zero-variance warning, no single-precision warning, no sample-count
+    zero-variance warning, no constant-input warning, no sample-count
     check, no :class:`jaxgsa.hsic.HSICResult`, and no read of any array value
     on the host. So it composes with ``jax.jit``, ``jax.vmap``, ``jax.grad``
     and ``jax.jacrev``, which :func:`analyze` cannot, because a policy
@@ -1443,10 +1411,7 @@ def analyze(
     Warns:
         JaxgsaWarning: If an output slice has zero variance (all indices NaN),
             if a parameter is constant in the sample (its R2 is exactly
-            0), or if JAX is in single precision. The V-statistic subtracts
-            three sums of the same magnitude, so float32 keeps only three or
-            four correct digits and the index moves with the order of the
-            sample rows.
+            0).
     """
     key = as_key(key, "hsic")
     if _is_irregular_y(Y):
@@ -1492,7 +1457,6 @@ def analyze(
     if key is None:
         raise ValueError("key is required for the permutation test")
     _warn_constant_inputs(problem, X)
-    _warn_single_precision()
     _warn_collapsed_median(problem, X, ctx.Y3, _user_stacklevel())
 
     t0 = _verbose.tic()

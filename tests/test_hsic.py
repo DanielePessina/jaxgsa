@@ -9,7 +9,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import single_precision_warning
 
 from jaxgsa import JaxgsaWarning
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
@@ -518,81 +517,54 @@ class TestValidation:
                 entry(problem, X, X[:, 0], key=0)
 
 
-class TestSinglePrecisionWarning:
-    """T4: float32 is called out, because the V-statistic cannot carry it.
+class TestSinglePrecision:
+    """T4: float32 carries HSIC, so ``analyze`` does not warn about it.
 
-    HSIC subtracts three sums of the same magnitude over the whole (N, N)
-    kernel matrix. What is left is small, so cancellation decides most of the
-    digits and the summation order decides the rest: reordering the sample
-    rows moves an index by about 2e-4 relative at N = 2048 in float32, and by
-    about 2e-13 in float64.
+    The index is ``sum(HKH * HLH) / n^2`` from centred kernels, one sum with
+    no large terms that cancel. Measured on Ishigami with a dummy input at
+    N = 128, 2048 and 4096: float32 is within 3e-6 relative of float64 for
+    every parameter, and a row reorder moves an index by at most 2e-7.
     """
 
     def _sample(self, n: int = 256):
-        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        Xj = jnp.asarray(monte_carlo(problem, n_samples=n, seed=31))
-        return problem, Xj, jnp.sin(3.0 * Xj[:, 0]) + Xj[:, 1]
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3)
+        X = np.asarray(monte_carlo(problem, n_samples=n, seed=31), np.float64)
+        return problem, X, np.sin(3.0 * X[:, 0]) + X[:, 1]
 
-    @pytest.mark.parametrize("x64", [False, True], ids=["float32_warns", "x64_is_silent"])
-    def test_the_warning_follows_the_precision(self, x64):
-        """The warning fires in float32 and is absent under x64.
-
-        The precision is forced with ``jax.enable_x64`` rather than read from
-        the ambient default, because the x64 CI job runs this same file with
-        ``JAX_ENABLE_X64=1``. Left implicit, the float32 case would assert
-        the *absence* of the warning there and stop checking what it is named
-        for. ``single_precision_warning`` picks the matching contract.
-        """
-        with jax.enable_x64(x64):
-            problem, Xj, Y = self._sample()
-            with single_precision_warning():
-                analyze(problem, Xj, Y, n_perms=5, key=jax.random.key(0))
+    def test_float32_is_silent(self):
+        """No precision warning fires in float32."""
+        with jax.enable_x64(False):
+            problem, X, Y = self._sample()
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                analyze(problem, jnp.asarray(X), jnp.asarray(Y), n_perms=5, key=0)
+        assert not [w for w in caught if "precision" in str(w.message)]
 
     @pytest.mark.slow
-    def test_reordering_the_rows_is_the_thing_it_warns_about(self):
-        """The claim in the warning, measured: float32 is order-dependent.
+    def test_float32_matches_float64_and_ignores_row_order(self):
+        """float32 agrees with float64, the dummy input included.
 
-        A permutation of the sample cannot change HSIC, so any difference is
-        the arithmetic alone. float64 keeps it at the noise floor; float32
-        does not.
-
-        Both precisions are named explicitly. The float32 half used to ride on
-        the ambient flag, which made it pass for the wrong reason under the
-        x64 CI job: both measurements ran in float64, came back at 1.3e-14,
-        and the comparison of one against a hundred times itself failed. The
-        two arms of a precision comparison have to set their own precision.
+        A permutation of the sample cannot change HSIC, so any difference
+        after a reorder is the arithmetic alone. Each arm sets its own
+        precision, so the x64 CI job still compares two precisions.
         """
-        problem, Xj, Y = self._sample(n=512)
-        perm = np.random.default_rng(0).permutation(512)
+        n = 512
+        problem, X, Y = self._sample(n)
+        perm = np.random.default_rng(0).permutation(n)
 
-        def shift() -> float:
-            X_np, Y_np = np.asarray(Xj, np.float64), np.asarray(Y, np.float64)
-            with warnings.catch_warnings():
+        def r2(x64: bool, rows: np.ndarray) -> np.ndarray:
+            with jax.enable_x64(x64), warnings.catch_warnings():
                 warnings.simplefilter("ignore", JaxgsaWarning)
-                straight = analyze(
-                    problem,
-                    jnp.asarray(X_np),
-                    jnp.asarray(Y_np),
-                    n_perms=5,
-                    key=jax.random.key(0),
+                out = indices(
+                    problem, jnp.asarray(X[rows]), jnp.asarray(Y[rows]), n_perms=5, key=0
                 )
-                shuffled = analyze(
-                    problem,
-                    jnp.asarray(X_np[perm]),
-                    jnp.asarray(Y_np[perm]),
-                    n_perms=5,
-                    key=jax.random.key(0),
-                )
-            a = np.asarray(straight.R2, np.float64)
-            b = np.asarray(shuffled.R2, np.float64)
-            return float(np.max(np.abs(a - b) / np.abs(a)))
+            return np.asarray(out.R2, np.float64)
 
-        with jax.enable_x64(False):
-            shift_32 = shift()
-        with jax.enable_x64():
-            shift_64 = shift()
-        assert shift_64 < 1e-10
-        assert shift_32 > 100.0 * shift_64
+        straight = np.arange(n)
+        r64 = r2(True, straight)
+        assert r64[2] < 1e-2  # the dummy input is weak
+        np.testing.assert_allclose(r2(False, straight), r64, rtol=1e-4)
+        np.testing.assert_allclose(r2(False, perm), r2(False, straight), rtol=1e-4)
 
 
 class TestToDataset:
@@ -846,9 +818,9 @@ class TestIndicesCore:
         traced and baked into the compiled kernel, so the core must still
         agree with ``analyze`` there.
 
-        The core also carries none of the preamble's diagnostics.
-        ``analyze`` warns about single precision on every float32 run, and
-        the core says nothing, because a warning is the preamble's decision.
+        The core also carries none of the preamble's diagnostics: with
+        warnings turned into errors it still runs, because a warning is the
+        preamble's decision.
         """
         problem, X, base = self._ishigami()
         kwargs = {"bandwidth": 0.3} if case == "bandwidth" else {}
@@ -898,13 +870,11 @@ class TestIndicesCore:
     def test_is_jittable(self):
         """T4: ``jit`` traces the core and returns the eager values.
 
-        The tolerance is loose on purpose. An outer ``jit`` lets XLA fuse
-        across the whole core instead of across each eagerly dispatched op,
-        which reassociates the three large sums of the V-statistic. In
-        float32 that cancellation is what the module docstring warns about,
-        and it moves the last few digits. The claim under test is that the
-        traced graph computes the same quantity, not that float32 addition is
-        associative.
+        An outer ``jit`` lets XLA fuse across the whole core instead of
+        across each eagerly dispatched op, which reorders the sums. In
+        float32 that moves the last digits, so the comparison uses a float32
+        tolerance. The claim under test is that the traced graph computes
+        the same quantity, not that float32 addition is associative.
         """
         problem, X, Y = self._ishigami()
         key = jax.random.key(3)
@@ -922,34 +892,18 @@ class TestIndicesCore:
     def test_is_vmappable(self):
         """T4: ``vmap`` maps the core over a batch of output vectors.
 
-        The tolerance here is ``rtol=1e-3, atol=1e-5``, and it is looser
-        than the ``jit`` test above by design rather than by accident.
+        The tolerance is ``rtol=1e-3, atol=1e-5``. ``vmap`` gives every
+        ``(N, N)`` reduction in the core a batch axis, and XLA is then free
+        to reorder those reductions across the batch. Under the old
+        three-sum V-statistic (``U/n^2 - 2V/n^3 + W/n^4``), that moved a
+        weak index by up to 2.6e-4 relative in float32, because the three
+        sums cancelled. The shipped passes still map over the slices with a
+        sequential :func:`jax.lax.map`.
 
-        ``vmap`` gives every ``(N, N)`` reduction in the core a batch
-        axis, and XLA is then free to reassociate those reductions across
-        the batch. A batch axis over the output slices once measured
-        indices moving by up to 1e-3 relative under the old three-sum
-        V-statistic, which is why the shipped passes map over the slices
-        with a sequential :func:`jax.lax.map`.
-
-        What makes HSIC that sensitive is the estimator, not the
-        transform. The V-statistic is ``U/n^2 - 2V/n^3 + W/n^4``, and on
-        this sample the three terms are all near 0.3 to 0.65 while the
-        index they produce runs from 3e-4 to 1e-1. So a weak parameter
-        cancels away about 2000 parts in 2001 of the sums that make it,
-        and a change of summation order at the float32 epsilon of those
-        sums lands on the index magnified by that same 2000. Measured
-        here: the worst relative gap between the two paths is 2.6e-4 in
-        float32 and 4.0e-13 in float64, and both are the machine epsilon
-        of their dtype times the cancellation ratio. That is float32
-        conditioning, not a difference between the two graphs.
-
-        A user reads the same fact from ``analyze``: it warns in single
-        precision that only three or four digits survive and that small
-        indices are not reliable. A transform test cannot be tighter than
-        the number the library itself refuses to promise, so 1e-3 is that
-        documented figure and the atol covers the near-zero indices,
-        where no relative tolerance can mean anything in float32.
+        The index is now ``sum(HKH * HLH) / n^2`` from centred kernels, with
+        no cancellation, and float32 agrees with float64 to about 3e-6 (see
+        ``TestSinglePrecision``). The tolerance is kept as a margin; the
+        atol covers near-zero indices.
         """
         problem, X, base = self._ishigami()
         batch = jnp.stack([base, X[:, 0], X[:, 1] ** 2])
@@ -1151,8 +1105,7 @@ def test_indices_returns_a_named_tuple_that_unpacks():
 
 def test_result_has_ci_none_and_renamed_fields():
     problem, X, Y = _small_problem()
-    with single_precision_warning():
-        result = analyze(problem, X, Y, n_perms=3, key=0, verbose=False)
+    result = analyze(problem, X, Y, n_perms=3, key=0, verbose=False)
     assert result.ci is None
     assert result.R2.shape == (2,) and result.T.shape == (2,)
     assert not hasattr(result, "R2_HSIC")

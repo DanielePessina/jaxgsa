@@ -162,10 +162,11 @@ the non-finite policy refuses, and any categorical parameter. Categorical
 parameters are rejected because the Gaussian input kernel would read a level
 code as a distance, and the code order is arbitrary.
 
-It warns on a zero-variance output slice, and on float32. The V-statistic
-subtracts three sums of the same magnitude, so single precision leaves three or
-four correct digits and the index moves with the row order of the sample. Turn
-x64 on before you trust a small index or a close ranking.
+It warns on a zero-variance output slice, on a constant input, and when
+near-ties make the median bandwidth almost zero. It does not warn on float32.
+The index is one sum over the product of two centred kernels, so no large sums
+cancel. On Ishigami up to N = 4096, float32 stays within 3e-6 relative of
+float64 for every parameter, a dummy input included.
 
 ## Traceable core
 

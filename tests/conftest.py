@@ -76,8 +76,8 @@ def _silence_verbose(request, monkeypatch):
 def single_precision_warning():
     """Assert the float32 warning fires in float32, and is absent under x64.
 
-    ``vkoga.analyze`` and ``hsic.analyze`` warn about single precision only
-    when JAX is actually in float32, which is right. Written as a bare
+    ``vkoga.analyze`` warns about single precision only when JAX is
+    actually in float32, which is right. Written as a bare
     ``pytest.warns``, such a test fails with ``DID NOT WARN`` the moment the
     suite runs with ``JAX_ENABLE_X64=1`` — the test would be precision-blind,
     not the source. The flag is read here rather than at import so a caller
