@@ -92,6 +92,7 @@ from jaxgsa._core.validation import (
     _prepare_Y,
     _reshape_without_copy,
     _validate_output,
+    _zero_variance_mask,
     as_key,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -381,6 +382,14 @@ def _get_delta_kernel(
         groups: tuple[tuple[Array, Array], ...],
     ):
         dtype = jnp.result_type(Y_cols.dtype, jnp.float32)
+        # The same test the zero-variance warning makes, on the same raw
+        # columns, so a column the warning names is the column forced to 0
+        # below. Testing the centred column inside the walk instead would
+        # miss it: a constant float column's mean rounds, so its centred
+        # values, variance and class means are round-off, not zeros, and
+        # ``Vi / var`` divides one round-off by another (S1 = 0.905 for
+        # N=1000 float32 copies of 0.0539).
+        flat_cols = _zero_variance_mask(Y_cols)
         Y_cols = Y_cols.astype(dtype)
         N = Y_cols.shape[0]  # every row belongs to exactly one class per parameter
         # Every column is centred on its sample mean. Delta and S1 are both
@@ -403,7 +412,7 @@ def _get_delta_kernel(
         counts_list = tuple(counts for _, counts in groups)
         cls_list = tuple(cls_idx for cls_idx, _ in groups)
 
-        def _group_stats(y, grid, h_full, fy, y_mean, cls_idx, mask_b, counts_b):
+        def _group_stats(y, grid, h_full, fy, y_mean, flat, cls_idx, mask_b, counts_b):
             """Per-parameter delta/S1 numerators and floor flag for one group.
 
             ``mask_b``, shape ``(G, M, P)``, and ``counts_b``, shape
@@ -411,7 +420,9 @@ def _get_delta_kernel(
             parameter axis Dg. ``G`` is either 1 or Dg. A zero-size class
             has zero standard deviation and therefore zero bandwidth, so
             its density is dropped. Its zero count also removes it from
-            every weighted sum.
+            every weighted sum. ``flat`` marks a constant column: every
+            class then gets bandwidth 0 too, whatever round-off its
+            variance holds.
             """
             safe_counts = jnp.maximum(counts_b, 1.0)
             y_cls = y[cls_idx]  # (Dg, M, P) resampled class members
@@ -420,7 +431,7 @@ def _get_delta_kernel(
             var = (dev**2).sum(axis=-1) / jnp.maximum(counts_b - 1.0, 1.0)
             # Double where: sqrt'(0) is infinite, so a zero-variance class
             # would turn a zero cotangent into NaN in reverse mode.
-            pos_var = var > 0
+            pos_var = (var > 0) & ~flat
             std = jnp.where(pos_var, jnp.sqrt(jnp.where(pos_var, var, 1.0)), 0.0)
             h = _kde_bandwidths(safe_counts, std, bw_factor)  # (Dg, M)
             # A degenerate class is one the output grid cannot resolve. A
@@ -462,7 +473,7 @@ def _get_delta_kernel(
             Vi = (counts_b / N * (mean - y_mean) ** 2).sum(axis=-1)
             return delta, Vi, floored_cls.any()
 
-        def _col_stats(y: Array, grid: Array, centre: Array, r: Array, layouts):
+        def _col_stats(y: Array, grid: Array, centre: Array, zero: Array, r: Array, layouts):
             """Delta, S1, degeneracy and floor flags for one column/replicate.
 
             The per-replicate column statistics are the resampled column,
@@ -470,28 +481,35 @@ def _get_delta_kernel(
             them once and shares them with every partition group. It then
             concatenates the group results on the parameter axis in group
             order. ``y`` arrives raw and is centred on ``centre`` here.
+            ``zero`` is the column's zero-variance flag from the warning's
+            test. A flagged column, or a resample with one repeated value,
+            gets delta and S1 of exactly 0. Every guard below switches on
+            that flag before any division, so the zeros carry a zero
+            gradient rather than a NaN.
             """
             y = y - centre
             y_r = y[r]  # resampled column
             # Double where, as in _group_stats: a constant column must give a
             # zero gradient, not NaN.
+            degenerate = y_r.max() == y_r.min()
+            flat = zero | degenerate
             var_r = jnp.var(y_r, ddof=1)
-            pos_var_r = var_r > 0
+            pos_var_r = (var_r > 0) & ~flat
             std_r = jnp.where(pos_var_r, jnp.sqrt(jnp.where(pos_var_r, var_r, 1.0)), 0.0)
             h_full = _kde_bandwidths(jnp.asarray(float(N), dtype=dtype), std_r, bw_factor)
             fy = _kde_full(y_r, grid, h_full)
-            degenerate = y_r.max() == y_r.min()
             y_mean = y_r.mean()
             y_var = jnp.var(y_r)
-            safe_var = jnp.where(y_var > 0, y_var, 1.0)
+            pos_var = (y_var > 0) & ~flat
+            safe_var = jnp.where(pos_var, y_var, 1.0)
 
             outs = [
-                _group_stats(y, grid, h_full, fy, y_mean, cls_idx, mask_b, counts_b)
+                _group_stats(y, grid, h_full, fy, y_mean, flat, cls_idx, mask_b, counts_b)
                 for cls_idx, mask_b, counts_b in layouts
             ]
-            delta = jnp.concatenate([o[0] for o in outs])
+            delta = jnp.where(flat, 0.0, jnp.concatenate([o[0] for o in outs]))
             Vi = jnp.concatenate([o[1] for o in outs])
-            s1 = jnp.where(y_var > 0, Vi / safe_var, 0.0)
+            s1 = jnp.where(pos_var, Vi / safe_var, 0.0)
             floored = jnp.stack([o[2] for o in outs]).any()
             return delta, s1, degenerate, floored
 
@@ -512,12 +530,12 @@ def _get_delta_kernel(
                 layouts.append((cls_r, mask_r, counts_r.astype(dtype)))
             if col_batch is None or col_batch >= Y_cols.shape[1]:
                 d, s1, degen, floored = jax.vmap(
-                    lambda y, grid, c: _col_stats_remat(y, grid, c, r, layouts)
-                )(Y_cols.T, grids, centres)
+                    lambda y, grid, c, z: _col_stats_remat(y, grid, c, z, r, layouts)
+                )(Y_cols.T, grids, centres, flat_cols)
             else:
                 d, s1, degen, floored = jax.lax.map(
-                    lambda ygc: _col_stats_remat(ygc[0], ygc[1], ygc[2], r, layouts),
-                    (Y_cols.T, grids, centres),
+                    lambda ygc: _col_stats_remat(ygc[0], ygc[1], ygc[2], ygc[3], r, layouts),
+                    (Y_cols.T, grids, centres, flat_cols),
                     batch_size=col_batch,
                 )
             return carry, (d, s1, degen, floored)
