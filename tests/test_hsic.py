@@ -927,10 +927,10 @@ class TestIndicesCore:
 
         ``vmap`` gives every ``(N, N)`` reduction in the core a batch
         axis, and XLA is then free to reassociate those reductions across
-        the batch. :func:`jaxgsa.hsic._analyze._get_hsic_kernel` records
-        that measurement: a batch axis over the output slices moved
-        indices by up to 1e-3 relative, which is why the shipped map is a
-        sequential :func:`jax.lax.map` and takes no chunk width.
+        the batch. A batch axis over the output slices once measured
+        indices moving by up to 1e-3 relative under the old three-sum
+        V-statistic, which is why the shipped passes map over the slices
+        with a sequential :func:`jax.lax.map`.
 
         What makes HSIC that sensitive is the estimator, not the
         transform. The V-statistic is ``U/n^2 - 2V/n^3 + W/n^4``, and on

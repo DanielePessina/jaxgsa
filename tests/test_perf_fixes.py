@@ -49,12 +49,15 @@ def test_pairwise_quantile_matches_jnp_quantile() -> None:
 
 
 def test_input_kernels_match_per_input_build() -> None:
-    """The vmapped bandwidth step gives the same kernels as a per-input build."""
+    """The vmapped bandwidth step and the fused centring match a per-input build."""
     X = jax.random.uniform(jax.random.key(2), (80, 3))
-    stack, *_ = jax.jit(hsic_impl._input_setup, static_argnames=("total", "bandwidth"))(
-        X, jax.random.key(0), total=2, bandwidth=1.0
-    )
+    x_med, _ = hsic_impl._medians(X, X[:, :1])
+    got = jax.jit(
+        lambda X, m: jnp.stack([hsic_impl._centered_kernel(X[:, d], m[d], 1.0) for d in range(3)])
+    )(X, x_med)
     want = jax.jit(
-        lambda X: jnp.stack([hsic_impl._build_one_kernel(X[:, d], 1.0) for d in range(3)])
+        lambda X: jnp.stack(
+            [hsic_impl._center_kernel(hsic_impl._build_one_kernel(X[:, d], 1.0)) for d in range(3)]
+        )
     )(X)
-    np.testing.assert_allclose(np.asarray(stack), np.asarray(want), rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-6)

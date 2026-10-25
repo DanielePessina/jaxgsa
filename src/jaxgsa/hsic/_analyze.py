@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from functools import lru_cache, partial
+from functools import partial
 from typing import NamedTuple, cast
 
 import jax
@@ -420,13 +420,6 @@ def _build_one_kernel(x: Array, bandwidth: float) -> Array:
     heuristic already carries the scale of ``x``, so the kernel -- and every
     index built from it -- is unchanged under ``x -> a*x + b``.
 
-    There is deliberately no row blocking here, and no batching keyword
-    anywhere in HSIC. The estimator's peak memory is the *resident* kernel
-    stacks -- the D raw input kernels, their D augmented complements, the full
-    augmented product and one output kernel, ~``(2D + 1) * N^2`` floats at
-    once -- and a row-blocked build only bounded a transient of one build
-    while that stack stayed resident. It was measured useless and removed.
-
     Args:
         x: Values for one variable, shape ``(N,)``.
         bandwidth: Positive multiplier on the median-heuristic bandwidth.
@@ -452,359 +445,542 @@ def _kernel_from_median(x: Array, median_sq: Array, bandwidth: float) -> Array:
     return jnp.exp(-((x[:, None] - x[None, :]) ** 2) / (2.0 * sigma_sq))
 
 
-def _augment(K: Array) -> Array:
-    """Return the augmented kernel ``1 + center(K)`` of one input kernel.
+def _hsic_centered(Kc: Array, Lc: Array) -> Array:
+    """Compute the V-statistic HSIC from two centred kernels.
+
+    With ``H = I - (1/n) 1 1^T``, ``tr(K H L H) = sum(HKH * HLH)``, so the
+    estimate of :func:`_hsic_v` is one elementwise product sum once both
+    kernels are centred. It needs one pass over each matrix instead of
+    three, and it does not subtract three large sums from each other, so it
+    keeps more digits in float32.
 
     Args:
-        K: Raw kernel matrix, shape ``(N, N)``.
+        Kc: Centred kernel matrix, shape ``(N, N)``.
+        Lc: Centred kernel matrix, shape ``(N, N)``.
 
     Returns:
-        Augmented kernel matrix, shape ``(N, N)``.
+        Scalar HSIC value.
     """
-    return jnp.ones_like(K) + _center_kernel(K)
+    n = Kc.shape[-1]
+    return jnp.sum(Kc * Lc) / jnp.asarray(n, dtype=Kc.dtype) ** 2
 
 
-def _complement_kernels_inplace(Ks_stack: Array) -> tuple[Array, Array]:
-    """Build the full augmented product kernel and every complement product.
+class _Plan(NamedTuple):
+    """How many ``(N, N)`` input-side matrices each pass keeps live at once.
 
-    The augmented kernel is ``K*_d = 1 + center(K_d)``: it carries a constant
-    term, so the product over inputs captures all interaction orders, not
-    just the highest. Correct total HSIC indices need this.
+    Attributes:
+        input_chunk: Centred input kernels held during the R2 and
+            permutation pass.
+        total_chunk: Complement products held during the total-index pass.
+    """
 
-    A prefix-suffix pass gives all D complements in linear time, and it runs
-    in place inside the output buffer. A backward loop writes the suffix
-    products into the output; a forward loop multiplies a running prefix into
-    each slot. Each step recomputes ``K*_d`` from the raw kernel rather than
-    holding a stack of augmented kernels, and nothing is kept as a Python
-    list, so the transient memory is a few ``(N, N)`` matrices, not
-    ``O(D N^2)``. The products are formed in the same order as the list
-    version, so the result agrees with it to rounding error (about 3e-6 in
-    float32 and 5e-15 in float64), not bit for bit.
+    input_chunk: int
+    total_chunk: int
+
+
+_R_FIXED_MATRICES = 4
+"""Matrices the first-order pass holds besides the input chunk: the centred
+output kernel, one kernel being built and its transients. Calibrated against
+the peak process RSS at ``N = 4096``, which sits about two matrices above
+XLA's own temp-buffer estimate."""
+
+_T_FIXED_MATRICES = 6
+"""Matrices the total-index pass holds besides the chunk: the running prefix,
+one augmented kernel being built, the full product, the centred output kernel
+and transients. Calibrated against the peak process RSS at ``N = 4096``."""
+
+
+def _plan(d: int, n: int, itemsize: int) -> _Plan:
+    """Size the chunks of the two passes from the memory budget.
+
+    The working set of each pass is a fixed number of ``(N, N)`` matrices plus
+    one per chunk member, so the budget of :func:`get_memory_budget` gives the
+    chunk widths directly. Every width is at least 1: the estimator needs a
+    few ``(N, N)`` matrices whatever the budget, and a budget below that is
+    exceeded by those few.
 
     Args:
-        Ks_stack: Stacked raw kernel matrices, shape ``(D, N, N)``.
-
-    Returns:
-        ``(K_full, complements)``. ``K_full`` is the Hadamard product of all
-        augmented kernels, shape ``(N, N)``. ``complements[d]`` is the
-        product of every augmented kernel except ``d``, stacked to
-        ``(D, N, N)``.
-    """
-    D = Ks_stack.shape[0]
-    if D == 1:
-        return _augment(Ks_stack[0]), jnp.ones_like(Ks_stack)
-
-    def _back(i: int, out: Array) -> Array:
-        """Write suffix[d] = suffix[d + 1] * K*_{d + 1} with d = D - 2 - i."""
-        d = D - 2 - i
-        return out.at[d].set(out[d + 1] * _augment(Ks_stack[d + 1]))
-
-    out0 = jnp.zeros_like(Ks_stack).at[D - 1].set(jnp.ones_like(Ks_stack[0]))
-    out = jax.lax.fori_loop(0, D - 1, _back, out0)
-
-    def _fwd(d: int, carry: tuple[Array, Array]) -> tuple[Array, Array]:
-        """Multiply the running prefix into slot d, then extend the prefix."""
-        out, prefix = carry
-        out = out.at[d].set(prefix * out[d])
-        return out, prefix * _augment(Ks_stack[d])
-
-    out, K_full = jax.lax.fori_loop(0, D, _fwd, (out, jnp.ones_like(Ks_stack[0])))
-    return K_full, out
-
-
-def _complement_kernels_listed(Ks_stack: Array) -> tuple[Array, Array]:
-    """Build the same products with Python lists, for the backward pass.
-
-    Autodiff through the in-place loops stores a ``(D, N, N)`` carry per step
-    and roughly doubles the gradient's memory. This list form differentiates
-    cheaply, so :func:`_complement_kernels` uses it inside its custom VJP.
-
-    Args:
-        Ks_stack: Stacked raw kernel matrices, shape ``(D, N, N)``.
-
-    Returns:
-        Same as :func:`_complement_kernels`.
-    """
-    D = Ks_stack.shape[0]
-    aug = [_augment(Ks_stack[d]) for d in range(D)]
-    prefix = [jnp.ones_like(aug[0])] * D
-    for i in range(1, D):
-        prefix[i] = prefix[i - 1] * aug[i - 1]
-    suffix = [jnp.ones_like(aug[0])] * D
-    for i in range(D - 2, -1, -1):
-        suffix[i] = suffix[i + 1] * aug[i + 1]
-    return prefix[-1] * aug[-1], jnp.stack([prefix[d] * suffix[d] for d in range(D)])
-
-
-@jax.custom_vjp
-def _complement_kernels(Ks_stack: Array) -> tuple[Array, Array]:
-    """Build the full augmented product and every complement product.
-
-    The forward value comes from the in-place loops of
-    :func:`_complement_kernels_inplace`, which keep transient memory at a few
-    ``(N, N)`` matrices. The gradient uses the list form
-    (:func:`_complement_kernels_listed`), recomputed in the backward pass.
-
-    Args:
-        Ks_stack: Stacked raw kernel matrices, shape ``(D, N, N)``.
-
-    Returns:
-        ``(K_full, complements)``, shapes ``(N, N)`` and ``(D, N, N)``.
-    """
-    return _complement_kernels_inplace(Ks_stack)
-
-
-def _complement_fwd(Ks_stack: Array):
-    """Forward rule: keep only the input as the residual."""
-    return _complement_kernels_inplace(Ks_stack), Ks_stack
-
-
-def _complement_bwd(Ks_stack: Array, cotangents: tuple[Array, Array]):
-    """Backward rule: differentiate the list form."""
-    _, vjp = jax.vjp(_complement_kernels_listed, Ks_stack)
-    return vjp(cotangents)
-
-
-_complement_kernels.defvjp(_complement_fwd, _complement_bwd)
-
-
-# Transient (N, N) matrices one kernel costs inside _hsic_v when vectorised.
-_VMAP_TRANSIENT_MATRICES = 4
-
-
-def _fits_vectorised(d: int, n: int, itemsize: int) -> bool:
-    """Say whether a vmap over ``d`` kernels fits the transient-memory budget.
-
-    HSIC has no batch parameter. A vmap over D kernels materialises about
-    ``D`` extra ``(N, N)`` matrices (XLA broadcasts the output kernel to
-    ``(D, N, N)``), so the global budget decides: small problems stay
-    vectorised, large ones go through a sequential ``lax.map``. A partial
-    ``batch_size`` is not offered: it reshapes the stack, and XLA then
-    copies the whole stack.
-
-    Args:
-        d: Number of stacked kernels.
-        n: Number of samples ``N``.
+        d: Number of inputs.
+        n: Number of samples.
         itemsize: Bytes per float.
 
     Returns:
-        True when the vectorised form is within budget.
+        The chunk widths.
     """
-    return d * _VMAP_TRANSIENT_MATRICES * n * n * itemsize <= get_memory_budget()
+    n_mat = get_memory_budget() // (n * n * itemsize)
+    input_chunk = max(1, min(d, n_mat - _R_FIXED_MATRICES))
+    total_chunk = max(1, min(d, n_mat - _T_FIXED_MATRICES))
+    return _Plan(input_chunk, total_chunk)
 
 
-def _hsic_against(Ks: Array, L: Array, vectorised: bool) -> Array:
-    """Compute ``HSIC(K, L)`` for every kernel in a stack.
+def _pad_columns(X: Array, medians: Array, chunk: int) -> tuple[Array, Array, int]:
+    """Pad the inputs with constant columns to a whole number of chunks.
+
+    A constant column has an all-ones kernel, whose centred form is exactly
+    0. So a padded column adds an exact 0 to the first-order pass, whose
+    results for it are dropped anyway, and an augmented kernel of exactly 1
+    to the total-index products, which leaves them unchanged.
 
     Args:
-        Ks: Stacked kernels, shape ``(D, N, N)``.
-        L: Kernel matrix, shape ``(N, N)``.
-        vectorised: ``vmap`` over the stack when True, else a sequential
-            ``lax.map``. Decided by the caller from the memory budget
-            (:func:`_fits_vectorised`), outside the jit, so a budget change
-            reaches the compiled kernel through its cache key.
+        X: Inputs on the unit interval, shape ``(N, D)``.
+        medians: Median-heuristic squared bandwidths, shape ``(D,)``.
+        chunk: Inputs per chunk.
 
     Returns:
-        HSIC values, shape ``(D,)``.
+        ``(X_pad, medians_pad, n_chunks)``.
     """
-    if vectorised:
-        return jax.vmap(lambda K: _hsic_v(K, L))(Ks)
-    return jax.lax.map(lambda K: _hsic_v(K, L), Ks)
+    n, d = X.shape
+    n_chunks = -(-d // chunk)
+    pad = n_chunks * chunk - d
+    X_pad = jnp.concatenate([X, jnp.zeros((n, pad), dtype=X.dtype)], axis=1)
+    medians_pad = jnp.concatenate([medians, jnp.ones((pad,), dtype=medians.dtype)])
+    return X_pad, medians_pad, n_chunks
 
 
-@partial(jax.jit, static_argnames=("total", "bandwidth"))
-def _input_setup(
-    X_unit: Array, key: Array, total: int, bandwidth: float
-) -> tuple[Array, Array, Array, Array, Array]:
-    """Build everything that depends only on ``X`` and the key, in one jit.
+def _centered_kernel(x: Array, median_sq: Array, bandwidth: float) -> Array:
+    """Build the centred Gaussian kernel ``HKH`` of one variable.
 
-    Running this op by op outside ``jit`` cost far more in dispatch than in
-    arithmetic. The input kernels and augmented products are built once
-    (independent of Y). They are stacked directly and the augmented and
-    complement kernels are built from the stack, so no per-input Python list
-    of ``(N, N)`` matrices survives to the kernel call -- resident memory is
-    the two stacks and the full product, ``(2D + 1) * N^2`` floats.
+    The kernel is symmetric, so its column means are its row means and one
+    reduction gives both. Nothing forces the raw kernel to be written out:
+    XLA may fuse the exponential into the reduction and into whatever reads
+    the result.
+
+    Args:
+        x: Values for one variable, shape ``(N,)``.
+        median_sq: Median-heuristic squared bandwidth of ``x``, a scalar.
+        bandwidth: Positive multiplier on the median-heuristic bandwidth.
+
+    Returns:
+        Centred kernel matrix, shape ``(N, N)``.
+    """
+    K = _kernel_from_median(x, median_sq, bandwidth)
+    r = jnp.mean(K, axis=1)
+    return K - r[:, None] - r[None, :] + jnp.mean(r)
+
+
+def _column(X: Array, medians: Array, j: Array) -> tuple[Array, Array]:
+    """Read column ``j`` and its median behind an optimisation barrier.
+
+    Inside a loop ``j`` is traced. Without the barrier XLA fuses the dynamic
+    slice into the ``(N, N)`` exponential that reads it, and the fused loop
+    no longer vectorises: building one kernel inside a ``fori_loop`` measured
+    56 ms at ``N = 4096`` against 8 ms with the column read out first.
+
+    Args:
+        X: Samples, shape ``(N, C)``.
+        medians: Median-heuristic squared bandwidths, shape ``(C,)``.
+        j: Column index (may be traced).
+
+    Returns:
+        ``(x, median_sq)``: the column, shape ``(N,)``, and its median.
+    """
+    return jax.lax.optimization_barrier((X[:, j], medians[j]))
+
+
+def _out_kernel(Y_cols: Array, y_med: Array, t: Array, bandwidth: float) -> Array:
+    """Build the centred kernel of output slice ``t``.
+
+    The barrier stops XLA fusing the kernel build into the reductions that
+    read it, which would recompute the exponential inside each of them. The
+    kernel is read many times per slice, so materialising it once is cheaper.
+
+    Args:
+        Y_cols: Output columns, shape ``(N, total)``.
+        y_med: Median-heuristic squared bandwidths, shape ``(total,)``.
+        t: Slice index (may be traced).
+        bandwidth: Multiplier on the median-heuristic bandwidth.
+
+    Returns:
+        Centred output kernel, shape ``(N, N)``.
+    """
+    y, med = _column(Y_cols, y_med, t)
+    return jax.lax.optimization_barrier(_centered_kernel(y, med, bandwidth))
+
+
+@jax.jit
+def _medians(X_unit: Array, Y_cols: Array) -> tuple[Array, Array]:
+    """Return the median-heuristic squared bandwidths of every input and output.
+
+    One vmapped selection instead of one inlined copy per variable halves the
+    compile time.
 
     Args:
         X_unit: Inputs mapped to the unit interval, shape ``(N, D)``.
-        key: PRNG key for the permutation test.
-        total: Number of output slices (static).
-        bandwidth: Multiplier on the median-heuristic bandwidth (static).
+        Y_cols: Output columns, shape ``(N, total)``.
 
     Returns:
-        ``(Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, keys)`` with
-        the shapes :func:`_get_hsic_kernel` documents, and ``keys`` of shape
-        ``(total,)`` holding ``fold_in(key, i)`` for each slice.
+        ``(x_med, y_med)``, shapes ``(D,)`` and ``(total,)``.
     """
-    # One vmapped bandwidth selection instead of D inlined copies halves the
-    # compile time. The kernels are built one at a time with lax.map, which
-    # writes each into the stack. How the exponential is batched or fused
-    # can move the last bit of the indices; the result agrees with a
-    # per-input build to rounding error.
-    medians = jax.vmap(_median_bandwidth_sq, in_axes=1)(X_unit)
-    # lax.map writes each kernel straight into the stack. A Python list of D
-    # kernels joined by jnp.stack holds a second copy at the join.
-    Ks_stack = jax.lax.map(
-        lambda args: _kernel_from_median(args[0], args[1], bandwidth),
-        (X_unit.T, medians),
-    )
-    K_aug_full, K_aug_compls_stack = _complement_kernels(Ks_stack)
-    # Self-HSIC HSIC(K_d, K_d) is output-independent, so compute it once
-    # here and share it across every output slice.
-    hsic_xxs = jax.lax.map(lambda K: _hsic_v(K, K), Ks_stack)
-    keys = jax.vmap(lambda i: jax.random.fold_in(key, i))(jnp.arange(total))
-    return Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, keys
+    pick = jax.vmap(_median_bandwidth_sq, in_axes=1)
+    return pick(X_unit), pick(Y_cols)
 
 
-@lru_cache(maxsize=32)
-def _get_hsic_kernel(n_perms: int, bandwidth: float, vectorised: bool):
-    """Return a JIT-compiled HSIC kernel for every output slice.
+@partial(jax.jit, static_argnames=("n_perms", "bandwidth", "chunk"))
+def _first_order_pass(
+    X_unit: Array,
+    Y_cols: Array,
+    x_med: Array,
+    y_med: Array,
+    keys: Array,
+    *,
+    n_perms: int,
+    bandwidth: float,
+    chunk: int,
+) -> tuple[Array, Array, Array, Array]:
+    """Compute the HSIC values behind R2 and the permutation test.
 
-    The atomic unit is one output slice: it builds that slice's output
-    kernel, forms the indices against the shared input kernels, and runs the
-    permutation test. The returned callable maps that unit over all the
-    slices in one compiled call, so the whole analysis costs one dispatch
-    instead of one per slice, and no result travels through the host in
-    between.
+    The inputs are taken ``chunk`` at a time. A chunk of centred input
+    kernels is built once and shared by every output slice and every
+    permutation, so the input kernels are never rebuilt per slice and never
+    all held at once. For each slice the centred output kernel is built once;
+    each permutation reads it through two ``take`` gathers that XLA fuses
+    into the reduction, so no permuted ``(N, N)`` matrix is written.
 
-    Everything that depends only on ``X`` -- the input kernels, their
-    augmented products and complements, and the self-HSIC values -- is a
-    plain argument here. The caller builds it once and hands the same arrays
-    to the one call.
+    Centring commutes with a permutation, so the permuted centred kernel is
+    the centred permuted kernel, and each HSIC value is one product sum
+    (:func:`_hsic_centered`). Slice ``t`` splits ``keys[t]`` into its
+    ``n_perms`` permutation keys, as a scalar analysis of that slice does, so
+    the draws do not depend on the chunking.
 
-    The map is :func:`jax.lax.map`, which runs the atomic kernel one slice at
-    a time. So one slice's working set is live however many slices the output
-    has, and slice i of a hundred returns bit-for-bit what a scalar analysis
-    of that slice returns.
-
-    The chunked ``vmap`` the rest of the library uses was measured here and
-    rejected. ``jax.lax.map(..., batch_size=c)`` and ``jax.vmap`` over a chunk
-    of c slices ran at the same speed as this scan on a CPU backend -- the
-    per-slice work is a chain of ``(N, N)`` reductions that already saturates
-    the machine and gains nothing from a batch axis -- while letting XLA
-    reassociate those reductions across the chunk. That moved indices by up
-    to 1e-3 relative, because the V-statistic is a difference of three large
-    terms and float32 cancellation magnifies any change of summation order.
-    A chunk that is no faster and changes the answer is not worth a keyword,
-    so there is none. On a device that does reward a batch axis the trade
-    would have to be measured again.
+    Peak memory is about ``chunk + 4`` matrices of shape ``(N, N)``
+    (``_R_FIXED_MATRICES``, measured as process RSS).
 
     Args:
-        n_perms: Number of permutations for the permutation test (static;
-            it sets the scan length and the number of split keys).
-        bandwidth: Multiplier on the median-heuristic bandwidth of the
-            output kernel (static; it is a compile-time constant).
+        X_unit: Inputs mapped to the unit interval, shape ``(N, D)``.
+        Y_cols: Output columns, shape ``(N, total)``.
+        x_med: Input median-heuristic squared bandwidths, shape ``(D,)``.
+        y_med: Output median-heuristic squared bandwidths, shape ``(total,)``.
+        keys: One PRNG key per output slice, shape ``(total,)``.
+        n_perms: Number of permutations (static).
+        bandwidth: Multiplier on the median-heuristic bandwidth (static).
+        chunk: Input kernels held at once (static).
 
     Returns:
-        A jitted callable that returns ``(R2, T, p_values,
-        hsic_raw)``, each of shape ``(total, D)``. It takes the stacked input
-        kernels, the precomputed self-HSIC values, the ``(N, total)`` output
-        columns, and one PRNG key per column.
+        ``(hsic_yy, hsic_xx, hsic_xy, counts)``: the output self-HSIC
+        ``(total,)``, the input self-HSIC ``(D,)``, ``HSIC(x_d, y_t)`` of
+        shape ``(total, D)``, and the number of permutations whose HSIC
+        reached the unpermuted one, ``(total, D)``.
     """
+    n, d = X_unit.shape
+    total = Y_cols.shape[1]
 
-    def _one_slice(
-        Ks_stack: Array,
-        K_aug_compls_stack: Array,
-        K_aug_full: Array,
-        hsic_xxs: Array,
-        y_col: Array,
-        key: Array,
-    ) -> tuple[Array, Array, Array, Array]:
-        """Compute HSIC indices for one output slice.
+    def self_hsic(t: Array) -> Array:
+        Lc = _out_kernel(Y_cols, y_med, t, bandwidth)
+        return _hsic_centered(Lc, Lc)
 
-        Args:
-            Ks_stack: Stacked raw input kernels ``(D, N, N)``.
-            K_aug_compls_stack: Stacked complement augmented kernels
-                ``(D, N, N)``.
-            K_aug_full: Product of all augmented input kernels ``(N, N)``.
-            hsic_xxs: Precomputed self-HSIC ``HSIC(K_d, K_d)`` of shape
-                ``(D,)`` (output-independent, so computed once).
-            y_col: Single output column, shape ``(N,)``.
-            key: PRNG key for the permutation test.
+    hsic_yy = jax.lax.map(self_hsic, jnp.arange(total))
+    Xr, mr, n_chunks = _pad_columns(X_unit, x_med, chunk)
+    perm_keys = jax.vmap(lambda k: jax.random.split(k, n_perms))(keys)
 
-        Returns:
-            ``(R2, T, p_values, hsic_raw)`` each of shape ``(D,)``.
+    def one_chunk(start: Array) -> tuple[Array, Array, Array]:
+        """Self-HSIC, HSIC and exceedance counts of one input chunk."""
+
+        def in_kernel(j: Array) -> Array:
+            return _centered_kernel(*_column(Xr, mr, j), bandwidth)
+
+        Kc = jax.lax.map(in_kernel, start + jnp.arange(chunk))
+        n_sq = jnp.asarray(n, dtype=Kc.dtype) ** 2
+
+        def score(Lc: Array) -> Array:
+            """HSIC of every kernel of the chunk against one centred kernel."""
+            return jnp.sum(Kc * Lc[None], axis=(1, 2)) / n_sq
+
+        hxx = jax.lax.map(lambda K: _hsic_centered(K, K), Kc)
+
+        def one_slice(args: tuple[Array, Array]) -> tuple[Array, Array]:
+            t, pkeys = args
+            Lc = _out_kernel(Y_cols, y_med, t, bandwidth)
+            raw = score(Lc)
+
+            def body(counts: Array, pkey: Array) -> tuple[Array, None]:
+                """Add one permutation draw's exceedance counts to the running total."""
+                perm = jax.random.permutation(pkey, n)
+                # Left unmaterialised on purpose: XLA fuses the two takes
+                # into the reduction in score(), which measured 4x faster
+                # than writing the permuted kernel out and reading it back.
+                Lp = jnp.take(jnp.take(Lc, perm, axis=0), perm, axis=1)
+                return counts + (score(Lp) >= raw).astype(counts.dtype), None
+
+            counts, _ = jax.lax.scan(body, jnp.zeros((chunk,), dtype=jnp.int32), pkeys)
+            return raw, counts
+
+        raw, counts = jax.lax.map(one_slice, (jnp.arange(total), perm_keys))
+        return hxx, raw, counts
+
+    hxx, raw, counts = jax.lax.map(one_chunk, jnp.arange(n_chunks) * chunk)
+    hxx = hxx.reshape(-1)[:d]
+    raw = jnp.moveaxis(raw, 0, 1).reshape(total, -1)[:, :d]
+    counts = jnp.moveaxis(counts, 0, 1).reshape(total, -1)[:, :d]
+    return hsic_yy, hxx, raw, counts
+
+
+def _total_streamed(
+    X_unit: Array,
+    Y_cols: Array,
+    x_med: Array,
+    y_med: Array,
+    bandwidth: float,
+    chunk: int,
+) -> tuple[Array, Array]:
+    """Compute the HSIC values behind the total index, chunk by chunk.
+
+    Total HSIC uses augmented kernels ``A_d = 1 + center(K_d)`` (Larsen &
+    Alexanderian, 2026): the constant term makes the product over inputs
+    carry every interaction order, which correct total indices need. For a
+    chunk of inputs, the product of the augmented kernels of the earlier
+    chunks is carried over and the product of the later ones is streamed one
+    kernel at a time. A prefix-suffix pass inside the chunk
+    then writes each complement product ``prod_{e != d} A_e`` in place.
+    Each augmented kernel is rebuilt from ``X`` when it is needed instead of
+    being stored, so peak memory is about ``chunk + 6`` matrices of shape
+    ``(N, N)`` (``_T_FIXED_MATRICES``) and the cost is about ``D^2 / (2 chunk)``
+    kernel builds.
+
+    The output kernel is centred, so the products need not be:
+    ``sum(C * HLH) = sum(HCH * HLH)``.
+
+    Args:
+        X_unit: Inputs mapped to the unit interval, shape ``(N, D)``.
+        Y_cols: Output columns, shape ``(N, total)``.
+        x_med: Input median-heuristic squared bandwidths, shape ``(D,)``.
+        y_med: Output median-heuristic squared bandwidths, shape ``(total,)``.
+        bandwidth: Multiplier on the median-heuristic bandwidth (static).
+        chunk: Complement products held at once (static).
+
+    Returns:
+        ``(hsic_compls, hsic_full)``: ``HSIC(prod_{e != d} A_e, y_t)`` of
+        shape ``(total, D)`` and ``HSIC(prod_e A_e, y_t)`` of shape
+        ``(total,)``.
+    """
+    n, d = X_unit.shape
+    total = Y_cols.shape[1]
+    Xt, mt, n_chunks = _pad_columns(X_unit, x_med, chunk)
+    n_pad = n_chunks * chunk
+
+    def aug(j: Array) -> Array:
+        """Augmented kernel ``1 + center(K_j)``; exactly ones for a padded column."""
+        return 1.0 + _centered_kernel(*_column(Xt, mt, j), bandwidth)
+
+    def one_chunk(before: Array, start: Array) -> tuple[Array, tuple[Array, Array]]:
+        """Complement and full-product HSIC of one input chunk, every slice.
+
+        ``before`` is the product of the augmented kernels of every earlier
+        chunk, carried from chunk to chunk; only the product after the chunk
+        is streamed. The forward pass is never differentiated (see
+        :func:`_total_core`), so the dynamic loop bound is fine.
         """
-        # The barrier stops XLA fusing the kernel build into the reductions
-        # that read it. Fused, the exponential is recomputed inside each
-        # reduction loop and the sums accumulate in a different order, which
-        # moves the last bit of the indices away from what the same kernel
-        # returns when it is handed a materialized matrix. HSIC reads L a few
-        # dozen times per slice, so materializing it once is the cheaper
-        # arrangement anyway.
-        L = jax.lax.optimization_barrier(_build_one_kernel(y_col, bandwidth))
-        N = L.shape[0]
-        eps = jnp.finfo(L.dtype).eps
+        ones = jnp.ones((n, n), dtype=Xt.dtype)
+        after = jax.lax.fori_loop(start + chunk, n_pad, lambda k, acc: acc * aug(k), ones)
+        buf = jnp.zeros((chunk, n, n), dtype=Xt.dtype).at[chunk - 1].set(after)
 
-        hsic_yy = _hsic_v(L, L)
-        zero_var = hsic_yy < eps
+        def back(i: int, buf: Array) -> Array:
+            """Write the suffix product (times ``out``) into slot ``chunk - 2 - i``."""
+            k = chunk - 2 - i
+            return buf.at[k].set(buf[k + 1] * aug(start + k + 1))
 
-        hsic_xys = _hsic_against(Ks_stack, L, vectorised)
-        # A constant input column has an all-ones kernel whose self-HSIC
-        # vanishes exactly, and it provably depends on no output. Those
-        # parameters report exactly 0 (matching PAWN), not the NaN of a
-        # degenerate output, so only zero_var (the output's own degeneracy)
-        # yields NaN.
-        zero_input = hsic_xxs < eps
-        denoms = jnp.sqrt(jnp.maximum(hsic_xxs * hsic_yy, eps**2))
-        r2 = jnp.where(zero_var, jnp.nan, jnp.where(zero_input, 0.0, hsic_xys / denoms))
+        buf = jax.lax.fori_loop(0, chunk - 1, back, buf)
 
-        hsic_full = _hsic_v(K_aug_full, L)
-        hsic_full_safe = jnp.where(jnp.abs(hsic_full) < eps, jnp.nan, hsic_full)
-        hsic_compls = _hsic_against(K_aug_compls_stack, L, vectorised)
-        t_hsic = jnp.where(zero_var, jnp.nan, 1.0 - hsic_compls / hsic_full_safe)
+        def fwd(k: int, carry: tuple[Array, Array]) -> tuple[Array, Array]:
+            """Multiply the running prefix into slot ``k``, then extend it."""
+            buf, prefix = carry
+            return buf.at[k].set(prefix * buf[k]), prefix * aug(start + k)
 
-        perm_keys = jax.random.split(key, n_perms)
+        C, through = jax.lax.fori_loop(0, chunk, fwd, (buf, before))
+        F = C[chunk - 1] * aug(start + chunk - 1)
 
-        def _scan_body(null_counts: Array, pkey: Array) -> tuple[Array, None]:
-            """Add one permutation draw's exceedance counts to the running total."""
-            perm = jax.random.permutation(pkey, N)
-            L_perm = L[perm][:, perm]
-            perm_hsics = _hsic_against(Ks_stack, L_perm, vectorised)
-            return (
-                null_counts + (perm_hsics >= hsic_xys).astype(null_counts.dtype),
-                None,
-            )
+        def one_slice(t: Array) -> tuple[Array, Array]:
+            Lc = _out_kernel(Y_cols, y_med, t, bandwidth)
+            hc = jax.lax.map(lambda Ck: _hsic_centered(Ck, Lc), C)
+            return hc, _hsic_centered(F, Lc)
 
-        null_counts, _ = jax.lax.scan(_scan_body, jnp.zeros_like(hsic_xys), perm_keys)
-        p_vals = (null_counts + 1.0) / (n_perms + 1.0)
-        # A degenerate output has no dependence to test: R2 and T are NaN, so
-        # the p-value is NaN too, not a confident 1.0.
-        p_vals = jnp.where(zero_var, jnp.nan, p_vals)
+        return through, jax.lax.map(one_slice, jnp.arange(total))
 
-        return r2, t_hsic, p_vals, hsic_xys
+    ones = jnp.ones((n, n), dtype=Xt.dtype)
+    _, (hc, hf) = jax.lax.scan(one_chunk, ones, jnp.arange(n_chunks) * chunk)
+    hsic_compls = jnp.moveaxis(hc, 0, 1).reshape(total, -1)[:, :d]
+    # Every chunk forms the same full product; chunk 0's is the one used.
+    return hsic_compls, hf[0]
 
-    def _impl(
-        Ks_stack: Array,
-        K_aug_compls_stack: Array,
-        K_aug_full: Array,
-        hsic_xxs: Array,
-        Y_cols: Array,
-        keys: Array,
-    ) -> tuple[Array, Array, Array, Array]:
-        """Map the single-slice kernel over the output columns.
 
-        Args:
-            Ks_stack: Stacked raw input kernels ``(D, N, N)``.
-            K_aug_compls_stack: Stacked complement augmented kernels
-                ``(D, N, N)``.
-            K_aug_full: Product of all augmented input kernels ``(N, N)``.
-            hsic_xxs: Precomputed self-HSIC ``HSIC(K_d, K_d)`` ``(D,)``.
-            Y_cols: Output columns, shape ``(N, total)``.
-            keys: One PRNG key per column, shape ``(total,)``.
+def _total_listed(
+    X_unit: Array, Y_cols: Array, x_med: Array, y_med: Array, bandwidth: float
+) -> tuple[Array, Array]:
+    """Compute the same values as :func:`_total_streamed` with every kernel stored.
 
-        Returns:
-            ``(R2, T, p_values, hsic_raw)`` each ``(total, D)``.
-        """
+    This is the form the backward pass differentiates. Reverse mode through
+    the streamed loops saves the running product of every step of every
+    chunk, ``n_chunks * D`` matrices, which grows without bound as the
+    budget shrinks. Differentiating this form costs a fixed few ``D``
+    matrices instead: the augmented kernels and their prefix, suffix and
+    complement products. Each slice is checkpointed, so its output kernel is
+    rebuilt in the backward pass rather than kept for every slice.
 
-        def _step(column: tuple[Array, Array]) -> tuple[Array, Array, Array, Array]:
-            """Run the atomic kernel on one (column, key) pair."""
-            y_col, key = column
-            return _one_slice(Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, y_col, key)
+    Args:
+        X_unit: Inputs mapped to the unit interval, shape ``(N, D)``.
+        Y_cols: Output columns, shape ``(N, total)``.
+        x_med: Input median-heuristic squared bandwidths, shape ``(D,)``.
+        y_med: Output median-heuristic squared bandwidths, shape ``(total,)``.
+        bandwidth: Multiplier on the median-heuristic bandwidth.
 
-        return jax.lax.map(_step, (Y_cols.T, keys))
+    Returns:
+        Same as :func:`_total_streamed`.
+    """
+    d = X_unit.shape[1]
+    total = Y_cols.shape[1]
+    aug = [1.0 + _centered_kernel(X_unit[:, e], x_med[e], bandwidth) for e in range(d)]
+    prefix = [jnp.ones_like(aug[0])] * d
+    for i in range(1, d):
+        prefix[i] = prefix[i - 1] * aug[i - 1]
+    suffix = [jnp.ones_like(aug[0])] * d
+    for i in range(d - 2, -1, -1):
+        suffix[i] = suffix[i + 1] * aug[i + 1]
+    C = jnp.stack([prefix[e] * suffix[e] for e in range(d)])
+    F = prefix[-1] * aug[-1]
 
-    return jax.jit(_impl)
+    @jax.checkpoint
+    def one_slice(t: Array) -> tuple[Array, Array]:
+        Lc = _out_kernel(Y_cols, y_med, t, bandwidth)
+        hc = jnp.sum(C * Lc[None], axis=(1, 2)) / jnp.asarray(Lc.shape[0], Lc.dtype) ** 2
+        return hc, _hsic_centered(F, Lc)
+
+    return jax.lax.map(one_slice, jnp.arange(total))
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(4, 5))
+def _total_core(
+    X_unit: Array, Y_cols: Array, x_med: Array, y_med: Array, bandwidth: float, chunk: int
+) -> tuple[Array, Array]:
+    """Streamed forward values, with the gradient of :func:`_total_listed`."""
+    return _total_streamed(X_unit, Y_cols, x_med, y_med, bandwidth, chunk)
+
+
+def _total_core_fwd(
+    X_unit: Array, Y_cols: Array, x_med: Array, y_med: Array, bandwidth: float, chunk: int
+):
+    """Forward rule: keep only the inputs as residuals."""
+    out = _total_streamed(X_unit, Y_cols, x_med, y_med, bandwidth, chunk)
+    return out, (X_unit, Y_cols, x_med, y_med)
+
+
+def _total_core_bwd(bandwidth: float, chunk: int, residuals, cotangents):
+    """Backward rule: differentiate the stored-kernel form."""
+    del chunk
+    _, vjp = jax.vjp(lambda X, Y, xm, ym: _total_listed(X, Y, xm, ym, bandwidth), *residuals)
+    return vjp(cotangents)
+
+
+_total_core.defvjp(_total_core_fwd, _total_core_bwd)
+
+
+@partial(jax.jit, static_argnames=("bandwidth", "chunk"))
+def _total_pass(
+    X_unit: Array,
+    Y_cols: Array,
+    x_med: Array,
+    y_med: Array,
+    *,
+    bandwidth: float,
+    chunk: int,
+) -> tuple[Array, Array]:
+    """Compute the HSIC values behind the total index.
+
+    The values come from :func:`_total_streamed`, whose memory follows the
+    budget. The gradient comes from :func:`_total_listed` (see there why).
+
+    Args:
+        X_unit: Inputs mapped to the unit interval, shape ``(N, D)``.
+        Y_cols: Output columns, shape ``(N, total)``.
+        x_med: Input median-heuristic squared bandwidths, shape ``(D,)``.
+        y_med: Output median-heuristic squared bandwidths, shape ``(total,)``.
+        bandwidth: Multiplier on the median-heuristic bandwidth (static).
+        chunk: Complement products held at once (static).
+
+    Returns:
+        ``(hsic_compls, hsic_full)``, shapes ``(total, D)`` and ``(total,)``.
+    """
+    return _total_core(X_unit, Y_cols, x_med, y_med, bandwidth, chunk)
+
+
+@partial(jax.jit, static_argnames=("n_perms",))
+def _combine(
+    hsic_yy: Array,
+    hsic_xx: Array,
+    hsic_xy: Array,
+    counts: Array,
+    hsic_compls: Array,
+    hsic_full: Array,
+    *,
+    n_perms: int,
+) -> tuple[Array, Array, Array, Array]:
+    """Turn the HSIC values of both passes into the reported indices.
+
+    Args:
+        hsic_yy: Output self-HSIC, shape ``(total,)``.
+        hsic_xx: Input self-HSIC, shape ``(D,)``.
+        hsic_xy: ``HSIC(x_d, y_t)``, shape ``(total, D)``.
+        counts: Permutation exceedance counts, shape ``(total, D)``.
+        hsic_compls: Complement-product HSIC, shape ``(total, D)``.
+        hsic_full: Full-product HSIC, shape ``(total,)``.
+        n_perms: Number of permutations (static).
+
+    Returns:
+        ``(R2, T, p_values, hsic_raw)``, each of shape ``(total, D)``.
+    """
+    eps = jnp.finfo(hsic_xy.dtype).eps
+    zero_var = (hsic_yy < eps)[:, None]
+    # A constant input column has an all-ones kernel whose centred form is
+    # exactly 0, and it provably depends on no output. Those parameters
+    # report exactly 0 (matching PAWN), not the NaN of a degenerate output,
+    # so only zero_var (the output's own degeneracy) yields NaN.
+    zero_input = (hsic_xx < eps)[None, :]
+    denoms = jnp.sqrt(jnp.maximum(hsic_xx[None, :] * hsic_yy[:, None], eps**2))
+    r2 = jnp.where(zero_var, jnp.nan, jnp.where(zero_input, 0.0, hsic_xy / denoms))
+    full_safe = jnp.where(jnp.abs(hsic_full) < eps, jnp.nan, hsic_full)[:, None]
+    t_hsic = jnp.where(zero_var, jnp.nan, 1.0 - hsic_compls / full_safe)
+    p_vals = (counts.astype(hsic_xy.dtype) + 1.0) / (n_perms + 1.0)
+    # A degenerate output has no dependence to test: R2 and T are NaN, so the
+    # p-value is NaN too, not a confident 1.0.
+    p_vals = jnp.where(zero_var, jnp.nan, p_vals)
+    return r2, t_hsic, p_vals, hsic_xy
+
+
+def _run_kernel(
+    X_unit: Array, Y_cols: Array, keys: Array, n_perms: int, bandwidth: float, plan: _Plan
+) -> tuple[Array, Array, Array, Array]:
+    """Run both passes for every output slice.
+
+    The passes are separate compiled calls on purpose. In one program XLA
+    keeps both working sets live at once (measured: 19 ``(N, N)`` matrices
+    where each pass alone needs 10 or 13), because buffers inside different
+    loops are not shared. Under an outer ``jit`` they are inlined into one
+    program again, which is correct but forgoes that saving.
+
+    Args:
+        X_unit: Inputs mapped to the unit interval, shape ``(N, D)``.
+        Y_cols: Output columns, shape ``(N, total)``.
+        keys: One PRNG key per output slice, shape ``(total,)``.
+        n_perms: Number of permutations.
+        bandwidth: Multiplier on the median-heuristic bandwidth.
+        plan: Chunk widths from :func:`_plan`.
+
+    Returns:
+        ``(R2, T, p_values, hsic_raw)``, each of shape ``(total, D)``.
+    """
+    x_med, y_med = _medians(X_unit, Y_cols)
+    hsic_yy, hsic_xx, hsic_xy, counts = _first_order_pass(
+        X_unit,
+        Y_cols,
+        x_med,
+        y_med,
+        keys,
+        n_perms=n_perms,
+        bandwidth=bandwidth,
+        chunk=plan.input_chunk,
+    )
+    hsic_compls, hsic_full = _total_pass(
+        X_unit, Y_cols, x_med, y_med, bandwidth=bandwidth, chunk=plan.total_chunk
+    )
+    return _combine(hsic_yy, hsic_xx, hsic_xy, counts, hsic_compls, hsic_full, n_perms=n_perms)
 
 
 def _warn_constant_inputs(problem: Problem, X: Array) -> None:
@@ -1025,15 +1201,15 @@ def indices(
     Every branch here is on a shape or on a Python scalar. ``n_perms`` and
     ``bandwidth`` are both static: they are read while the graph is being
     traced and never at run time. ``bandwidth`` scales the median-heuristic
-    width and is baked into the compiled kernel, which is keyed on it (see
-    :func:`_get_hsic_kernel`). Changing it recompiles; it costs no
-    device-side conditional. Whether the kernel maps over the D inputs with
-    ``vmap`` or one at a time is also static: it follows from the shapes and
-    the memory budget, and is part of the same cache key.
+    width and is baked into the compiled passes, which are keyed on it.
+    Changing it recompiles; it costs no device-side conditional. How many
+    input kernels a pass holds at once is also static: it follows from the
+    shapes and the memory budget (:func:`_plan`), and is part of the same
+    cache key.
 
-    Peak memory is the resident kernel stacks, ~``(2D + 1) * N^2`` floats at
-    once, and no keyword bounds it — see :func:`analyze` for why there is
-    deliberately no batching keyword here.
+    Peak memory follows ``jaxgsa.config.set_memory_budget``, as described
+    under :func:`analyze`. Under an outer ``jit`` the two passes are compiled
+    into one program, and XLA may then hold both working sets at once.
 
     No bootstrap and no confidence interval, here or on :func:`analyze`. The
     permutation ``p_values`` are the uncertainty statement, and the module
@@ -1110,15 +1286,10 @@ def indices(
     N = X_unit.shape[0]
     total = T * K
     Y_cols = Y_3d.reshape(N, total)
-    Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, keys = _input_setup(
-        X_unit, key, total, bandwidth
-    )
-
-    vectorised = _fits_vectorised(D, N, Ks_stack.dtype.itemsize)
-    kernel = _get_hsic_kernel(n_perms, bandwidth, vectorised)
-    r2_all, t_all, p_all, raw_all = kernel(
-        Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, Y_cols, keys
-    )
+    keys = jax.vmap(lambda i: jax.random.fold_in(key, i))(jnp.arange(total))
+    itemsize = jnp.result_type(X_unit.dtype, Y_cols.dtype).itemsize
+    plan = _plan(D, N, itemsize)
+    r2_all, t_all, p_all, raw_all = _run_kernel(X_unit, Y_cols, keys, n_perms, bandwidth, plan)
     return HSICIndices(
         R2=layout.squeeze(r2_all.reshape(T, K, D)),
         T=layout.squeeze(t_all.reshape(T, K, D)),
@@ -1179,14 +1350,14 @@ def analyze(
     as bare arrays, with none of the checks, so it composes with ``jit``,
     ``vmap`` and ``jacrev``.
 
-    **Memory is quadratic in N, and no keyword bounds it.** The estimator
-    keeps the D raw input kernels, their D augmented complement products,
-    the full augmented product and one output kernel resident at once —
-    peak memory is ~``(2D + 1) * N^2`` floats. There is deliberately no
-    batching keyword: a row-blocked kernel build only bounded a transient
-    of the build while the resident stacks stayed, so it was measured
-    useless and removed. If the sample does not fit, thin ``N`` (HSIC
-    converges quickly in N) or lower ``D`` by screening first.
+    **Memory is quadratic in N and follows the global memory budget.** The
+    estimator works on dense ``(N, N)`` kernels, and it holds only as many
+    input kernels at once as ``jaxgsa.config.set_memory_budget`` allows,
+    building the rest again when they are needed. A smaller budget costs
+    time, not accuracy. The estimator always needs about six ``(N, N)``
+    matrices, so at a large ``N`` a small budget is exceeded by that
+    floor; then thin ``N`` (HSIC converges quickly in N). There is no
+    per-call batching keyword.
 
     Correlated parameters are supported. HSIC is a dependence measure and
     assumes no input independence, so a declared ``problem.correlation`` does
