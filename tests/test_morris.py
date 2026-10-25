@@ -851,3 +851,26 @@ def test_resample_stats_temp_memory_matches_estimate():
     idx = jax.ShapeDtypeStruct((chunk, r), jnp.int32)
     temp = _resample_stats.lower(idx, ee).compile().memory_analysis().temp_size_in_bytes
     assert temp <= 1.1 * _resample_temp_bytes((r, D, T, K), 4, chunk)
+
+
+def test_float32_outputs_stay_float32_under_x64():
+    """The design's float64 ``ee_delta`` does not promote float32 outputs under x64.
+
+    Every path (``analyze``, its bootstrap, and ``indices``) keeps ``Y``'s
+    dtype, and the values agree with a float32 run without x64.
+    """
+    sr = sample(UNIT_PROBLEM, n_trajectories=50, seed=0, verbose=False)
+    X = np.asarray(sr.samples)
+    y32 = (np.sin(6 * X[:, 0]) + X[:, 1] ** 2 + X[:, 0] * X[:, 2]).astype(np.float32)
+    ref = cast(Any, analyze(sr, jnp.asarray(y32), verbose=False))
+    with jax.enable_x64():
+        Y = jnp.asarray(y32)
+        res = cast(Any, analyze(sr, Y, n_bootstrap=20, key=0, verbose=False))
+        idx = indices(sr, Y)
+        for field in ("mu", "mu_star", "sigma", "mu_star_conf"):
+            assert getattr(res, field).dtype == jnp.float32, field
+        assert all(a.dtype == jnp.float32 for a in idx)
+        mu_star = np.asarray(res.mu_star)
+        sigma = np.asarray(res.sigma)
+    np.testing.assert_allclose(mu_star, np.asarray(ref.mu_star), rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(sigma, np.asarray(ref.sigma), rtol=1e-5, atol=1e-6)

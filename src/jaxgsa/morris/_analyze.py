@@ -113,8 +113,10 @@ def _elementary_effects(Y: Array, idx_after: Array, idx_before: Array, delta: Ar
         Elementary effects, shape ``(r, D, T, K)``.
     """
     # Fancy indexing with (r, D) index arrays gathers (r, D, T, K) blocks, and
-    # the signed delta broadcasts over the trailing output dimensions.
-    return (Y[idx_after] - Y[idx_before]) / delta[:, :, None, None]
+    # the signed delta broadcasts over the trailing output dimensions. The
+    # design stores delta in float64; casting it to Y's dtype keeps float32
+    # outputs in float32 when x64 is enabled.
+    return (Y[idx_after] - Y[idx_before]) / delta.astype(Y.dtype)[:, :, None, None]
 
 
 def _measures(

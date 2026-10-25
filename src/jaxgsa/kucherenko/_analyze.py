@@ -661,7 +661,9 @@ def analyze(
         lazy = _HostBlocks(Y_blocks, keep_mask, slice(start, start + width))
         F: _Blocks = lazy.materialize() if idx is not None else lazy
         f_joint = F[0]  # (N, w)
-        joint_parts.append(f_joint)
+        # Keep a copy: a view of F[0] would keep the whole materialised
+        # float64 chunk alive after ``del F``, for every chunk.
+        joint_parts.append(np.array(f_joint))
         if all_subsets:
             f_other = F[1]  # (N, w) — independent joint block B
             f_sub = F[2:]  # (2^D - 2, N, w) — block for mask m at row m - 1

@@ -83,7 +83,10 @@ def _compute_indices(
         A tuple ``(S1, ST)`` of scalar arrays.
     """
     # Discrete Fourier spectrum of the model output along one search curve.
-    f = jnp.fft.fft(Y_curve)
+    # The curve is centred first. Its mean only feeds the DC bin, which is
+    # never read, but in float32 the round-off of an N * mean DC term leaks
+    # into every other bin and swamps the variance of a large-mean output.
+    f = jnp.fft.fft(Y_curve - jnp.mean(Y_curve))
     # One-sided power spectrum |F_k/N|^2, positive frequencies only. The DC
     # term at k=0 is skipped. Dividing by N before squaring keeps N**2 out of
     # the jitted kernel: as a Python int it would trace as int32, which

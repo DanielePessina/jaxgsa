@@ -113,3 +113,24 @@ def test_sample_silent_at_resonance_free_n():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         sample(ishigami.PROBLEM, n_per_curve=193, M=4, seed=0, verbose=False)
+
+
+def test_float32_large_mean_output_matches_float64():
+    """A large output mean costs no float32 precision: each curve is centred before the FFT.
+
+    ``Y = 1e5 + ishigami`` puts a DC term of ``N * 1e5`` into the spectrum.
+    Uncentred, its float32 round-off leaked into every frequency bin and moved
+    S1/ST by about 1e-4. The float64 run reads the very same float32 values,
+    so the difference is the error the algorithm adds, not data quantisation.
+    """
+    import jax
+
+    design = sample(ishigami.PROBLEM, n_per_curve=4001, seed=1, verbose=False)
+    y = np.asarray(ishigami.evaluate(jnp.asarray(design.samples)), dtype=np.float64)
+    y32 = (1e5 + y).astype(np.float32)
+    r32 = _analyze(design, jnp.asarray(y32), verbose=False)
+    with jax.enable_x64():
+        r64 = _analyze(design, jnp.asarray(y32.astype(np.float64)), verbose=False)
+    assert r32.S1.dtype == jnp.float32
+    np.testing.assert_allclose(np.asarray(r32.S1), np.asarray(r64.S1), atol=1e-5)
+    np.testing.assert_allclose(np.asarray(r32.ST), np.asarray(r64.ST), atol=1e-5)
