@@ -190,6 +190,7 @@ class UniqueDesignSamples:
     # ClassVar (not a plain annotation) so a subclass's dataclass machinery
     # can never turn it into a field.
     _jax_expansion_map: ClassVar[Array]
+    _expansion_is_identity: ClassVar[bool]
 
     # ------------------------------------------------------------------
     # Output re-expansion
@@ -210,6 +211,16 @@ class UniqueDesignSamples:
         ``object.__setattr__``, which the frozen contract does not block.
         """
         object.__setattr__(self, "_jax_expansion_map", jnp.asarray(self.expanded_to_unique))
+        # A design with no repeated row maps every expanded row to itself.
+        # Its expansion would be a gather that writes a full copy of Y and
+        # changes nothing, so expand_outputs skips it. Read once here, for
+        # the same reason as the map above: it is a constant under a trace.
+        object.__setattr__(
+            self,
+            "_expansion_is_identity",
+            self.n_runs == self.n_expanded
+            and bool(np.array_equal(self.expanded_to_unique, np.arange(self.n_expanded))),
+        )
 
     @property
     def _expanded_to_unique_jax(self) -> Array:
@@ -234,6 +245,8 @@ class UniqueDesignSamples:
 
         Returns:
             Outputs in the expanded design layout, shape ``(n_expanded, ...)``.
+            When the design has no repeated row the expansion is the
+            identity, and ``Y`` comes back as a JAX array without a copy.
 
         Raises:
             ValueError: If ``Y``'s first axis does not match ``n_runs``.
@@ -242,6 +255,8 @@ class UniqueDesignSamples:
             raise ValueError(
                 f"Y.shape[0] must match samples.n_runs ({self.n_runs}), got {Y.shape[0]}"
             )
+        if self._expansion_is_identity:
+            return jnp.asarray(Y)
         # expanded_to_unique[i] gives the unique-row index for expanded
         # position i. The map was warmed at construction (see
         # __post_init__), so this read is a constant even under a jit trace.

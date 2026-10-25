@@ -24,7 +24,8 @@ from typing import Literal, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
-from scipy.stats import norm, rankdata
+from scipy.special import ndtr
+from scipy.stats import rankdata
 
 from jaxgsa._core.sampling import _transform_samples
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -977,8 +978,12 @@ def latent_to_physical(problem: Problem, Z: np.ndarray) -> np.ndarray:
     Returns:
         ``(N, D)`` samples in physical units.
     """
-    unit = norm.cdf(np.asarray(Z, dtype=np.float64))
+    # ndtr is the function norm.cdf evaluates at loc=0, scale=1, so the
+    # values are the same; norm.cdf adds several full-size temporaries for
+    # its argument checks, which at a large design cost more than the design.
+    unit = ndtr(np.asarray(Z, dtype=np.float64))
     # The marginal inverse CDFs reject exact 0/1; the same clip is applied on
-    # the forward path in _core.sampling.
-    unit = np.clip(unit, 1e-12, 1.0 - 1e-12)
-    return _transform_samples(problem, unit)
+    # the forward path in _core.sampling. Clipped and transformed in place:
+    # unit is this function's own buffer, so the design is held once.
+    np.clip(unit, 1e-12, 1.0 - 1e-12, out=unit)
+    return _transform_samples(problem, unit, out=unit)

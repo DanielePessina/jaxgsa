@@ -555,14 +555,14 @@ def _build_expanded_samples(
     # overhead, which dwarfs the design itself at large sizes.
     diag = np.arange(D)
     out = np.empty((base_n, step, D), dtype=base.dtype)
+    # Written straight into out: building AB (and BA) as their own
+    # (base_n, D, D) arrays first would hold a second copy of the design.
     out[:, 0, :] = A
-    AB = np.repeat(A[:, None, :], D, axis=1)  # (base_n, D, D)
-    AB[:, diag, diag] = B
-    out[:, 1 : D + 1, :] = AB
+    out[:, 1 : D + 1, :] = A[:, None, :]
+    out[:, 1 + diag, diag] = B
     if calc_second_order:
-        BA = np.repeat(B[:, None, :], D, axis=1)
-        BA[:, diag, diag] = A
-        out[:, D + 1 : 2 * D + 1, :] = BA
+        out[:, D + 1 : 2 * D + 1, :] = B[:, None, :]
+        out[:, D + 1 + diag, diag] = A
     out[:, -1, :] = B
     return out.reshape(base_n * step, D)
 

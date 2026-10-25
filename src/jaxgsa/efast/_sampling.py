@@ -500,7 +500,8 @@ def sample(
 
     # CDF-based transform: map the [0, 1] samples into the problem's physical
     # parameter space.
-    X = _transform_samples(problem, X)
+    # In place: X is this function's own buffer, so the design is held once.
+    X = _transform_samples(problem, X, out=X)
 
     if verbose:
         # A search curve is an ordered sweep, so there is nothing to
