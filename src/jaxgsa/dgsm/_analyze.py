@@ -40,7 +40,12 @@ from jaxgsa._core.entry import (
 from jaxgsa._core.invalid import InvalidUnit, OnInvalid, resolve_policy
 from jaxgsa._core.irregular import _is_irregular_y
 from jaxgsa._core.result import CIInfo
-from jaxgsa._core.validation import _prepare_Y, _warn_zero_variance_slices, as_key
+from jaxgsa._core.validation import (
+    _prepare_Y,
+    _warn_zero_variance_slices,
+    _zero_variance_stats_of,
+    as_key,
+)
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.dgsm._core import (
     _jac_bytes_per_row,
@@ -537,12 +542,15 @@ def indices(
         Y_3d, layout = _prepare_Y(Y_arr)
 
     _check_moment_layout(mu, Y_3d)
+    # The warning's own constant-slice test, so analyze and indices agree.
+    zero_mask, _ = _zero_variance_stats_of(Y_3d)
     nu, mu, upper, lower, variance = bounds_from_moments(
         problem,
         nu=nu,
         mu=mu,
         variance=jnp.var(Y_3d, axis=0),
         standardize_outputs=standardize_outputs,
+        zero_variance=zero_mask.reshape(Y_3d.shape[1:]),
     )
     return DGSMIndices(
         layout.squeeze(nu),
@@ -878,11 +886,17 @@ def analyze(
     # Var(Y) per (t, k) output slice, denominator of both bounds. A constant
     # slice makes both bounds NaN, so say so rather than returning it silently.
     variance = jnp.var(Y_3d, axis=0)  # (T, K)
+    # One scan feeds both the warning and the bounds, so the slices the
+    # warning names are exactly the slices reported as NaN. Y_3d flattens
+    # to the same (t, k) column order as Y_valid.
+    zero_stats = _zero_variance_stats_of(Y_3d)
+    zero_variance = zero_stats[0].reshape(Y_3d.shape[1:])
     _warn_zero_variance_slices(
         Y_valid,
         output_names=problem.output_names,
         method=_METHOD,
         stacklevel=_user_stacklevel(),
+        zero_stats=zero_stats,
     )
 
     nu, mu, upper, lower, variance = bounds_from_moments(
@@ -891,6 +905,7 @@ def analyze(
         mu=mu,
         variance=variance,
         standardize_outputs=standardize_outputs,
+        zero_variance=zero_variance,
     )
 
     # The upper bound must sit at or above the lower bound. Check it within a
@@ -933,6 +948,7 @@ def analyze(
             n_params=D,
             n_bootstrap=n_bootstrap,
             standardize_outputs=standardize_outputs,
+            zero_variance=zero_variance,
         )
         point = {"nu": nu, "mu": mu, "upper_bound": upper, "lower_bound": lower}
         for name in _INTERVAL_FIELDS:
@@ -1055,6 +1071,7 @@ def _bootstrap_draws(
     n_params: int,
     n_bootstrap: int,
     standardize_outputs: bool,
+    zero_variance: Array | None = None,
 ) -> dict[str, Array]:
     """Recompute the four reported fields on ``n_bootstrap`` row resamples.
 
@@ -1073,6 +1090,9 @@ def _bootstrap_draws(
         n_params: ``D``.
         n_bootstrap: Number of replicates.
         standardize_outputs: As in :func:`analyze`.
+        zero_variance: ``(T, K)`` mask of the slices the point estimate
+            found constant. A constant slice is constant in every resample,
+            so its bounds are NaN in every replicate too.
 
     Returns:
         Mapping from field name to a ``(n_bootstrap, T, K, D)`` array of
@@ -1101,5 +1121,6 @@ def _bootstrap_draws(
         mu=mu,
         variance=variance,
         standardize_outputs=standardize_outputs,
+        zero_variance=zero_variance,
     )
     return {"nu": nu, "mu": mu, "upper_bound": upper, "lower_bound": lower}

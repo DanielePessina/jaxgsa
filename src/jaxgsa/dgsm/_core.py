@@ -686,6 +686,7 @@ def bounds_from_moments(
     mu: Array,
     variance: Array,
     standardize_outputs: bool,
+    zero_variance: Array | None = None,
 ) -> tuple[Array, Array, Array, Array, Array]:
     """Turn the derivative moments into the two Sobol-index bounds.
 
@@ -702,9 +703,13 @@ def bounds_from_moments(
       :class:`jaxgsa.dgsm.DGSMResult` for why the condition is on the
       marginal.
 
-    A zero-variance slice makes both bounds ``0 / 0``, so the denominator is
-    mapped to ``NaN`` rather than divided by. That is arithmetic, not policy:
-    the warning about it stays in ``analyze``.
+    A zero-variance slice makes both bounds ``0 / 0``, so it is divided by a
+    safe 1 and the bounds are then set to ``NaN``, which keeps gradients of
+    the other slices finite. That is arithmetic, not policy:
+    the warning about it stays in ``analyze``. A constant float slice rarely
+    has a bit-exact zero variance (its mean rounds), so callers pass the
+    warning's own test as ``zero_variance``; without it a constant slice
+    would report bounds of ``0 / round-off = 0``.
 
     Args:
         problem: Problem definition, read for the per-axis Poincare constants
@@ -716,33 +721,46 @@ def bounds_from_moments(
         standardize_outputs: Whether to report the moments for the
             standardized output ``(Y - mean) / std``. The map is affine, so
             the standardized moments are the ones already computed, rescaled.
+        zero_variance: Boolean mask broadcastable to ``variance``, ``True``
+            for a slice the zero-variance warning flags (see
+            :func:`jaxgsa._core.validation._zero_variance_mask`). ``None``
+            flags only a variance of exactly 0.
 
     Returns:
         ``(nu, mu, upper, lower, variance)``, the first four shaped
         ``(T, K, D)`` and the last ``(T, K)``.
     """
+    zero = variance == 0
+    if zero_variance is not None:
+        zero = zero | zero_variance
     if standardize_outputs:
         # Y -> (Y - mean)/std is affine, so d/dx of the shift is zero and the
         # 1/std factor is a constant. Rescaling here rather than
         # differentiating a wrapped function leaves the autodiff sweep alone.
         # Both bounds are ratios of quantities that scale the same way, so
         # they come out unchanged, which the tests assert.
-        y_std = jnp.sqrt(variance)  # (T, K)
-        safe_scale = jnp.where(y_std == 0, jnp.ones_like(y_std), y_std)
+        # sqrt'(0) is infinite, so a zero variance must not reach the sqrt:
+        # its zero cotangent would become 0 * inf = NaN under grad.
+        safe_scale = jnp.sqrt(jnp.where(zero, jnp.ones_like(variance), variance))  # (T, K)
         mu = mu / safe_scale[..., None]
         nu = nu / (safe_scale**2)[..., None]
         variance = variance / safe_scale**2
 
     # Per-axis constants: C for the Poincare upper bound, Var for the lower.
     C, Var = axis_constants(problem)
-    C_jnp = jnp.asarray(C)
-    Var_jnp = jnp.asarray(Var)
+    # NumPy float64 constants; cast so float32 data keeps float32 bounds.
+    C_jnp = jnp.asarray(C, dtype=nu.dtype)
+    Var_jnp = jnp.asarray(Var, dtype=nu.dtype)
 
     # A constant output slice has zero variance; map it to NaN bounds rather
-    # than dividing by zero.
-    denom = jnp.where(variance == 0, jnp.nan, variance)[..., None]  # (T, K, 1)
+    # than dividing by zero. Double where: divide by a safe 1 on a constant
+    # slice, then put the NaN back. A NaN denominator would send 0 / NaN =
+    # NaN cotangents into nu and mu, and through them into every slice's
+    # gradient with respect to X.
+    zero_b = zero[..., None]  # (T, K, 1)
+    safe_var = jnp.where(zero_b, jnp.ones_like(variance)[..., None], variance[..., None])
 
     # The (D,) constants broadcast against (T, K, D) on the trailing axis.
-    upper = C_jnp * nu / denom
-    lower = Var_jnp * mu**2 / denom
+    upper = jnp.where(zero_b, jnp.nan, C_jnp * nu / safe_var)
+    lower = jnp.where(zero_b, jnp.nan, Var_jnp * mu**2 / safe_var)
     return nu, mu, upper, lower, variance
