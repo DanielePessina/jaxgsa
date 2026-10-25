@@ -104,6 +104,11 @@ def _rank_core(X: Array, Y_3d: Array) -> Array:
     # Stable sort: tied input values keep their row order.
     order = jnp.argsort(X, axis=0, stable=True)  # (N, D)
 
+    # Rematerialised in reverse mode: lax.map would otherwise save the
+    # gathered and rolled (N, T, K) copies of every parameter, D of each,
+    # for the backward pass (gradient about 20x Y at D = 8). With the
+    # checkpoint only ``rows`` is saved and the gather is recomputed.
+    @jax.checkpoint
     def one_param(rows: Array) -> Array:
         """Lag-one autocovariance of the output sorted by one input column."""
         sorted_y = centred[rows]  # (N, T, K)
