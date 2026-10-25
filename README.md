@@ -118,6 +118,20 @@ runs ported analyses locally in the browser. Its source and development instruct
 are in `web/`. The Python
 package and documentation site have separate builds.
 
+## Use with a coding agent
+
+jaxgsa ships an [agent skill](skills/jaxgsa/SKILL.md). It tells a coding
+agent how to use the API and the caveats of each method. Install it with the
+[skills](https://github.com/vercel-labs/skills) CLI:
+
+```bash
+npx skills add DanielePessina/jaxgsa --skill jaxgsa
+```
+
+The CLI asks which agents to install it for, such as Claude Code, Codex or
+Cursor. To install it for Claude Code in all your projects, add
+`-g -a claude-code`.
+
 ## Develop
 
 ```bash
@@ -133,9 +147,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). To run the docs locally:
 npm --prefix docs install
 npm --prefix docs run docs:dev
 ```
-
-The repository also includes a [coding agent skill](skills/jaxgsa/SKILL.md)
-covering the API and method-specific caveats.
 
 ## Cite jaxgsa
 
