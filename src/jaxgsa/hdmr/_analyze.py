@@ -20,7 +20,7 @@ from jax import Array
 
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import get_memory_budget
-from jaxgsa._core.bootstrap import bootstrap_draws, interval
+from jaxgsa._core.bootstrap import bootstrap_draws, bootstrap_draws_host, interval
 from jaxgsa._core.entry import (
     _METHOD_ALIAS,
     ScalarCheck,
@@ -56,7 +56,7 @@ from jaxgsa.hdmr._engine import (
     _build_B3,
     _compute_f_crits,
 )
-from jaxgsa.hdmr._fit import _fit_hdmr, pair_solve_warning
+from jaxgsa.hdmr._fit import _fit_bytes_per_row, _fit_hdmr, pair_solve_warning
 from jaxgsa.hdmr._result import HDMRResult, _HDMRFit
 from jaxgsa.problem import Problem
 
@@ -989,6 +989,65 @@ def _hdmr_replicate(
     return {name: getattr(core, name) for name in _INDEX_FIELDS}
 
 
+_JIT_REPLICATE_SHARE = 16
+"""A fit whose working set is at most ``budget / _JIT_REPLICATE_SHARE`` jits its replicates."""
+
+
+def _jit_replicates(
+    N: int,
+    D: int,
+    L: int,
+    *,
+    order: int,
+    n_intervals: int,
+    itemsize: int,
+    batch_size: int | None,
+    slice_chunk_size: int | None,
+) -> bool:
+    """Say whether the bootstrap replicates can run as one jitted program.
+
+    Traced as one program, the fit keeps more buffers live than the eager
+    fit, because XLA schedules all of its passes together. Its Python row
+    and slice loops also unroll, so a streamed fit compiles one copy of
+    every pass per row batch. Measured at float64, order 2, the default 2 GiB
+    budget:
+
+    * D=10, N=20000 (one row batch): one jitted replicate peaked at 1.7 GB
+      RSS, the eager fit at 0.9-1.2 GB.
+    * D=3, N=800 at a 32 KiB budget (many row batches): the program took 12 s
+      and 1.3 GB to compile, against 0.5 GB for the eager fit.
+
+    The eager host loop costs dispatch time instead, about 5-35 ms per
+    replicate, which dominates a small fit (a jitted replicate at D=3,
+    N=800 takes about 1 ms). So the jitted path is kept for the fits where
+    its extra memory is small next to the budget: one row batch, one slice
+    chunk, and a working set within ``1/16`` of the budget.
+
+    Args:
+        N: Number of rows.
+        D: Number of parameters.
+        L: Number of flattened output slices.
+        order: Requested expansion order, clamped to ``D`` here.
+        n_intervals: B-spline intervals per dimension.
+        itemsize: Bytes per element of the fit's dtype.
+        batch_size: The caller's rows per batch, or ``None``.
+        slice_chunk_size: The caller's slices per chunk, or ``None``.
+
+    Returns:
+        ``True`` when the replicates should run in one jitted ``lax.map``.
+    """
+    if batch_size is not None and batch_size < N:
+        return False
+    if slice_chunk_size is not None and slice_chunk_size < L:
+        return False
+    s = _get_hdmr_static_data(D, min(order, D), n_intervals)
+    per_row = _fit_bytes_per_row(D, s.m1, s.m2, s.m3, s.n2, s.n3, s.n, L, itemsize)
+    # The pair solver's per-lane state, which also caps the slice chunk.
+    lane_fixed = 7 * s.n2 * s.m2 * itemsize
+    working_set = N * per_row + L * lane_fixed
+    return working_set * _JIT_REPLICATE_SHARE <= get_memory_budget()
+
+
 def _bootstrap_indices(
     problem: Problem,
     X: Array,
@@ -1008,9 +1067,18 @@ def _bootstrap_indices(
     One replicate is a full refit: the rows are drawn with replacement, the
     B-spline bases are rebuilt on them, the backfitting runs again and the
     F-test is redone. No part of an HDMR index survives a resample without
-    that, so the replicates run as a sequential ``lax.map`` over independent fits and
-    the cost is ``n_bootstrap`` fits — an order of magnitude above a method
-    that only re-reduces per-row numbers it already holds.
+    that, so the cost is ``n_bootstrap`` fits — an order of magnitude above a
+    method that only re-reduces per-row numbers it already holds.
+
+    How the replicates run depends on the fit's size; the row draws are the
+    same either way (see :func:`_jit_replicates`). A small fit runs all
+    replicates in one jitted ``lax.map``
+    (:func:`~jaxgsa._core.bootstrap.bootstrap_draws`), which is fastest. A
+    larger or streamed fit runs as a host loop of eager fits
+    (:func:`~jaxgsa._core.bootstrap.bootstrap_draws_host`). Each fit then
+    runs pass by pass, as the point estimate does, so the peak is the point
+    fit's peak and does not grow with ``n_bootstrap`` or with the number of
+    row batches.
 
     The row draw is shared by every output slice, exactly as the point
     estimate shares one basis across slices.
@@ -1033,8 +1101,20 @@ def _bootstrap_indices(
         length ``n_bootstrap`` followed by the canonical ``(T, K, ...)``
         shape.
     """
-
-    return bootstrap_draws(
+    N, D = X.shape
+    L = math.prod(Y.shape[1:])
+    itemsize = jnp.dtype(jnp.result_type(X.dtype, Y.dtype, float)).itemsize
+    jit_ok = _jit_replicates(
+        N,
+        D,
+        L,
+        order=order,
+        n_intervals=n_intervals,
+        itemsize=itemsize,
+        batch_size=batch_size,
+        slice_chunk_size=slice_chunk_size,
+    )
+    return (bootstrap_draws if jit_ok else bootstrap_draws_host)(
         key,
         n_bootstrap,
         _hdmr_replicate,

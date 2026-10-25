@@ -10,9 +10,11 @@ There are two entry points. pce, hdmr and shapley use both. The other bootstrapp
 the lower-level ``_bootstrap_ci_endpoints``:
 
 * :func:`bootstrap_draws` runs the row-resample loop: split the key, draw
-  row indices, call the caller's fit, collect the result. pce and hdmr call
-  it. pawn keeps its own loop, which draws the same rows from the same key.
-  The other methods use their own resamplers.
+  row indices, call the caller's fit, collect the result. pce and shapley
+  call it. hdmr calls it for a small fit and :func:`bootstrap_draws_host`,
+  which makes the same draws in a host loop of eager fits, for a large one.
+  pawn keeps its own loop, which draws the same rows from the same key. The
+  other methods use their own resamplers.
 * :func:`interval` turns the point estimate(s) and the draws
   :func:`bootstrap_draws` produced into ``*_conf`` endpoint arrays and the
   one :class:`~jaxgsa._core.result.CIInfo` record a result carries, so the
@@ -125,18 +127,48 @@ def _mapped_draws(
     del budget
     N = operands[0].shape[0]
     kwargs = dict(static)
+    subkeys = _split_chain(key, n_bootstrap)
+
+    def _one(sub: Array) -> _T:
+        return replicate_fn(_replicate_rows(sub, N), *operands, **kwargs)
+
+    return jax.lax.map(_one, subkeys)
+
+
+def _split_chain(key: Array, n_bootstrap: int) -> Array:
+    """Return the replicate keys: ``key`` split once per replicate, in order.
+
+    Args:
+        key: PRNG key the split chain starts from.
+        n_bootstrap: Number of replicates.
+
+    Returns:
+        A key array of shape ``(n_bootstrap,)``.
+    """
 
     def _next(k: Array, _: None) -> tuple[Array, Array]:
         k, sub = jax.random.split(k)
         return k, sub
 
     _, subkeys = jax.lax.scan(_next, key, None, length=n_bootstrap)
+    return subkeys
 
-    def _one(sub: Array) -> _T:
-        rows = jax.random.choice(sub, N, shape=(N,), replace=True)
-        return replicate_fn(rows, *operands, **kwargs)
 
-    return jax.lax.map(_one, subkeys)
+def _replicate_rows(sub: Array, n: int) -> Array:
+    """Draw one replicate's ``n`` row indices with replacement.
+
+    Args:
+        sub: The replicate's key from :func:`_split_chain`.
+        n: Number of rows, ``N``.
+
+    Returns:
+        An integer array of shape ``(n,)``.
+    """
+    return jax.random.choice(sub, n, shape=(n,), replace=True)
+
+
+_split_chain_jit = jax.jit(_split_chain, static_argnames=("n_bootstrap",))
+_replicate_rows_jit = jax.jit(_replicate_rows, static_argnames=("n",))
 
 
 def bootstrap_draws(
@@ -149,12 +181,13 @@ def bootstrap_draws(
 ) -> _T:
     """Run ``replicate_fn`` on ``n_bootstrap`` row-resamples and stack the results.
 
-    pce, hdmr and shapley use this loop. One cached ``jax.jit`` holds a
+    pce, shapley and a small hdmr fit use this loop. One cached ``jax.jit`` holds a
     sequential ``lax.map`` over the replicates, so the program compiles once
     and a repeat call compiles nothing. Each replicate draws ``N`` row
     indices with replacement from its own key, split from ``key`` in order.
     Only one replicate runs at a time. Peak memory is still higher than in a
     Python loop, because the streamed fit's row batches unroll under one jit.
+    :func:`bootstrap_draws_host` runs the same draws as a host loop.
 
     Args:
         key: PRNG key. The same key gives the same row draws.
@@ -180,6 +213,60 @@ def bootstrap_draws(
         n_bootstrap=n_bootstrap,
         budget=get_memory_budget(),
     )
+
+
+def bootstrap_draws_host(
+    key: Array,
+    n_bootstrap: int,
+    replicate_fn: Callable[..., _T],
+    operands: tuple[Array, ...],
+    *,
+    static: tuple[tuple[str, Any], ...] = (),
+) -> _T:
+    """Run the replicates as a host loop of eager fits, one at a time.
+
+    The draws are the ones :func:`bootstrap_draws` makes: the same key chain
+    and the same row indices per replicate. Only the execution differs.
+    ``replicate_fn`` runs eagerly, so a fit made of several cached jitted
+    steps runs each step on its own, exactly as the point estimate does.
+    Each replicate finishes before the next one starts. The peak is then the
+    point fit's peak plus one replicate's resampled operands, whatever
+    ``n_bootstrap`` is, and the loop compiles nothing the point fit did not
+    already compile.
+
+    Use this when the replicate is a multi-pass streamed fit. Traced as one
+    program, such a fit unrolls its Python row-batch loops and XLA keeps the
+    buffers of every pass live together, so the program's peak is far above
+    the eager fit's and its compile cost grows with the number of row
+    batches. hdmr uses this loop for that reason, except for a small fit,
+    where the jitted loop is faster and its extra memory is small.
+
+    Args:
+        key: PRNG key. The same key gives the same row draws as
+            :func:`bootstrap_draws`.
+        n_bootstrap: Number of replicates. Must be at least 1.
+        replicate_fn: Called as ``replicate_fn(rows, *operands, **static)``
+            with the row indices, shape ``(N,)``. It must return the same
+            pytree every call.
+        operands: Arrays the replicate fit reads. The first one has ``N``
+            rows.
+        static: Keyword arguments for ``replicate_fn``, as a tuple of
+            ``(name, value)`` pairs.
+
+    Returns:
+        The pytree ``replicate_fn`` returns, with every leaf array gaining a
+        new leading axis of length ``n_bootstrap``.
+    """
+    N = operands[0].shape[0]
+    kwargs = dict(static)
+    subkeys = _split_chain_jit(key, n_bootstrap=n_bootstrap)
+    outs = []
+    for r in range(n_bootstrap):
+        out = replicate_fn(_replicate_rows_jit(subkeys[r], n=N), *operands, **kwargs)
+        # Eager dispatch is asynchronous: without this wait the host would
+        # queue the next fits and their buffers would all be live at once.
+        outs.append(jax.block_until_ready(out))
+    return jax.tree.map(lambda *leaves: jnp.stack(leaves), *outs)
 
 
 def _hashable_static(static: tuple[tuple[str, Any], ...]) -> tuple[tuple[str, Any], ...]:
