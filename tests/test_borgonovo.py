@@ -20,6 +20,10 @@ from jaxgsa.borgonovo import analyze
 from jaxgsa.borgonovo._analyze import (
     _DEGENERATE_BW_FRACTION,
     _DEGENERATE_BW_TOL,
+    _DISCRETE_MAX_DISTINCT,
+    _DISCRETE_MIN_MULTIPLICITY,
+    _DISCRETE_SCREEN_ROWS,
+    _count_distinct,
     _estimate_transient_bytes,
     _get_delta_kernel,
     _plischke_n_classes,
@@ -1032,3 +1036,76 @@ class TestBiasCorrectFlag:
         X, Y = given_ishigami_xy
         with pytest.raises(TypeError, match="bias_correct must be True or False"):
             analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0, bias_correct=None)  # type: ignore[arg-type]
+
+
+class TestLargeMeanFloat32:
+    """A large output mean must not cost float32 accuracy."""
+
+    @pytest.mark.parametrize("offset", [1e5, 1e6])
+    def test_float32_matches_float64_on_the_same_values(self, offset):
+        """The kernel centres each column, so the offset cancels exactly.
+
+        Before centring, S1 in float32 was off by 5.9e-4 at an offset of
+        1e5 and by 4.6e-3 at 1e6, against float64 on the same float32
+        values. Centred, both agree to float32 rounding of the indices.
+        """
+        n = 4096
+        rng = np.random.default_rng(1)
+        x = rng.uniform(-np.pi, np.pi, (n, 3))
+        y = np.sin(x[:, 0]) + 7 * np.sin(x[:, 1]) ** 2 + 0.1 * x[:, 2] ** 4 * np.sin(x[:, 0])
+        y32 = (y + offset).astype(np.float32)
+        r32 = analyze(ishigami.PROBLEM, jnp.asarray(x, jnp.float32), jnp.asarray(y32))
+        with jax.enable_x64():
+            r64 = analyze(
+                ishigami.PROBLEM,
+                jnp.asarray(x, jnp.float64),
+                jnp.asarray(y32, jnp.float64),
+            )
+            assert isinstance(r64, jaxgsa.borgonovo.BorgonovoResult)
+            s1_64, delta_64 = np.asarray(r64.S1), np.asarray(r64.delta)
+        assert isinstance(r32, jaxgsa.borgonovo.BorgonovoResult)
+        assert np.asarray(r32.S1).dtype == np.float32
+        np.testing.assert_allclose(np.asarray(r32.S1), s1_64, atol=2e-6)
+        np.testing.assert_allclose(np.asarray(r32.delta), delta_64, atol=2e-6)
+
+
+class TestDiscreteScreen:
+    """The screened distinct count gives the full count's decision."""
+
+    @staticmethod
+    def _decision(n_distinct: np.ndarray, n: int) -> np.ndarray:
+        return (
+            (n_distinct > 1)
+            & (n_distinct <= _DISCRETE_MAX_DISTINCT)
+            & (n_distinct * _DISCRETE_MIN_MULTIPLICITY <= n)
+        )
+
+    @staticmethod
+    def _full_count(flat: np.ndarray) -> np.ndarray:
+        ordered = np.sort(flat, axis=0)
+        return 1 + np.count_nonzero(ordered[1:] != ordered[:-1], axis=0)
+
+    @pytest.mark.parametrize("n", [50, _DISCRETE_SCREEN_ROWS, 1000])
+    def test_decision_matches_the_full_count(self, n):
+        """Discrete, mixed, continuous, constant and late-varying columns."""
+        rng = np.random.default_rng(0)
+        cont = rng.normal(size=n)
+        late = np.where(np.arange(n) < min(n, _DISCRETE_SCREEN_ROWS), 0.5, cont)
+        cols = [
+            cont,  # continuous
+            np.round(cont, 2),  # rounded continuous
+            rng.integers(0, 2, n).astype(float),  # binary
+            rng.integers(0, _DISCRETE_MAX_DISTINCT, n).astype(float),  # at the cap
+            rng.integers(0, _DISCRETE_MAX_DISTINCT + 1, n).astype(float),  # above the cap
+            np.where(cont > 0, cont, 0.0),  # mixed: an atom plus a continuous part
+            np.full(n, 3.0),  # constant
+            late,  # few distinct values in the screened rows only
+            np.where(np.arange(n) % 2 == 0, -0.0, 0.0),  # signed zeros are one value
+        ]
+        flat = np.stack(cols, axis=1).astype(np.float32)
+        full = self._full_count(flat)
+        screened = _count_distinct(jnp.asarray(flat))
+        np.testing.assert_array_equal(self._decision(screened, n), self._decision(full, n))
+        exact = full <= _DISCRETE_MAX_DISTINCT
+        np.testing.assert_array_equal(screened[exact], full[exact])
+        assert np.all(screened[~exact] > _DISCRETE_MAX_DISTINCT)
