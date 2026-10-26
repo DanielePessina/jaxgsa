@@ -10,7 +10,7 @@ other. VKOGA is the given-data method in jaxgsa whose indices are defined
 without that assumption. Given-data means it uses input/output pairs you
 already have and asks for no new model runs. Its design-based counterpart,
 which runs your model on a fresh design instead, is
-[Kucherenko](/examples/kucherenko).
+[Kucherenko](/guide/methods/kucherenko).
 
 VKOGA is the two-stage surrogate-based sensitivity analysis of Hilhorst et
 al. (2024). Stage one fits a greedy kernel surrogate to whatever `(X, Y)` data
@@ -497,9 +497,9 @@ index. Read the rows.
 `VKOGAResult` has no `shapley()` method. Shapley effects allocate variance
 across parameter subsets. A kernel expansion is a sum over centres instead,
 and every centre involves every parameter, so there is no membership matrix to
-allocate from. Use [`jaxgsa.hdmr`](/examples/hdmr), whose ANCOVA terms are
+allocate from. Use [`jaxgsa.hdmr`](/guide/methods/hdmr), whose ANCOVA terms are
 labelled and which supports `shapley(include_correlative=True)` for dependent
-inputs, or [`jaxgsa.pce`](/examples/pce).
+inputs, or [`jaxgsa.pce`](/guide/methods/pce).
 
 ## Shape rules
 
@@ -539,15 +539,15 @@ aliases of `S_TC` and `S_TU`.
 
 ## See also
 
-- [Kucherenko](/examples/kucherenko) for the same two quantities from model
+- [Kucherenko](/guide/methods/kucherenko) for the same two quantities from model
   runs instead of a surrogate. It is also the check when a VKOGA index leaves
   `[0, 1]`.
-- [RS-HDMR](/examples/hdmr) for the other correlation-aware given-data method,
+- [RS-HDMR](/guide/methods/hdmr) for the other correlation-aware given-data method,
   which decomposes term by term (structural `Sa` vs correlative `Sb`) and can
   produce Shapley effects.
-- [PCE](/examples/pce) for analytical Sobol indices when inputs are independent.
-- [HSIC](/examples/hsic), [PAWN](/examples/pawn), and
-  [Optimal Transport](/examples/optimal-transport) for correlation-tolerant
+- [PCE](/guide/methods/pce) for analytical Sobol indices when inputs are independent.
+- [HSIC](/guide/methods/hsic), [PAWN](/guide/methods/pawn), and
+  [Optimal Transport](/guide/methods/optimal-transport) for correlation-tolerant
   measures that are not variance fractions.
 - [VKOGA API](/api/vkoga) for the
   theory, and for when to choose VKOGA over HDMR's ANCOVA split.

@@ -103,7 +103,7 @@ x-axis against `sigma` on the y-axis. Points near the origin are droppable,
 points along the x-axis are additive, points climbing above the diagonal are
 the ones a variance decomposition will have to work for.
 
-![Morris mu-star-sigma plane for Ishigami from 100 trajectories, marking which inputs are additive and which interact](./figures/morris_gsa_ishigami-morris-mu-sigma-plane-trajectory-r-100.png)
+![Morris mu-star-sigma plane for Ishigami from 100 trajectories, marking which inputs are additive and which interact](../../examples/figures/morris_gsa_ishigami-morris-mu-sigma-plane-trajectory-r-100.png)
 
 The screening verdict here is that no input can be dropped. That is a real
 answer, and it cost 63 runs.
@@ -218,7 +218,7 @@ gives `x2` the identical elementary-effect magnitude for the grid reason above,
 so no resample can produce a different mean. A zero-width Morris interval means
 the design is not resolving the input, not that the design has nailed it.
 
-![Morris mu-star bar chart with 95% bootstrap confidence intervals from 500 resamples](./figures/morris_gsa_mu-with-95-bootstrap-cis-500-resamples.png)
+![Morris mu-star bar chart with 95% bootstrap confidence intervals from 500 resamples](../../examples/figures/morris_gsa_mu-with-95-bootstrap-cis-500-resamples.png)
 
 ## A cheap convergence check
 
@@ -256,7 +256,7 @@ A quarter of the trajectories still yields 53 unique evaluations, and the
 ranking does not move. `rankings stable: True` is a cheap gate to put in front
 of the expensive part of a screening pipeline.
 
-![Morris mu-star at r=100 against the same design downsampled to 25 trajectories](./figures/morris_gsa_mu-stability-under-downsampling-trajectory-desig.png)
+![Morris mu-star at r=100 against the same design downsampled to 25 trajectories](../../examples/figures/morris_gsa_mu-stability-under-downsampling-trajectory-desig.png)
 
 ## Radial design
 
@@ -288,7 +288,7 @@ secant slope with the steep parts averaged away. The radial number is the
 trustworthy one here. `n_levels` is ignored by this design, and
 `scramble=True` (the default) should stay on.
 
-![Morris mu-star for the trajectory and radial designs on the same 100-trajectory budget](./figures/morris_gsa_trajectory-vs-radial-mu-at-the-same-budget-r-100.png)
+![Morris mu-star for the trajectory and radial designs on the same 100-trajectory budget](../../examples/figures/morris_gsa_trajectory-vs-radial-mu-at-the-same-budget-r-100.png)
 
 ## Morris measures from a Saltelli design, for free
 
@@ -377,7 +377,7 @@ additive contributions that block measures the same effect, so harvesting it
 would double the apparent sample size and narrow bootstrap intervals without
 adding information. It is deliberately left unused.
 
-![Sobol ST and derived Morris mu-star normalized to their own maxima, both from the same Saltelli design at zero extra model runs](./figures/morris_gsa_both-from-one-design-2048-model-runs-0-extra-256.png)
+![Sobol ST and derived Morris mu-star normalized to their own maxima, both from the same Saltelli design at zero extra model runs](../../examples/figures/morris_gsa_both-from-one-design-2048-model-runs-0-extra-256.png)
 
 ## Multi-output example
 
@@ -637,9 +637,9 @@ D is always the last axis.
 
 - [Basic example](/examples/basic) for the Sobol workflow, the natural next step
   once screening has told you which inputs deserve it.
-- [DGSM](/examples/dgsm) for the autodiff version of the same idea, with a
+- [DGSM](/guide/methods/dgsm) for the autodiff version of the same idea, with a
   provable bound on `ST` attached.
-- [eFAST](/examples/efast) for frequency-based variance decomposition.
+- [eFAST](/guide/methods/efast) for frequency-based variance decomposition.
 - [xarray labeled output](/examples/xarray) for named access by parameter,
   output and time.
 - [Methods](/guide/methods) for the theory and the method comparison.

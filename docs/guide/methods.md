@@ -9,8 +9,8 @@ fourteen methods. [GSA concepts](/guide/concepts) explains what the results mean
 
 ### 1. Can you choose new model inputs?
 
-[Sobol'](/api/sobol), [eFAST](/api/efast), [Morris](/api/morris), and
-[Kucherenko](/api/kucherenko) create their own sample designs. Evaluate your
+[Sobol'](/guide/methods/sobol), [eFAST](/guide/methods/efast), [Morris](/guide/methods/morris), and
+[Kucherenko](/guide/methods/kucherenko) create their own sample designs. Evaluate your
 model at the returned points, then pass the outputs to `analyze()`. Ordinary
 input-output pairs cannot replace those designs.
 
@@ -53,8 +53,11 @@ see [Scaling to large problems](/guide/scale).
 
 ## Compare the methods
 
-Use this table to narrow the choice, then open a method's API page for its
-assumptions, sampling instructions, result fields, and uncertainty options.
+Use this table to narrow the choice. Each method name links to its guide
+page, which has a worked example. The
+[method capabilities](#method-capabilities) table links to each API page,
+which lists the assumptions, sampling instructions, result fields, and
+uncertainty options.
 "Own design" means you must evaluate the model at points produced by
 `sample()`.
 
@@ -65,20 +68,20 @@ those sources alongside the software. For Sobol', use the
 
 | Method | Main question and result | Data needed | Watch for |
 | --- | --- | --- | --- |
-| [Sobol'](/api/sobol) | How much variance comes from each independent input alone and with interactions? $S_1$, $S_T$, optional $S_2$ | Own design | Requires independent inputs. |
-| [eFAST](/api/efast) | How much variance is due to each independent input? $S_1$, $S_T$ | Own design | Design size grows quickly with input count. |
-| [Morris](/api/morris) | Which inputs are worth a closer look? $\mu^*$, $\sigma$ | Own design | Screening statistics are not variance fractions. |
-| [Kucherenko](/api/kucherenko) | What are conditional variance effects with dependent inputs? $S_1$, $S_T$, and with `subsets="all"` exact Shapley effects and PME | Own design | Interpretation differs from independent-input Sobol'. The `"all"` design costs $N\,2^D$ runs and needs $D \le 12$. |
-| [PCE](/api/pce) | Can a polynomial model provide variance indices? $S_1$, $S_T$, $S_2$ | Existing `X`, `Y` | Check fit; basis size grows with dimension and order. |
-| [HDMR](/api/hdmr) | Which fitted component contributes, including under dependence? ANCOVA terms | Existing `X`, `Y` | Check fit; interaction order increases cost. |
-| [VKOGA](/api/vkoga) | How do correlated and uncorrelated effects differ? Several variance quantities | Existing `X`, `Y` | Results depend on a kernel surrogate. |
-| [Shapley](/api/shapley) | How can variance be allocated to one share per input? Shapley effects | Existing `X`, `Y` | Interactions are shared, not reported separately; check surrogate fit. |
-| [DGSM](/api/dgsm) | Are derivative-based bounds useful for screening? Bounds on $S_T$ | Existing `X` and JAX model | Bounds can be loose; Jacobians can be costly. |
-| [PAWN](/api/pawn) | Does an input change the output CDF? KS distance | Existing `X`, `Y` | Conditional binning needs a tuning choice. |
-| [Rank](/api/rank) | How much variance does each input explain alone? $S_1$ from one sample, by rank statistics | Existing `X`, `Y` | First order only; many tied inputs bias it. |
-| [Borgonovo delta](/api/borgonovo) | Does an input change the output density? $\delta$ | Existing `X`, `Y` | Density estimates need enough data. |
-| [Optimal transport](/api/optimal-transport) | How far does the output distribution move? Transport distance | Existing `X`, `Y` | Transport calculations cost more than simple univariate statistics. |
-| [HSIC](/api/hsic) | Are input and output statistically dependent? Kernel dependence and p-values | Existing `X`, `Y` | Kernel and permutation cost grow with sample size. |
+| [Sobol'](/guide/methods/sobol) | How much variance comes from each independent input alone and with interactions? $S_1$, $S_T$, optional $S_2$ | Own design | Requires independent inputs. |
+| [eFAST](/guide/methods/efast) | How much variance is due to each independent input? $S_1$, $S_T$ | Own design | Design size grows quickly with input count. |
+| [Morris](/guide/methods/morris) | Which inputs are worth a closer look? $\mu^*$, $\sigma$ | Own design | Screening statistics are not variance fractions. |
+| [Kucherenko](/guide/methods/kucherenko) | What are conditional variance effects with dependent inputs? $S_1$, $S_T$, and with `subsets="all"` exact Shapley effects and PME | Own design | Interpretation differs from independent-input Sobol'. The `"all"` design costs $N\,2^D$ runs and needs $D \le 12$. |
+| [PCE](/guide/methods/pce) | Can a polynomial model provide variance indices? $S_1$, $S_T$, $S_2$ | Existing `X`, `Y` | Check fit; basis size grows with dimension and order. |
+| [HDMR](/guide/methods/hdmr) | Which fitted component contributes, including under dependence? ANCOVA terms | Existing `X`, `Y` | Check fit; interaction order increases cost. |
+| [VKOGA](/guide/methods/vkoga) | How do correlated and uncorrelated effects differ? Several variance quantities | Existing `X`, `Y` | Results depend on a kernel surrogate. |
+| [Shapley](/guide/methods/shapley) | How can variance be allocated to one share per input? Shapley effects | Existing `X`, `Y` | Interactions are shared, not reported separately; check surrogate fit. |
+| [DGSM](/guide/methods/dgsm) | Are derivative-based bounds useful for screening? Bounds on $S_T$ | Existing `X` and JAX model | Bounds can be loose; Jacobians can be costly. |
+| [PAWN](/guide/methods/pawn) | Does an input change the output CDF? KS distance | Existing `X`, `Y` | Conditional binning needs a tuning choice. |
+| [Rank](/guide/methods/rank) | How much variance does each input explain alone? $S_1$ from one sample, by rank statistics | Existing `X`, `Y` | First order only; many tied inputs bias it. |
+| [Borgonovo delta](/guide/methods/borgonovo) | Does an input change the output density? $\delta$ | Existing `X`, `Y` | Density estimates need enough data. |
+| [Optimal transport](/guide/methods/optimal-transport) | How far does the output distribution move? Transport distance | Existing `X`, `Y` | Transport calculations cost more than simple univariate statistics. |
+| [HSIC](/guide/methods/hsic) | Are input and output statistically dependent? Kernel dependence and p-values | Existing `X`, `Y` | Kernel and permutation cost grow with sample size. |
 
 ### Special cases
 

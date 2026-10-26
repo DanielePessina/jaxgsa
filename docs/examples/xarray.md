@@ -321,7 +321,7 @@ struggled.
   decide which dimensions a dataset gets.
 - [Bootstrap Confidence Intervals](/examples/bootstrap) for the resampling
   behind `S1_lower` and `S1_upper`.
-- [RS-HDMR Example](/examples/hdmr) for making the surrogate fit before you
+- [RS-HDMR guide page](/guide/methods/hdmr) for making the surrogate fit before you
   trust its indices.
 - [Screen first, then quantify](/examples/advanced-workflow) for cutting 20 inputs to 4 with Morris,
   then spending the Sobol budget on the survivors.

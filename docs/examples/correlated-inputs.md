@@ -347,7 +347,7 @@ against 0.2 for optimal transport. Drop `N` before you reach for it.
 
 ### Correlation-exclusive variance fractions
 
-[Kucherenko](/examples/kucherenko) and [VKOGA](/examples/vkoga) both report
+[Kucherenko](/guide/methods/kucherenko) and [VKOGA](/guide/methods/vkoga) both report
 `S1`/`S_TC` and `ST`/`S_TU`, the two quantities the opening section separated.
 They differ in where the numbers come from. Kucherenko runs your model on a
 conditional-copula design of `base_n * (2D + 1)` points and carries no
@@ -357,7 +357,7 @@ totals further into `S_U`, `S_C` and `S_IU`.
 
 VKOGA training data must cover the analysis distribution accurately. Rows
 drawn from that distribution work, and so does an independent design. See its
-[training-data section](/examples/vkoga#training-data-must-cover-the-analysis-distribution).
+[training-data section](/guide/methods/vkoga#training-data-must-cover-the-analysis-distribution).
 
 ### HDMR: the split per term, not per parameter
 
@@ -489,11 +489,11 @@ refused in exactly the same way.
 
 - [Non-Uniform Inputs](/examples/non-uniform-inputs) for the marginal specs
   the copula couples.
-- [Kucherenko](/examples/kucherenko) and [VKOGA](/examples/vkoga) for the two
+- [Kucherenko](/guide/methods/kucherenko) and [VKOGA](/guide/methods/vkoga) for the two
   variance fractions under dependence.
-- [RS-HDMR](/examples/hdmr) for the ANCOVA decomposition in depth.
-- [Optimal Transport](/examples/optimal-transport) and
-  [Borgonovo Delta](/examples/borgonovo) for the distribution-based indices.
+- [RS-HDMR](/guide/methods/hdmr) for the ANCOVA decomposition in depth.
+- [Optimal Transport](/guide/methods/optimal-transport) and
+  [Borgonovo Delta](/guide/methods/borgonovo) for the distribution-based indices.
 - [Methods guide](/guide/methods) for which method to pick under correlation.
 
 ## Custom dependence without a copula
@@ -637,7 +637,7 @@ training rows. Here the training rows come from the problem without its
 sampler, so `u`, `v` and `w` are independent and cover the cube. Training on
 the modular draws themselves also works, because the analysis uses conditionals
 of the joint distribution. See
-[VKOGA training data](/examples/vkoga#training-data-must-cover-the-analysis-distribution).
+[VKOGA training data](/guide/methods/vkoga#training-data-must-cover-the-analysis-distribution).
 
 VKOGA's declared marginals must match the sampler's marginals, because its
 coordinate transform and component basis still use `Problem`. All three

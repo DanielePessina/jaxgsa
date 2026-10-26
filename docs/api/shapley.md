@@ -195,4 +195,4 @@ arrays with none of the checks, so it composes with `jit`, `vmap` and `jacrev`.
 - Owen, A. B. & Prieur, C. (2017). [On Shapley value for measuring importance of dependent inputs](https://doi.org/10.1137/16M1097717). *SIAM/ASA Journal on Uncertainty Quantification*, 5(1), 986–1002. Conditional-variance Shapley effects for dependent inputs, which differ from this implementation's correlated HDMR allocation.
 - Li, G., Rabitz, H., Yelvington, P. E., Oluwole, O. O., Bacon, F., Kolb, C. E. & Schoendorf, J. (2010). [Global sensitivity analysis for systems with independent and/or correlated inputs](https://doi.org/10.1021/jp9096919). *Journal of Physical Chemistry A*, 114(19), 6022–6032. ANCOVA structural and correlative decomposition used by the HDMR backend.
 
-See the [Shapley example](/examples/shapley) and the [API overview](/api/).
+See the [Shapley guide page](/guide/methods/shapley) and the [API overview](/api/).

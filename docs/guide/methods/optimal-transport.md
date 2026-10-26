@@ -102,7 +102,7 @@ and x3, not just a difference in magnitude.
 The result also carries `S1` and `S1_conf`. `S1` is exactly
 `2 * advective * N / (N - 1)`, where the `N / (N - 1)` factor puts the
 conditional and unconditional variances on the same ddof=0 convention that
-[borgonovo](/examples/borgonovo) uses.
+[borgonovo](/guide/methods/borgonovo) uses.
 
 That makes it a cheap consistency test. Two given-data estimators, entirely
 different machinery, one that sorts quantiles and one that fits kernel
@@ -474,7 +474,7 @@ measures each input's total association with the output, including effects
 carried by correlated partners, and the same reading applies to `S1`. An
 input the model never reads scores above 0 when it correlates with one the
 model does read. That is correct, not an error. Use
-[VKOGA](/examples/vkoga) or [Kucherenko](/examples/kucherenko) to split the
+[VKOGA](/guide/methods/vkoga) or [Kucherenko](/guide/methods/kucherenko) to split the
 direct effect from the borrowed one.
 
 `slice_chunk_size` applies to `univariate` mode only. The point-cloud modes
@@ -490,9 +490,9 @@ doi:10.1287/mnsc.2023.01796
 ## See also
 
 - [Basic example](/examples/basic) for the Sobol variance decomposition.
-- [Borgonovo delta](/examples/borgonovo) for the density-distance index and
+- [Borgonovo delta](/guide/methods/borgonovo) for the density-distance index and
   the other given-data S1.
-- [PAWN](/examples/pawn) for the CDF-based index, which is much cheaper.
-- [HSIC](/examples/hsic) for kernel dependence with a significance test.
+- [PAWN](/guide/methods/pawn) for the CDF-based index, which is much cheaper.
+- [HSIC](/guide/methods/hsic) for kernel dependence with a significance test.
 - [Methods](/guide/methods) for a side-by-side comparison.
 - [API reference](/api/#given-data-methods) for every parameter.

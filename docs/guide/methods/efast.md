@@ -114,7 +114,7 @@ much larger means interaction, unattributed. The design cost was 12288 runs:
 `omega_0` and `M` come back on the result so a saved analysis records how it was
 made.
 
-![eFAST first-order and total-order indices on the Ishigami benchmark compared against the analytical values](./figures/efast_gsa_ishigami-efast-vs-analytical-indices.png)
+![eFAST first-order and total-order indices on the Ishigami benchmark compared against the analytical values](../../examples/figures/efast_gsa_ishigami-efast-vs-analytical-indices.png)
 
 ## Choosing n_per_curve
 
@@ -265,7 +265,7 @@ the coefficients: `x1` dominates at `ST = 0.787`, `x2` is moderate, `x3` and
 summary shows `x7` at `0.00018`). eFAST found the "safe to fix" tier without
 being told which inputs those were.
 
-![eFAST first-order and total-order indices on the eight-input Sobol G-function against the analytical values](./figures/efast_gsa_sobol-g-function-efast-vs-analytical-indices.png)
+![eFAST first-order and total-order indices on the eight-input Sobol G-function against the analytical values](../../examples/figures/efast_gsa_sobol-g-function-efast-vs-analytical-indices.png)
 
 ## There is no confidence interval, and there is no n_bootstrap
 
@@ -413,7 +413,7 @@ same indices — the top-k summary is unchanged from the scalar case. That makes
 the scaled copy a way to check the multi-output path, not a way to learn
 something new about the model.
 
-![Per-output eFAST bar charts for the full Ishigami output and its half-amplitude copy](./figures/efast_gsa_ishigami-full.png)
+![Per-output eFAST bar charts for the full Ishigami output and its half-amplitude copy](../../examples/figures/efast_gsa_ishigami-full.png)
 
 ## Time-series example
 
@@ -548,7 +548,7 @@ decides the decay later, as `exp(-gamma * t)` collapses; frequency carries the
 oscillation itself, which is why it holds the largest mean `ST` over the whole
 window (0.859).
 
-![First-order and total-order eFAST indices over time for the damped oscillator](./figures/efast_gsa_first-order-s1-t.png)
+![First-order and total-order eFAST indices over time for the damped oscillator](../../examples/figures/efast_gsa_first-order-s1-t.png)
 
 ## Saving a design
 
@@ -628,7 +628,7 @@ D is always the last axis.
 
 - [Basic example](/examples/basic) for the Sobol workflow, with `S2` and real
   confidence intervals.
-- [Morris](/examples/morris) for a much cheaper screen when a ranking is all you
+- [Morris](/guide/methods/morris) for a much cheaper screen when a ranking is all you
   need.
 - [Multi-output and time series](/examples/multi-output) for the same shape
   conventions on Sobol and HDMR.

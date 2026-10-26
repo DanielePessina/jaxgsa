@@ -299,7 +299,7 @@ The script also warns that every upper bound exceeds 1, the smallest being
 value of the run is the containment check and the $\nu$ ranking
 (x2 > x3 > x1).
 
-![DGSM lower and upper bounds bracketing the analytical total-order indices on Ishigami](./figures/dgsm_benchmark_ishigami-dgsm-bounds-vs-analytical-s-t.png)
+![DGSM lower and upper bounds bracketing the analytical total-order indices on Ishigami](../../examples/figures/dgsm_benchmark_ishigami-dgsm-bounds-vs-analytical-s-t.png)
 
 **Linear model.** The same pattern, with coefficients $(1, 2, 3)$:
 
@@ -331,7 +331,7 @@ collapse of both bounds onto $S_T$ happens on Gaussian marginals, where the
 Poincare constant is $\operatorname{Var}(x_i)$ rather than
 $(b-a)^2/\pi^2$.
 
-![DGSM bounds collapsing onto the exact total-order indices for the additive linear model](./figures/dgsm_benchmark_linear-model-dgsm-bounds-collapse-to-exact-s-t.png)
+![DGSM bounds collapsing onto the exact total-order indices for the additive linear model](../../examples/figures/dgsm_benchmark_linear-model-dgsm-bounds-collapse-to-exact-s-t.png)
 
 ## Forward mode or reverse mode, chosen by shape
 
@@ -560,9 +560,9 @@ On the pre-computed path, `dfdx` mirrors `Y` with one extra trailing `(D,)`:
 
 - [Basic example](/examples/basic) for the Sobol workflow when you need the
   exact variance shares the bounds only bracket.
-- [Morris](/examples/morris) for the same screening idea with finite differences
+- [Morris](/guide/methods/morris) for the same screening idea with finite differences
   instead of derivatives, for models JAX cannot differentiate.
-- [eFAST](/examples/efast) for frequency-based variance decomposition.
-- [PCE](/examples/pce) for analytical Sobol indices from expansion coefficients.
+- [eFAST](/guide/methods/efast) for frequency-based variance decomposition.
+- [PCE](/guide/methods/pce) for analytical Sobol indices from expansion coefficients.
 - [Methods](/guide/methods) for the theory and the method comparison.
 - [API reference](/api/#given-data-methods) for every parameter.

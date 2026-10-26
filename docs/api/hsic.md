@@ -183,5 +183,5 @@ and has no default there either.
 - Da Veiga, S. (2015). [Global sensitivity analysis with dependence measures](https://doi.org/10.1080/00949655.2014.945932). *Journal of Statistical Computation and Simulation*, 85(7), 1283–1305. Develops dependence-based sensitivity measures, including normalized HSIC.
 - Larsen, T., and Alexanderian, A. (2026). [A new kernel-based approach for the global sensitivity analysis of models with correlated inputs](https://arxiv.org/abs/2603.00849). *arXiv preprint*, arXiv:2603.00849. Develops total HSIC indices using augmented kernels.
 
-See the [HSIC example](/examples/hsic), [Methods](/guide/methods), and the
+See the [HSIC guide page](/guide/methods/hsic), [Methods](/guide/methods), and the
 [API overview](/api/).

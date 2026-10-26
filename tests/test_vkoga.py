@@ -218,7 +218,7 @@ def test_asymmetric_correlation_structure(asym_result):
     assert list(np.argsort(S_TC)) == list(np.argsort(S_TC_true))
     assert list(np.argsort(S_TU)) == list(np.argsort(S_TU_true))
     # The surrogate under-resolves the Gaussian tails, so the variance comes
-    # out low. Documented in docs/examples/vkoga.md; do not loosen this.
+    # out low. Documented in docs/guide/methods/vkoga.md; do not loosen this.
     np.testing.assert_allclose(float(np.asarray(asym_result.variance)), var_y, rtol=5e-2)
 
 

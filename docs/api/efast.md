@@ -171,6 +171,6 @@ inside `jax.jit`, `jax.vmap` and `jax.jacrev`.
 
 Related docs:
 
-- [eFAST Example](/examples/efast)
+- [eFAST guide page](/guide/methods/efast)
 - [Methods](/guide/methods)
 - [API reference](/api/)

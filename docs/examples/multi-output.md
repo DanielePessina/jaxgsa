@@ -424,6 +424,6 @@ characters and one keyword, and the labels come out right.
   parameter, output and time name.
 - [Bootstrap Confidence Intervals](/examples/bootstrap) for putting an interval
   on each of those 320 numbers.
-- [RS-HDMR Example](/examples/hdmr) for the same shapes on the surrogate route.
+- [RS-HDMR guide page](/guide/methods/hdmr) for the same shapes on the surrogate route.
 - [Screen first, then quantify](/examples/advanced-workflow) for cutting 20 inputs to 4 with Morris,
   then spending the Sobol budget on the survivors.

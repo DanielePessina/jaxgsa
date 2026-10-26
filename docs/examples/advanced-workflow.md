@@ -386,11 +386,11 @@ Screening is not always the right call.
 
 ## See also
 
-- [Morris screening](/examples/morris) for what `mu`, `mu_star` and `sigma`
+- [Morris screening](/guide/methods/morris) for what `mu`, `mu_star` and `sigma`
   measure and how to plot them.
 - [Bootstrap confidence intervals](/examples/bootstrap) for the intervals in the
   second pass.
 - [Save and reload a design](/examples/save-load) for splitting either pass
   across sessions, which you will want if each model run is ten minutes.
-- [RS-HDMR](/examples/hdmr) for the other way to cut cost: fit a surrogate to
+- [RS-HDMR](/guide/methods/hdmr) for the other way to cut cost: fit a surrogate to
   samples you already have and read the indices off the fit.

@@ -281,4 +281,4 @@ first.
   [Multivariate sensitivity analysis to measure global contribution of input factors in dynamic models](https://doi.org/10.1016/j.ress.2010.12.002).
   *Reliability Engineering & System Safety*, 96(4), 450–459.
 
-See the [PCE example](/examples/pce) and the [API overview](/api/).
+See the [PCE guide page](/guide/methods/pce) and the [API overview](/api/).

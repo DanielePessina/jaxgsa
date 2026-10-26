@@ -83,6 +83,43 @@ export default defineConfig({
           ],
         },
         {
+          text: 'Methods',
+          items: [
+            {
+              text: 'Methods that build a design',
+              items: [
+                { text: 'Sobol', link: '/guide/methods/sobol' },
+                { text: 'Morris', link: '/guide/methods/morris' },
+                { text: 'eFAST', link: '/guide/methods/efast' },
+                { text: 'Kucherenko', link: '/guide/methods/kucherenko' },
+              ],
+            },
+            {
+              text: 'Gradient methods',
+              items: [{ text: 'DGSM', link: '/guide/methods/dgsm' }],
+            },
+            {
+              text: 'Methods for given data',
+              items: [
+                { text: 'HSIC', link: '/guide/methods/hsic' },
+                { text: 'PAWN', link: '/guide/methods/pawn' },
+                { text: 'Rank-based S1', link: '/guide/methods/rank' },
+                { text: 'Borgonovo delta', link: '/guide/methods/borgonovo' },
+                { text: 'Optimal transport', link: '/guide/methods/optimal-transport' },
+              ],
+            },
+            {
+              text: 'Surrogate methods',
+              items: [
+                { text: 'PCE', link: '/guide/methods/pce' },
+                { text: 'RS-HDMR', link: '/guide/methods/hdmr' },
+                { text: 'Shapley effects', link: '/guide/methods/shapley' },
+                { text: 'VKOGA', link: '/guide/methods/vkoga' },
+              ],
+            },
+          ],
+        },
+        {
           text: 'How do I...',
           items: [
             {
@@ -143,23 +180,6 @@ export default defineConfig({
             { text: 'Fit input ranges', link: '/examples/inverse-sobol-bounds' },
             { text: 'Population PK (NLME)', link: '/examples/nlme' },
             { text: 'Save and reload', link: '/examples/save-load' },
-          ],
-        },
-        {
-          text: 'Methods',
-          items: [
-            { text: 'Morris', link: '/examples/morris' },
-            { text: 'eFAST', link: '/examples/efast' },
-            { text: 'DGSM', link: '/examples/dgsm' },
-            { text: 'Kucherenko', link: '/examples/kucherenko' },
-            { text: 'PCE', link: '/examples/pce' },
-            { text: 'RS-HDMR', link: '/examples/hdmr' },
-            { text: 'Shapley effects', link: '/examples/shapley' },
-            { text: 'VKOGA', link: '/examples/vkoga' },
-            { text: 'HSIC', link: '/examples/hsic' },
-            { text: 'PAWN', link: '/examples/pawn' },
-            { text: 'Borgonovo delta', link: '/examples/borgonovo' },
-            { text: 'Optimal transport', link: '/examples/optimal-transport' },
           ],
         },
         {

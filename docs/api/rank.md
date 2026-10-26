@@ -193,4 +193,4 @@ $2\times10^{-4}$ after that factor.
 - Gamboa, F., Gremaud, P., Klein, T., and Lagnoux, A. (2022). [Global sensitivity analysis: a novel generation of mighty estimators based on rank statistics](https://doi.org/10.3150/21-BEJ1421). *Bernoulli*, 28(4), 2345–2374. Gives the rank estimator of the first-order Sobol' index.
 - Chatterjee, S. (2021). [A new coefficient of correlation](https://doi.org/10.1080/01621459.2020.1758115). *Journal of the American Statistical Association*, 116(536), 2009–2022. Introduces the rank-pairing statistic that the estimator builds on.
 
-See the [Methods](/guide/methods) and the [API overview](/api/).
+See the [rank guide page](/guide/methods/rank), [Methods](/guide/methods) and the [API overview](/api/).

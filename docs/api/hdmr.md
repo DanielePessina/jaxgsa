@@ -238,4 +238,4 @@ carries `D`, and there is no `terms` tuple to label them with.
   [Global Sensitivity Analysis for Systems with Independent and/or Correlated Inputs](https://doi.org/10.1021/jp9096919).
   *Journal of Physical Chemistry A*, 114(19), 6022–6032.
 
-See the [HDMR example](/examples/hdmr) and the [API overview](/api/).
+See the [HDMR guide page](/guide/methods/hdmr) and the [API overview](/api/).

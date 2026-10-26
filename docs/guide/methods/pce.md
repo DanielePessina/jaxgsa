@@ -343,8 +343,8 @@ budget.
 Correlated inputs raise `ValueError`. PCE's orthogonality argument assumes
 independent marginals, so a declared `problem.correlation` breaks the step
 from coefficients to partial variances. The error message says so and names
-the alternatives: [RS-HDMR](/examples/hdmr), [VKOGA](/examples/vkoga) and
-[Kucherenko](/examples/kucherenko). This refusal is deliberate. Silently wrong
+the alternatives: [RS-HDMR](/guide/methods/hdmr), [VKOGA](/guide/methods/vkoga) and
+[Kucherenko](/guide/methods/kucherenko). This refusal is deliberate. Silently wrong
 indices are worse than no indices.
 
 Everything the polynomial cannot represent is missing from the indices, and
@@ -354,10 +354,10 @@ its absence is reported through `cv_rmse` alone.
 
 - [Basic Example](/examples/basic) for the Sobol workflow when you can afford
   a structured Saltelli design.
-- [RS-HDMR](/examples/hdmr) for the other given-data surrogate, which uses
+- [RS-HDMR](/guide/methods/hdmr) for the other given-data surrogate, which uses
   B-splines and handles correlated inputs.
-- [Shapley Effects](/examples/shapley) for a fair allocation read off this
+- [Shapley Effects](/guide/methods/shapley) for a fair allocation read off this
   same fit.
-- [DGSM](/examples/dgsm) for derivative-based sensitivity bounds.
+- [DGSM](/guide/methods/dgsm) for derivative-based sensitivity bounds.
 - [Methods](/guide/methods) for the theory behind PCE.
 - [API Reference](/api/#given-data-methods) for full parameter documentation.

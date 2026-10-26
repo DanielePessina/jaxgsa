@@ -331,7 +331,7 @@ retain sampled rows and provenance, not callable code. VKOGA's declared
 marginals must match the sampler, because its coordinate transform and
 component bases still use them. Training data must cover the analysis
 distribution (see
-[VKOGA training data](/examples/vkoga#training-data-must-cover-the-analysis-distribution)).
+[VKOGA training data](/guide/methods/vkoga#training-data-must-cover-the-analysis-distribution)).
 Dependence fitting remains explicit, never triggered just by supplying data.
 
 See the [complete example](/examples/correlated-inputs#custom-dependence-without-a-copula).
@@ -477,5 +477,5 @@ sampler again with `problem.with_sampler(f, sampler_dimension=k)`.
   [Multivariate sensitivity analysis to measure global contribution of input factors in dynamic models](https://doi.org/10.1016/j.ress.2010.12.002).
   *Reliability Engineering & System Safety*, 96(4), 450–459.
 
-See the [Kucherenko example](/examples/kucherenko), [Methods](/guide/methods),
+See the [Kucherenko guide page](/guide/methods/kucherenko), [Methods](/guide/methods),
 and the [API overview](/api/).

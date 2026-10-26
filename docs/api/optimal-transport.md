@@ -281,5 +281,5 @@ result object only.
 - Borgonovo, E., Figalli, A., Plischke, E., and Savaré, G. (2025; first published online 2024). [Global Sensitivity Analysis via Optimal Transport](https://doi.org/10.1287/mnsc.2023.01796). *Management Science*, 71(5), 3809–3828. Defines the OT sensitivity measures, their decomposition and the given-data estimation strategy.
 - Cuturi, M. (2013). [Sinkhorn Distances: Lightspeed Computation of Optimal Transport](https://papers.nips.cc/paper/2013/hash/af21d0c97db2e27e13572cbf59eb343d-Abstract.html). *Advances in Neural Information Processing Systems*, 26, 2292–2300. Provides the entropic Sinkhorn algorithm used in the point-cloud modes.
 
-See the [Optimal transport example](/examples/optimal-transport),
+See the [Optimal transport guide page](/guide/methods/optimal-transport),
 [Methods](/guide/methods), and the [API overview](/api/).

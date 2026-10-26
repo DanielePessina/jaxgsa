@@ -129,7 +129,7 @@ indices agree, the input acts alone and any one of them is the whole story.
 The sum prints 0.99999994 rather than 1. That is float32 rounding over a
 165-term expansion, not a modelling gap. Do not chase it.
 
-![Shapley effects on Ishigami bracketed between S1 and ST for every input, from the PCE backend](./figures/shapley_gsa_ishigami-s-1-leq-mathrm-sh-leq-s-t-pce-backend-o.png)
+![Shapley effects on Ishigami bracketed between S1 and ST for every input, from the PCE backend](../../examples/figures/shapley_gsa_ishigami-s-1-leq-mathrm-sh-leq-s-t-pce-backend-o.png)
 
 ## Ground-truth check
 
@@ -217,7 +217,7 @@ fit: `order=8` reproduces the analytical effects to 0.0006. Each result also
 reports the order it actually fit as `result.order` (`effective order: 8` in
 the scalar run above), so a saved analysis records its own truncation.
 
-![Shapley effect estimates converging onto the analytical values as the surrogate order is swept from 2 to 8](./figures/shapley_gsa_mathrm-sh-convergence-with-surrogate-order-dashe.png)
+![Shapley effect estimates converging onto the analytical values as the surrogate order is swept from 2 to 8](../../examples/figures/shapley_gsa_mathrm-sh-convergence-with-surrogate-order-dashe.png)
 
 ## Backends
 
@@ -258,7 +258,7 @@ This example adds a second output with a known answer. Y2 is a sum of squares
 over symmetric bounds, so it has no interactions and its three inputs are
 interchangeable. Its shares must come out at 1/3 each, which is how you check
 the multi-output path did not scramble an axis. `n_intervals=4` widens the B-spline
-basis, for the reason on the [RS-HDMR page](/examples/hdmr).
+basis, for the reason on the [RS-HDMR page](/guide/methods/hdmr).
 
 ```python
 import jax.numpy as jnp
@@ -415,8 +415,8 @@ contribution `Sa + Sb` and does accept a declared correlation. It is an
 ANCOVA-based attribution. A true conditional-variance Shapley effect needs an
 estimator of the variance remaining once a group of inputs is held fixed, and
 jaxgsa does not have one yet. For conditional-variance indices under
-dependence, leave Shapley behind: [VKOGA](/examples/vkoga) works from given
-data through a kernel surrogate, [Kucherenko](/examples/kucherenko) uses its
+dependence, leave Shapley behind: [VKOGA](/guide/methods/vkoga) works from given
+data through a kernel surrogate, [Kucherenko](/guide/methods/kucherenko) uses its
 own design and your actual model. Neither returns a per-parameter allocation
 summing to 1.
 
@@ -430,12 +430,12 @@ samples, `order` in `{1, 2, 3}`, clamped with a warning when
 
 ## See also
 
-- [PCE](/examples/pce) for the default backend's surrogate, its leave-one-out
+- [PCE](/guide/methods/pce) for the default backend's surrogate, its leave-one-out
   error and its emulator.
-- [RS-HDMR](/examples/hdmr) for the multi-output backend's surrogate.
+- [RS-HDMR](/guide/methods/hdmr) for the multi-output backend's surrogate.
 - [Basic Example](/examples/basic) for the Sobol workflow when you can afford
   a structured Saltelli design.
-- [Borgonovo Delta](/examples/borgonovo) for a moment-independent importance
+- [Borgonovo Delta](/guide/methods/borgonovo) for a moment-independent importance
   measure from the same given-data setting.
 - [Methods](/guide/methods) for the theory and when to prefer Sh over S1/ST.
 - [API Reference](/api/#shapley-effects) for full parameter documentation.

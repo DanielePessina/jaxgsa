@@ -194,7 +194,7 @@ input whose first-order Sobol index is exactly zero.
 
 The estimate itself does not move, because PAWN's point estimate is not
 bias-corrected. Only the interval is new. That differs from
-[Borgonovo delta](/examples/borgonovo), where turning on the bootstrap also
+[Borgonovo delta](/guide/methods/borgonovo), where turning on the bootstrap also
 changes the reported index.
 
 ## When bins run out of samples
@@ -376,16 +376,16 @@ CDFs, so a declared `problem.correlation` does not invalidate anything. Each
 index then reads as total influence, including influence borrowed from
 correlated partners. An input the model ignores can score above 0 when it
 correlates with one the model reads. That reading is correct. Use
-[VKOGA](/examples/vkoga) or [Kucherenko](/examples/kucherenko) to split the
+[VKOGA](/guide/methods/vkoga) or [Kucherenko](/guide/methods/kucherenko) to split the
 direct effect from the borrowed one.
 
 ## See also
 
 - [Basic example](/examples/basic) for the Sobol variance decomposition.
-- [Borgonovo delta](/examples/borgonovo), the density-based sibling of this
+- [Borgonovo delta](/guide/methods/borgonovo), the density-based sibling of this
   method, which also returns a given-data first-order Sobol index.
-- [Optimal transport](/examples/optimal-transport) for a distributional index
+- [Optimal transport](/guide/methods/optimal-transport) for a distributional index
   that splits into a location shift and a reshape.
-- [HSIC](/examples/hsic) for kernel dependence with a significance test.
+- [HSIC](/guide/methods/hsic) for kernel dependence with a significance test.
 - [Methods](/guide/methods) for a side-by-side comparison.
 - [API reference](/api/#given-data-methods) for every parameter.

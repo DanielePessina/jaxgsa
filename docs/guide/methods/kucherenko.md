@@ -11,7 +11,7 @@ conditional-copula design, that is, a sample drawn so that it respects the
 declared dependence between the inputs.
 
 This makes the method the design-based counterpart to
-[VKOGA](/examples/vkoga). Both estimate the same two conditional-variance
+[VKOGA](/guide/methods/vkoga). Both estimate the same two conditional-variance
 quantities. VKOGA gets them from data you already have, through a surrogate.
 Kucherenko gets them from fresh model runs, so it carries no surrogate error.
 The price is a dedicated sampling design.

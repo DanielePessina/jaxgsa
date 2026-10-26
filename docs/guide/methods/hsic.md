@@ -125,9 +125,9 @@ missing. R2-HSIC indices are individual dependence measures, one per input,
 each independently normalized to [0, 1]. They are not shares of anything, so
 they do not add to 1, and the residual is not "unexplained variance". If you
 need numbers that partition the output variance, use
-[Sobol](/examples/basic) or [PCE](/examples/pce). If you want a number that
+[Sobol](/examples/basic) or [PCE](/guide/methods/pce). If you want a number that
 partitions the output *distribution*, no such thing exists here either;
-[Borgonovo delta](/examples/borgonovo) and [PAWN](/examples/pawn) are also
+[Borgonovo delta](/guide/methods/borgonovo) and [PAWN](/guide/methods/pawn) are also
 per-input measures.
 
 The practical consequence: compare R2-HSIC values against each other, and
@@ -377,8 +377,8 @@ Thin N. HSIC converges quickly in N, and a ranking that is stable between
 N = 2000 and N = 4000 will not change at N = 20000. Take a random subset and
 check that the ranking holds.
 
-Or lower D by screening first. Run [Morris](/examples/morris) or
-[PAWN](/examples/pawn), both cheap and linear in memory, drop the inputs they
+Or lower D by screening first. Run [Morris](/guide/methods/morris) or
+[PAWN](/guide/methods/pawn), both cheap and linear in memory, drop the inputs they
 find inert, and give HSIC the survivors. The cost is linear in D and quadratic
 in N, so halving D halves it while halving N quarters it. Thin the
 sample first if you only need one of the two.
@@ -408,8 +408,8 @@ invalidate the indices. Each index then reads as total association with the
 output, which includes influence borrowed from correlated partners. An input
 the model never reads can score above 0 when it correlates with one the model
 does read. That reading is correct. If you need the direct effect separated
-from the borrowed one, use [VKOGA](/examples/vkoga) or
-[Kucherenko](/examples/kucherenko).
+from the borrowed one, use [VKOGA](/guide/methods/vkoga) or
+[Kucherenko](/guide/methods/kucherenko).
 
 Above about D = 15 the total-order product kernel can underflow in float32.
 Enable float64 or screen the input list down.
@@ -418,9 +418,9 @@ Enable float64 or screen the input list down.
 
 - [Basic example](/examples/basic) for the Sobol variance decomposition and
   its Saltelli design.
-- [PAWN](/examples/pawn) and [Borgonovo delta](/examples/borgonovo), the
+- [PAWN](/guide/methods/pawn) and [Borgonovo delta](/guide/methods/borgonovo), the
   other two given-data methods that read the whole output distribution.
-- [Optimal transport](/examples/optimal-transport) for a given-data index
+- [Optimal transport](/guide/methods/optimal-transport) for a given-data index
   that splits into a location shift and a reshape.
 - [Methods](/guide/methods) for the theory and a side-by-side comparison.
 - [API reference](/api/#given-data-methods) for every parameter.

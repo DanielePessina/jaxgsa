@@ -203,7 +203,7 @@ and the ANCOVA split into `Sa` and `Sb` is the point. Multi-output and
 time-series `Y`, where one fit covers every slice. And a surrogate as the
 deliverable, when the emulator matters as much as the indices.
 
-Against [PCE](/examples/pce), the other given-data surrogate, the trade is
+Against [PCE](/guide/methods/pce), the other given-data surrogate, the trade is
 local versus global. B-splines follow kinks and plateaus that a global
 polynomial smooths over. On a smooth response PCE often reaches a low error
 with fewer terms. On Ishigami the two are close: PCE gives `cv_rmse = 0.074` at
@@ -243,13 +243,13 @@ Under a declared correlation, `ST` becomes the SCSA total from Li et al.
 (2010) rather than a Sobol total-order index. It can go negative and it is not
 bounded in `[0, 1]`, so it cannot tell you a parameter is safe to fix.
 `hdmr.analyze` warns about this when it applies. For a conditional-variance
-total under dependence use [Kucherenko](/examples/kucherenko) or
-[VKOGA](/examples/vkoga).
+total under dependence use [Kucherenko](/guide/methods/kucherenko) or
+[VKOGA](/guide/methods/vkoga).
 
 ## See also
 
-- [PCE](/examples/pce) for the polynomial given-data surrogate.
-- [Shapley Effects](/examples/shapley) for a fair allocation read off this
+- [PCE](/guide/methods/pce) for the polynomial given-data surrogate.
+- [Shapley Effects](/guide/methods/shapley) for a fair allocation read off this
   fit, including `include_correlative=True` under dependence.
 - [Methods](/guide/methods) for the difference between Sobol and HDMR.
 - [xarray Labeled Output](/examples/xarray) for the labeled export.

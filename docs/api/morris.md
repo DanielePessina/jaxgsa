@@ -236,6 +236,6 @@ state on `MorrisSamples`, which is frozen.
 
 Related docs:
 
-- [Morris Example](/examples/morris)
+- [Morris guide page](/guide/methods/morris)
 - [Methods](/guide/methods)
 - [API reference](/api/)

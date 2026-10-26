@@ -327,5 +327,5 @@ the additive component functions cannot represent the model's interactions.
 - Santin, G. & Haasdonk, B. (2021). [Kernel methods for surrogate modeling](https://doi.org/10.1515/9783110498967-009). In *Model Order Reduction, Volume 1: System- and Data-Driven Methods and Algorithms*, 311–354. De Gruyter. Newton basis and regularised kernel approximation.
 - Wirtz, D. & Haasdonk, B. (2013). [A vectorial kernel orthogonal greedy algorithm](https://doi.org/10.14658/PUPJ-DRNA-2013-Special_Issue-10). *Dolomites Research Notes on Approximation*, 6, 83–100. Source of the VKOGA name and a target-dependent selection variant.
 
-See the [VKOGA example](/examples/vkoga), [Methods](/guide/methods), and the
+See the [VKOGA guide page](/guide/methods/vkoga), [Methods](/guide/methods), and the
 [API overview](/api/).

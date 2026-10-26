@@ -115,7 +115,7 @@ jaxgsa.optimal_transport.analyze for a discrete output: it compares empirical
 distributions directly and needs no density.
 ```
 
-Use [optimal transport](/examples/optimal-transport) for a discrete output.
+Use [optimal transport](/guide/methods/optimal-transport) for a discrete output.
 A continuous output rounded to a few decimals is not refused, and neither is
 a constant column, whose exact answer is `delta = S1 = 0`. Categorical
 *inputs* stay supported; the limit applies to the output only.
@@ -376,16 +376,16 @@ and compares output densities, so a declared `problem.correlation` does not
 invalidate it. Under dependence both `delta` and `S1` read as total
 association, including effects carried by correlated partners. Neither
 separates the direct effect from the borrowed one. Use
-[VKOGA](/examples/vkoga) or [Kucherenko](/examples/kucherenko) for that
+[VKOGA](/guide/methods/vkoga) or [Kucherenko](/guide/methods/kucherenko) for that
 split; both need continuous inputs.
 
 ## See also
 
 - [Basic example](/examples/basic) for the Sobol variance decomposition.
-- [PAWN](/examples/pawn), the CDF-based moment-independent method, which
+- [PAWN](/guide/methods/pawn), the CDF-based moment-independent method, which
   needs no continuous output.
-- [Optimal transport](/examples/optimal-transport) for a distributional index
+- [Optimal transport](/guide/methods/optimal-transport) for a distributional index
   that splits into a location shift and a reshape, and its own given-data S1.
-- [HSIC](/examples/hsic) for kernel dependence with a significance test.
+- [HSIC](/guide/methods/hsic) for kernel dependence with a significance test.
 - [Methods](/guide/methods) for a side-by-side comparison.
 - [API reference](/api/#given-data-methods) for every parameter.
