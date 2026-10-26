@@ -91,3 +91,12 @@ hardware.
 
 jaxgsa's Sobol sampling and analysis workflow follows
 [SALib](https://salib.readthedocs.io/), reimplemented for JAX.
+
+## Acknowledgements
+
+jaxgsa is developed and maintained by Daniele Pessina. The
+[Papathanasiou Lab](https://www.papathanlab.com/) (Life Science and Process
+Systems Engineering Lab, Imperial College London) supported and funded its
+development.
+
+<a href="https://www.papathanlab.com/"><img src="/logos/papathanlab.svg" alt="Life Science and Process Systems Engineering Lab" style="height: 48px"></a>
