@@ -109,9 +109,9 @@ Separate three measurements:
 Report peak memory as well as time. A fast configuration that exceeds device
 or host memory is not a usable configuration.
 
-The [benchmarks guide](/guide/benchmarks) records the repository's measured
-workloads and reproduction commands. Treat those results as comparisons on
-the stated machine, not as fixed package limits.
+The [benchmarks guide](/guide/benchmarks) records measured workloads and the
+method to repeat them. Those results apply to the stated machine. They are not
+fixed package limits.
 
 ## Practical checklist
 

@@ -17,11 +17,11 @@ jaxgsa to estimate each input's effect. It does not run your model for you.
 ## Why jaxgsa
 
 - **Many outputs in one call.** Time series and multi-output models are
-  analysed in one compiled JAX call, not one Python loop per output. On 300
-  output slices, Sobol with second-order indices is 35x faster than SALib, and
-  HDMR is about 1000x faster
+  analysed in one compiled JAX call, not one Python loop per output. On a
+  laptop CPU (Apple M1 Pro, float32), Sobol analysis of 1,000 time points
+  takes 78 ms, and sampling, evaluating and analysing 81,920 model runs with
+  1,000 outputs each takes 0.26 s
   ([benchmarks](https://danielepessina.github.io/jaxgsa/guide/benchmarks)).
-  For one scalar output, SALib is as fast or faster.
 - **Gradients come free.** DGSM gets model derivatives from JAX, and the
   estimator cores are differentiable, so an index can sit inside a larger
   JAX computation

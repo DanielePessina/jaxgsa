@@ -10,8 +10,7 @@ batch, is not an improvement. Timing alone cannot see that, so this script
 measures allocation too.
 
 It is not a correctness harness. ``scripts/baseline_dump.py`` pins the
-numbers and ``scripts/benchmark_salib.py`` checks parity against
-SALib; neither of them times anything but sobol and hdmr.
+numbers.
 
 Run it with::
 
