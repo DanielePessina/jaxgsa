@@ -464,9 +464,10 @@ def test_predict_new_points_and_batching(uniform_fits):
     assert pred.shape == (128,)
     truth = _uniform_scalar(X_new)
     assert np.sqrt(np.mean((pred - truth) ** 2)) < 0.2 * np.std(truth)
-    # Batching only reassociates floating point; same precision, so tight.
+    # Batching only reassociates floating point. In float32 the kernel sum
+    # cancels, so a changed BLAS tiling moves values by ~5e-5 (Linux CI).
     pred_batched = np.asarray(result.predict(X_new, batch_size=37))
-    np.testing.assert_allclose(pred_batched, pred, rtol=2e-5, atol=1e-6)
+    np.testing.assert_allclose(pred_batched, pred, rtol=2e-4, atol=1e-5)
 
 
 def test_batch_size_bounds_the_index_estimator_too(monkeypatch):
