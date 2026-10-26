@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 import numpy as np
 
@@ -370,14 +370,17 @@ def sample(
     points = sobol_uniforms(n, k + width, seed=seed, scramble=scramble)
     redraw = points[:, k:]
     joint = draws.joint(points[:, :k])
-    blocks = [joint]
-    # First-order blocks: keep x_i, redraw the rest given x_i.
     rest_noise = redraw[:, : draws.rest_dimension]
-    blocks.extend(draws.rest_given_self(rest_noise, joint, i) for i in range(D))
-    # Total blocks: keep x_-i, redraw x_i given the rest.
     self_noise = redraw[:, : draws.self_dimension]
-    blocks.extend(draws.self_given_rest(self_noise, joint, i) for i in range(D))
-    X = draws.to_physical(np.concatenate(blocks, axis=0))
+    blocks = _stack_blocks(
+        n_blocks,
+        joint,
+        # First-order blocks: keep x_i, redraw the rest given x_i.
+        *(lambda i=i: draws.rest_given_self(rest_noise, joint, i) for i in range(D)),
+        # Total blocks: keep x_-i, redraw x_i given the rest.
+        *(lambda i=i: draws.self_given_rest(self_noise, joint, i) for i in range(D)),
+    )
+    X = draws.to_physical(blocks)
 
     return _finish_design(
         X,
@@ -388,6 +391,42 @@ def sample(
         scramble=scramble,
         verbose=verbose,
     )
+
+
+def _stack_blocks(n_blocks: int, first: np.ndarray, *rest: Callable[[], np.ndarray]) -> np.ndarray:
+    """Stack equal-shaped design blocks into one preallocated array.
+
+    Gives what ``np.concatenate([first, *(f() for f in rest)])`` gives, but
+    each block is written into the output as soon as it is drawn and then
+    dropped. Holding every block in a list and concatenating keeps two full
+    copies of the design alive at once.
+
+    Args:
+        n_blocks: Total number of blocks, ``1 + len(rest)``.
+        first: The first block, ``(n, D)``. Its shape is every block's shape.
+        *rest: One callable per further block, in order, each returning it.
+
+    Returns:
+        ``(n_blocks * n, D)`` array, block-major, in the dtype
+        ``np.concatenate`` would choose.
+
+    Raises:
+        ValueError: If a block's shape differs from ``first``'s.
+    """
+    assert n_blocks == 1 + len(rest)
+    n = first.shape[0]
+    out = np.empty((n_blocks * n, *first.shape[1:]), dtype=first.dtype)
+    out[:n] = first
+    for b, draw in enumerate(rest, start=1):
+        block = draw()
+        if block.shape != first.shape:
+            raise ValueError(f"design block {b} has shape {block.shape}, expected {first.shape}")
+        dtype = np.result_type(out, block)
+        if dtype != out.dtype:
+            # A later block of a wider dtype: widen, as concatenate would.
+            out = out.astype(dtype)
+        out[b * n : (b + 1) * n] = block
+    return out
 
 
 def _finish_design(
@@ -459,13 +498,18 @@ def _sample_all_subsets(
     block_a = draws.joint(points[:, :k])
     block_b = draws.joint(points[:, k : 2 * k])
     noise = points[:, 2 * k :]
-    blocks = [block_a, block_b]
-    for m in masks:
-        fixed = fixed_sets[m]
-        blocks.append(
-            draws.free_given_fixed(noise[:, : draws.free_dimension(fixed)], block_a, fixed)
-        )
-    X = draws.to_physical(np.concatenate(blocks, axis=0))
+    blocks = _stack_blocks(
+        2**D,
+        block_a,
+        lambda: block_b,
+        *(
+            lambda f=fixed_sets[m]: draws.free_given_fixed(
+                noise[:, : draws.free_dimension(f)], block_a, f
+            )
+            for m in masks
+        ),
+    )
+    X = draws.to_physical(blocks)
 
     return _finish_design(
         X, problem, n, subsets="all", requested=requested, scramble=scramble, verbose=verbose

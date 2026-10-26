@@ -70,6 +70,7 @@ jaxgsa.morris.analyze
     invalid: none found in 40 trajectories (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.1016 s
+    slice_chunk_size: 1 (resolved from the memory budget)
   results: top 5 of 20 parameters by mu_star
     1. x1   mu_star=2.859
     2. x2   mu_star=2.098
@@ -216,13 +217,13 @@ jaxgsa.sobol.analyze
   timing:
     estimators (includes compile on the first call): 0.8601 s
     slice_chunk_size: 1 (resolved from the memory budget)
-    bootstrap slice_chunk_size: 1 (resolved from the memory budget)
+    bootstrap resamples per call: 500 (resolved from the memory budget)
     estimator: saltelli-jansen
   results: top 4 of 4 parameters by ST
-    1. x1  ST=0.6909  [0.6219, 0.7652]
-    2. x2  ST=0.3551  [0.3122, 0.3992]
-    3. x3  ST=0.05625  [0.0487, 0.06462]
-    4. x4  ST=0.009263  [0.007952, 0.01068]
+    1. x1  ST=0.6909  [0.6261, 0.7568]
+    2. x2  ST=0.3551  [0.3137, 0.4035]
+    3. x3  ST=0.05625  [0.04876, 0.06513]
+    4. x4  ST=0.009263  [0.007954, 0.01069]
 ```
 
 Sobol cost is `base_n * (2 * D + 2)`, and `base_n` is what sets the accuracy of
@@ -385,11 +386,11 @@ Screening is not always the right call.
 
 ## See also
 
-- [Morris screening](/examples/morris) for what `mu`, `mu_star` and `sigma`
+- [Morris screening](/guide/methods/morris) for what `mu`, `mu_star` and `sigma`
   measure and how to plot them.
 - [Bootstrap confidence intervals](/examples/bootstrap) for the intervals in the
   second pass.
 - [Save and reload a design](/examples/save-load) for splitting either pass
   across sessions, which you will want if each model run is ten minutes.
-- [RS-HDMR](/examples/hdmr) for the other way to cut cost: fit a surrogate to
+- [RS-HDMR](/guide/methods/hdmr) for the other way to cut cost: fit a surrogate to
   samples you already have and read the indices off the fit.

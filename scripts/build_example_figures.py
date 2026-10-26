@@ -8,7 +8,7 @@ The inverse-bounds example saves directly to its stable documentation filename.
 Re-run this script whenever an example's plotting code or shared style changes.
 
 Run every example: ``uv run scripts/build_example_figures.py``
-Run selected examples: ``uv run scripts/build_example_figures.py benchmark_all.py``
+Run selected examples: ``uv run scripts/build_example_figures.py dynamic_gsa.py``
 """
 
 from __future__ import annotations
@@ -78,7 +78,6 @@ SCRIPTS = [
     "oakley_ohagan_15d.py",
     "dynamic_gsa.py",
     "method_comparison.py",
-    "benchmark_all.py",
     "inverse_sobol_bounds.py",
 ]
 

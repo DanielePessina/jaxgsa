@@ -70,6 +70,7 @@ from jaxgsa._core.entry import (
     at_least,
     bootstrap_checks,
     check_scalars,
+    positive_int,
     prepare,
     require,
     validate_inputs,
@@ -88,7 +89,13 @@ from jaxgsa._core.partition import (
     replicate_blocks,
 )
 from jaxgsa._core.result import CIInfo
-from jaxgsa._core.validation import _prepare_Y, _validate_output, as_key
+from jaxgsa._core.validation import (
+    _prepare_Y,
+    _reshape_without_copy,
+    _validate_output,
+    _zero_variance_mask,
+    as_key,
+)
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.borgonovo._result import BorgonovoResult
 from jaxgsa.problem import Problem, _categorical_dims
@@ -180,6 +187,10 @@ _DELTA_RANGE_TOL = 0.05
 # this guard and stays.
 _DISCRETE_MAX_DISTINCT = 20
 _DISCRETE_MIN_MULTIPLICITY = 5
+# Rows the discrete-output check screens before it counts a column in full.
+# It must exceed _DISCRETE_MAX_DISTINCT, so that a continuous column clears
+# the screen; 128 rows sort in no time.
+_DISCRETE_SCREEN_ROWS = 128
 # Live copies of the per-column class gather ``y[cls_idx]``, shape
 # ``(Dg, M, P)``, that one output column keeps resident. XLA builds the
 # gather, a transposed copy and the centred deviations. The conditional-KDE
@@ -372,20 +383,37 @@ def _get_delta_kernel(
         groups: tuple[tuple[Array, Array], ...],
     ):
         dtype = jnp.result_type(Y_cols.dtype, jnp.float32)
+        # The same test the zero-variance warning makes, on the same raw
+        # columns, so a column the warning names is the column forced to 0
+        # below. Testing the centred column inside the walk instead would
+        # miss it: a constant float column's mean rounds, so its centred
+        # values, variance and class means are round-off, not zeros, and
+        # ``Vi / var`` divides one round-off by another (S1 = 0.905 for
+        # N=1000 float32 copies of 0.0539).
+        flat_cols = _zero_variance_mask(Y_cols)
         Y_cols = Y_cols.astype(dtype)
         N = Y_cols.shape[0]  # every row belongs to exactly one class per parameter
+        # Every column is centred on its sample mean. Delta and S1 are both
+        # shift-invariant, and the output grid moves with the data. Without
+        # this, a float32 output with a large mean loses S1 to cancellation:
+        # ``Vi`` takes differences of class means around that mean (S1 off
+        # by 5.9e-4 at an offset of 1e5, by 4.6e-3 at 1e6). The column walk
+        # subtracts the mean one column at a time, so no centred copy of all
+        # of Y is ever built.
+        centres = Y_cols.mean(axis=0)
 
         # The output grids depend only on the original sample, so every
-        # replicate reuses them. SALib does the same.
-        y_min = Y_cols.min(axis=0)
-        y_max = Y_cols.max(axis=0)
+        # replicate reuses them. SALib does the same. Subtraction is
+        # monotone, so ``min(y) - c`` is the minimum of the centred column.
+        y_min = Y_cols.min(axis=0) - centres
+        y_max = Y_cols.max(axis=0) - centres
         steps = jnp.linspace(0.0, 1.0, grid_size, dtype=dtype)
         grids = y_min[:, None] + steps[None, :] * (y_max - y_min)[:, None]  # (C, G)
 
         counts_list = tuple(counts for _, counts in groups)
         cls_list = tuple(cls_idx for cls_idx, _ in groups)
 
-        def _group_stats(y, grid, h_full, fy, y_mean, cls_idx, mask_b, counts_b):
+        def _group_stats(y, grid, h_full, fy, y_mean, flat, cls_idx, mask_b, counts_b):
             """Per-parameter delta/S1 numerators and floor flag for one group.
 
             ``mask_b``, shape ``(G, M, P)``, and ``counts_b``, shape
@@ -393,7 +421,9 @@ def _get_delta_kernel(
             parameter axis Dg. ``G`` is either 1 or Dg. A zero-size class
             has zero standard deviation and therefore zero bandwidth, so
             its density is dropped. Its zero count also removes it from
-            every weighted sum.
+            every weighted sum. ``flat`` marks a constant column: every
+            class then gets bandwidth 0 too, whatever round-off its
+            variance holds.
             """
             safe_counts = jnp.maximum(counts_b, 1.0)
             y_cls = y[cls_idx]  # (Dg, M, P) resampled class members
@@ -402,7 +432,7 @@ def _get_delta_kernel(
             var = (dev**2).sum(axis=-1) / jnp.maximum(counts_b - 1.0, 1.0)
             # Double where: sqrt'(0) is infinite, so a zero-variance class
             # would turn a zero cotangent into NaN in reverse mode.
-            pos_var = var > 0
+            pos_var = (var > 0) & ~flat
             std = jnp.where(pos_var, jnp.sqrt(jnp.where(pos_var, var, 1.0)), 0.0)
             h = _kde_bandwidths(safe_counts, std, bw_factor)  # (Dg, M)
             # A degenerate class is one the output grid cannot resolve. A
@@ -444,37 +474,53 @@ def _get_delta_kernel(
             Vi = (counts_b / N * (mean - y_mean) ** 2).sum(axis=-1)
             return delta, Vi, floored_cls.any()
 
-        def _col_stats(y: Array, grid: Array, r: Array, layouts):
+        def _col_stats(y: Array, grid: Array, centre: Array, zero: Array, r: Array, layouts):
             """Delta, S1, degeneracy and floor flags for one column/replicate.
 
             The per-replicate column statistics are the resampled column,
             the full KDE, the mean and the variance. This function computes
             them once and shares them with every partition group. It then
             concatenates the group results on the parameter axis in group
-            order.
+            order. ``y`` arrives raw and is centred on ``centre`` here.
+            ``zero`` is the column's zero-variance flag from the warning's
+            test. A flagged column, or a resample with one repeated value,
+            gets delta and S1 of exactly 0. Every guard below switches on
+            that flag before any division, so the zeros carry a zero
+            gradient rather than a NaN.
             """
+            y = y - centre
             y_r = y[r]  # resampled column
             # Double where, as in _group_stats: a constant column must give a
             # zero gradient, not NaN.
+            degenerate = y_r.max() == y_r.min()
+            flat = zero | degenerate
             var_r = jnp.var(y_r, ddof=1)
-            pos_var_r = var_r > 0
+            pos_var_r = (var_r > 0) & ~flat
             std_r = jnp.where(pos_var_r, jnp.sqrt(jnp.where(pos_var_r, var_r, 1.0)), 0.0)
             h_full = _kde_bandwidths(jnp.asarray(float(N), dtype=dtype), std_r, bw_factor)
             fy = _kde_full(y_r, grid, h_full)
-            degenerate = y_r.max() == y_r.min()
             y_mean = y_r.mean()
             y_var = jnp.var(y_r)
-            safe_var = jnp.where(y_var > 0, y_var, 1.0)
+            pos_var = (y_var > 0) & ~flat
+            safe_var = jnp.where(pos_var, y_var, 1.0)
 
             outs = [
-                _group_stats(y, grid, h_full, fy, y_mean, cls_idx, mask_b, counts_b)
+                _group_stats(y, grid, h_full, fy, y_mean, flat, cls_idx, mask_b, counts_b)
                 for cls_idx, mask_b, counts_b in layouts
             ]
-            delta = jnp.concatenate([o[0] for o in outs])
+            delta = jnp.where(flat, 0.0, jnp.concatenate([o[0] for o in outs]))
             Vi = jnp.concatenate([o[1] for o in outs])
-            s1 = jnp.where(y_var > 0, Vi / safe_var, 0.0)
+            s1 = jnp.where(pos_var, Vi / safe_var, 0.0)
             floored = jnp.stack([o[2] for o in outs]).any()
             return delta, s1, degenerate, floored
+
+        # Rematerialise each column in reverse mode. Without this, the column
+        # walk and the replicate scan save the residuals of the (Dg, M, G, P)
+        # class-density tensor for every column, 41 to 67 MiB per column at
+        # N=4096, D=8 in float32, whatever the column batch. With it, the
+        # backward pass saves only each column's inputs and recomputes its
+        # working set, so gradient memory follows the column batch.
+        _col_stats_remat = jax.checkpoint(_col_stats)
 
         def _one_replicate(carry, xs):
             i, r, cls_parts = xs
@@ -484,13 +530,13 @@ def _get_delta_kernel(
                 mask_r = _mask_from_counts(counts_r, cls_r.shape[-1]).astype(dtype)
                 layouts.append((cls_r, mask_r, counts_r.astype(dtype)))
             if col_batch is None or col_batch >= Y_cols.shape[1]:
-                d, s1, degen, floored = jax.vmap(lambda y, grid: _col_stats(y, grid, r, layouts))(
-                    Y_cols.T, grids
-                )
+                d, s1, degen, floored = jax.vmap(
+                    lambda y, grid, c, z: _col_stats_remat(y, grid, c, z, r, layouts)
+                )(Y_cols.T, grids, centres, flat_cols)
             else:
                 d, s1, degen, floored = jax.lax.map(
-                    lambda yg: _col_stats(yg[0], yg[1], r, layouts),
-                    (Y_cols.T, grids),
+                    lambda ygc: _col_stats_remat(ygc[0], ygc[1], ygc[2], ygc[3], r, layouts),
+                    (Y_cols.T, grids, centres, flat_cols),
                     batch_size=col_batch,
                 )
             return carry, (d, s1, degen, floored)
@@ -671,11 +717,46 @@ def _slice_label(flat_index: int, trailing: tuple[int, ...], problem: Problem) -
     return f"(t={t}, {_k_label(k)})"
 
 
-@jax.jit
-def _count_distinct(flat: Array) -> Array:
-    """Count the distinct values in every column of ``flat (N, C)``."""
-    ordered = jnp.sort(flat, axis=0)
-    return 1 + jnp.sum(ordered[1:] != ordered[:-1], axis=0)
+def _count_distinct_host(cols: np.ndarray) -> np.ndarray:
+    """Count the distinct values in every column of a host array ``(n, c)``.
+
+    NumPy, not XLA: a float sort on the XLA CPU backend runs a long
+    total-order comparator and is many times slower. Both sort NaN last and
+    compare ``-0.0 == 0.0``, so the count is the same.
+    """
+    if cols.shape[0] < 2:
+        return np.ones(cols.shape[1], dtype=np.int64)
+    ordered = np.sort(cols, axis=0)
+    return 1 + np.count_nonzero(ordered[1:] != ordered[:-1], axis=0)
+
+
+def _count_distinct(flat: Array) -> np.ndarray:
+    """Count distinct values per column of ``flat (N, C)``, up to the limit.
+
+    Only the discrete-output test reads the count, and that test needs it
+    exactly only up to ``_DISCRETE_MAX_DISTINCT``. A screen on the first
+    ``_DISCRETE_SCREEN_ROWS`` rows clears every column that already shows
+    more distinct values than that limit, which is every continuous
+    column. Only the columns left over are counted in full. A column has
+    at least as many distinct values as any subset of its rows, so the
+    screen changes no decision.
+
+    Args:
+        flat: Output columns, shape ``(N, C)``.
+
+    Returns:
+        Host integer array ``(C,)``. It is the exact count for a column
+        with at most ``_DISCRETE_MAX_DISTINCT`` distinct values. For any
+        other column it is a lower bound above that limit.
+    """
+    n_rows = flat.shape[0]
+    screen = _count_distinct_host(np.asarray(flat[:_DISCRETE_SCREEN_ROWS]))
+    if n_rows <= _DISCRETE_SCREEN_ROWS:
+        return screen
+    unresolved = np.flatnonzero(screen <= _DISCRETE_MAX_DISTINCT)
+    if unresolved.size:
+        screen[unresolved] = _count_distinct_host(np.asarray(flat[:, unresolved]))
+    return screen
 
 
 def _raise_discrete_output(problem: Problem, Y: Array) -> None:
@@ -704,10 +785,10 @@ def _raise_discrete_output(problem: Problem, Y: Array) -> None:
     """
     N = Y.shape[0]
     trailing = Y.shape[1:]
-    flat = Y.reshape(N, -1)
     if N < 2:
         return
-    n_distinct = np.asarray(_count_distinct(flat))
+    flat = _reshape_without_copy(Y, (N, math.prod(trailing)))
+    n_distinct = _count_distinct(flat)
     discrete = (
         (n_distinct > 1)
         & (n_distinct <= _DISCRETE_MAX_DISTINCT)
@@ -1121,7 +1202,7 @@ def analyze(
                 0 <= float(degenerate_tol) < 1,
                 f"degenerate_tol must be in [0, 1), got {degenerate_tol}",
             ),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
+            positive_int("slice_chunk_size", slice_chunk_size),
             require(
                 not (bias_correct and n_bootstrap == 0),
                 "bias_correct=True needs bootstrap replicates, but "
@@ -1187,7 +1268,7 @@ def analyze(
     Y_3d = ctx.Y3
     _, T, K = Y_3d.shape
     D = problem.n_params
-    Y_cols = Y_3d.reshape(N, T * K)
+    Y_cols = _reshape_without_copy(Y_3d, (N, T * K))
 
     # Replicate 0 is the identity permutation, that is the original sample.
     # The remaining rows are the bootstrap resamples. Building them together
@@ -1447,7 +1528,12 @@ def indices(
         grid_size: Number of output-grid points, as in :func:`analyze`.
         bandwidth: KDE bandwidth rule, as in :func:`analyze`.
         slice_chunk_size: Output columns per batch, as in
-            :func:`analyze`.
+            :func:`analyze`. Under ``jax.grad`` the backward pass
+            recomputes one batch at a time, so this also bounds the
+            gradient memory. A column's backward working set is about
+            ``3 * D * N * grid_size`` floats (about 40 MiB at ``N=4096``,
+            ``D=8`` in float32), so pass a small value for a gradient at
+            large ``N``.
         degenerate_tol: Degenerate-class threshold, as in :func:`analyze`.
             The floor it triggers is applied inside the kernel with
             :func:`jax.numpy.where`, so it costs no host branch here; what
@@ -1477,7 +1563,7 @@ def indices(
                 0 <= float(degenerate_tol) < 1,
                 f"degenerate_tol must be in [0, 1), got {degenerate_tol}",
             ),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
+            positive_int("slice_chunk_size", slice_chunk_size),
         ),
         method="jaxgsa.borgonovo.indices",
     )

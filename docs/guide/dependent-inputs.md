@@ -94,7 +94,7 @@ The design costs $N\,2^D$ runs and needs $D \le 12$.
 - Both sum to 1 and are nonnegative in expectation. Choose Shapley to credit
   correlation. Choose PME to find the inputs the model uses.
 
-See the [Kucherenko example](/examples/kucherenko) and the broader
+See the [Kucherenko guide page](/guide/methods/kucherenko) and the broader
 [correlated-inputs example](/examples/correlated-inputs).
 
 ### VKOGA
@@ -120,7 +120,7 @@ correlated, and independent-interaction contributions. This full and
 independent index family follows [Mara, Tarantola & Annoni (2015)](#references). Because these values
 come from a surrogate, their quality depends on the fit.
 
-See the [VKOGA example](/examples/vkoga).
+See the [VKOGA guide page](/guide/methods/vkoga).
 
 ### HDMR
 
@@ -140,7 +140,7 @@ correlative term containing the parameter. It is not the expected residual
 variance after fixing that parameter, so do not use it as a fixing measure.
 Use Kucherenko $S_T$ or VKOGA $S_{TU}$ for that question.
 
-See the [HDMR example](/examples/hdmr).
+See the [HDMR guide page](/guide/methods/hdmr).
 
 ### Shapley with the HDMR backend
 
@@ -161,7 +161,7 @@ For the conditional-variance definition under dependence, see
 The [Shapley API references](/api/shapley#references) cover the independent-input
 allocation and the ANCOVA source used by jaxgsa.
 
-See the [Shapley example](/examples/shapley).
+See the [Shapley guide page](/guide/methods/shapley).
 
 ## What a custom sampler must do
 
@@ -206,9 +206,9 @@ These methods are correlation-inclusive: an input can score highly because it
 contains information about another input that drives the output. That is a
 meaningful result, not evidence that the model uses the input directly.
 
-Worked examples are available for [HSIC](/examples/hsic),
-[PAWN](/examples/pawn), [Borgonovo delta](/examples/borgonovo), and
-[optimal transport](/examples/optimal-transport).
+Worked examples are available for [HSIC](/guide/methods/hsic),
+[PAWN](/guide/methods/pawn), [Borgonovo delta](/guide/methods/borgonovo), and
+[optimal transport](/guide/methods/optimal-transport).
 
 ## Comparisons to avoid
 

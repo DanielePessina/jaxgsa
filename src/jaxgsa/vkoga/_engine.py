@@ -22,17 +22,17 @@ Everything here is a pure function on arrays. There are no result classes and
 no ``Problem``. Outputs arrive as ``(n, S)`` with ``S = T*K`` output slices
 already flattened by the caller.
 
-The coefficient step forms the normal matrix ``A_nm^T A_nm``, which squares the
-condition number of the cross-kernel. Under JAX's default float32 that is the
-accuracy ceiling of this module. It bites whenever the kernel Gram is
-ill-conditioned, which means a small ``gamma`` or a centre count close to
-``n``. There the fitted surrogate can be an order of magnitude worse than the
-same equations solved in double precision. Enabling
-``jax.config.update("jax_enable_x64", True)`` removes the ceiling, and the code
-carries ``X.dtype`` throughout so it needs no other change. Grid-searching the
-hyperparameters with :func:`_cross_validate` also helps, because the scores are
-computed in the same arithmetic and so penalise the ill-conditioned corner of
-the grid.
+The coefficient step solves the regularised least-squares problem in the
+Newton basis the greedy builds, not through the kernel-translate normal matrix
+``A_nm^T A_nm``. That matrix squares the condition number of the cross-kernel,
+which for a Gaussian kernel exceeds what float32 can carry at ordinary
+settings; the Newton basis is the stable pivoted-Cholesky factor of the
+kernel, so the solve keeps float32 results close to float64 ones. The
+remaining float32 limit is the greedy itself: its power function
+``1 - sum(V**2)`` reaches float32 rounding for small ``gamma`` or many
+centres, and the greedy then stops with fewer centres than float64 selects.
+The code carries ``X.dtype`` throughout, so float64 inputs under
+``jax.config.update("jax_enable_x64", True)`` need no other change.
 
 References:
     De Marchi, Schaback & Wendland (2005). Adv. Comput. Math. 23:317-330.
@@ -51,9 +51,13 @@ References:
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
-from typing import NamedTuple
+import os
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Literal, NamedTuple
 
 import jax
 import jax.core
@@ -61,6 +65,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 from numpy.typing import ArrayLike
+
+from jaxgsa._core.batching import get_memory_budget
 
 # Paper defaults (Hilhorst et al. 2024): tau_P = 5e-8 on the power function,
 # tau_R = 1e-4 on the interpolation residual, lambda = 1e-10 on the RKHS term.
@@ -72,11 +78,19 @@ _DEFAULT_RIDGE = 1e-10
 _DEFAULT_TOL_POWER = 5e-8
 _DEFAULT_TOL_RESIDUAL = 1e-4
 
-# Relative jitter on the active diagonal of the normal matrix. The greedy
-# centres are chosen to be maximally distinct, but with the default
-# lambda = 1e-10 the RKHS term does almost nothing, so the kernel Gram can
-# still be numerically singular in float32 once many centres are selected.
+# Relative jitter on the active diagonal of the Newton-basis normal matrix
+# V^T V. With the default lambda = 1e-10 the ridge term does almost nothing,
+# and late Newton columns carry little power, so V^T V can still be close to
+# singular once many centres are selected.
 _JITTER = 1e-8
+
+# How the greedy updates the squared power function after each centre: rebuilt
+# from the whole Newton basis ("exact") or by subtracting the new column
+# ("incremental"). See jaxgsa.vkoga.analyze.
+GreedyUpdate = Literal["exact", "incremental"]
+
+# Narrowest basis width of the greedy loop's first phase (see _phase_widths).
+_FIRST_PHASE_WIDTH = 64
 
 # Relative jitter, in machine epsilons of the working dtype, for the retry
 # solve after a non-finite first solve.
@@ -137,18 +151,53 @@ def _gaussian_kernel(X1: Array, X2: Array, gamma: Array | float) -> Array:
     return jnp.exp(-gamma * jnp.maximum(d2, 0.0))
 
 
-@functools.partial(jax.jit, static_argnames=("max_centers",))
+@functools.partial(jax.jit, static_argnames=("max_centers", "greedy_update"))
 def _select_centers(
     X: Array,
     Y: Array,
     *,
     gamma: Array | float,
     max_centers: int,
+    greedy_update: GreedyUpdate = "exact",
     tol_power: Array | float = _DEFAULT_TOL_POWER,
     tol_residual: Array | float = _DEFAULT_TOL_RESIDUAL,
     train_mask: Array | None = None,
 ) -> tuple[Array, Array]:
     """Select kernel centres by the P-greedy rule.
+
+    The selection half of :func:`_newton_greedy`, for callers that do not
+    need the Newton basis. See there for the rule and the argument contract.
+
+    Returns:
+        ``(idx, m)``: the int32 buffer of selected row indices, shape
+        ``(max_centers,)``, and the scalar count actually selected.
+    """
+    idx, m, _ = _newton_greedy(
+        X,
+        Y,
+        gamma=gamma,
+        max_centers=max_centers,
+        greedy_update=greedy_update,
+        tol_power=tol_power,
+        tol_residual=tol_residual,
+        train_mask=train_mask,
+    )
+    return idx, m
+
+
+@functools.partial(jax.jit, static_argnames=("max_centers", "greedy_update"))
+def _newton_greedy(
+    X: Array,
+    Y: Array,
+    *,
+    gamma: Array | float,
+    max_centers: int,
+    greedy_update: GreedyUpdate = "exact",
+    tol_power: Array | float = _DEFAULT_TOL_POWER,
+    tol_residual: Array | float = _DEFAULT_TOL_RESIDUAL,
+    train_mask: Array | None = None,
+) -> tuple[Array, Array, Array]:
+    """Select kernel centres by the P-greedy rule and return the Newton basis.
 
     Centres are picked one at a time at the current maximiser of the power
     function (Hilhorst et al. 2024, eq. 8). The rule is expressed in the Newton
@@ -168,6 +217,8 @@ def _select_centers(
         X: Training inputs, shape ``(n, D)``.
         Y: Training outputs, shape ``(n, S)``, output slices already flattened.
         gamma: Positive Gaussian shape parameter.
+        greedy_update: ``"exact"`` or ``"incremental"``; see
+            :func:`jaxgsa.vkoga.analyze`.
         max_centers: Hard cap on the number of centres, and the static size of
             the returned index buffer. Silently capped at ``n``.
         tol_power: Power-function stopping rule (tau_P). Stop once
@@ -183,9 +234,12 @@ def _select_centers(
             shapes.
 
     Returns:
-        ``(idx, m)``. ``idx`` is the int32 buffer of selected row indices,
+        ``(idx, m, V)``. ``idx`` is the int32 buffer of selected row indices,
         shape ``(max_centers,)``. ``m`` is the scalar count of centres actually
-        selected. Slots ``>= m`` are unused.
+        selected. Slots ``>= m`` are unused. ``V`` is the Newton basis at every
+        row (held-out rows included), shape ``(n, max_centers)``; its columns
+        ``>= m`` are zero. :func:`_solve_ridge` solves for the coefficients in
+        this basis.
     """
     n, _ = X.shape
     # Never ask for more centres than there are points to pick from: the
@@ -208,16 +262,39 @@ def _select_centers(
     res_scale = jnp.where(y_norm > 0.0, y_norm, 1.0)
 
     eps = jnp.finfo(dtype).eps
-    init = (
-        jnp.zeros((n, max_centers), dtype=dtype),  # Newton basis at all points
-        residual0,
+    n_slices = Y.shape[1]
+    # The residual rule needs only "is any slice still above tau_R". One
+    # slice that is above it answers that, so only that "witness" slice's
+    # residual is carried over all n rows. The other slices are carried as
+    # their Newton coefficients C, shape (max_centers, S): the residual at
+    # the next centre is then one (max_centers,) x (max_centers, S) product,
+    # not an (n, S) update per step. The full (n, S) residual is rebuilt,
+    # as one GEMM, only when the witness drops to tau_R. Then the rule is
+    # decided on every slice and the worst slice becomes the next witness.
+    # Y[i] - V[i] @ C rounds differently from a running (n, S) update, so the
+    # stopping step can differ by one centre when tau_R lands within rounding
+    # of a residual norm. The selection order itself does not read Y.
+    rel0 = y_norm / res_scale
+    witness0 = jnp.argmax(rel0).astype(jnp.int32)
+    # The basis V only has m non-zero columns after m steps, but every step
+    # reads all of its columns. So V (and C) start narrow and widen in a
+    # few static phases, each its own while loop. The extra columns of a
+    # wider phase are exact zeros, which add nothing to the products and
+    # sums below. On the checked cases (f32 and f64) the selected centres
+    # matched a single full-width loop exactly.
+    widths = _phase_widths(max_centers)
+    state = (
+        jnp.zeros((n, widths[0]), dtype=dtype),  # Newton basis at all points
+        jnp.zeros((widths[0], n_slices), dtype=dtype),  # Newton coefficients
+        residual0[:, witness0],  # residual of the witness slice
+        witness0,
         blocked0,
         jnp.zeros((max_centers,), dtype=jnp.int32),  # selected row indices
         jnp.zeros((), dtype=jnp.int32),  # centres selected so far
         # K(x, x) = 1 for the Gaussian kernel, so the power function starts at
         # 1 everywhere; the empty basis subtracts nothing.
         jnp.ones((), dtype=dtype),
-        jnp.max(y_norm / res_scale),
+        jnp.max(rel0),
         # Squared power function at every point, carried so the loop body reads
         # it instead of rebuilding it. The empty basis subtracts nothing, so an
         # open point starts at 1 and a blocked point is never a candidate.
@@ -225,12 +302,19 @@ def _select_centers(
     )
 
     def _cond(state: tuple) -> Array:
-        _, _, _, _, m, power, res, _ = state
+        _, _, _, _, _, _, m, power, res, _ = state
         # All three stopping rules, first to trigger wins.
         return (m < max_centers) & (power > tol_power) & (res > tol_residual)
 
+    def _all_slices(V: Array, C: Array) -> tuple[Array, Array, Array]:
+        """Rebuild every slice's residual and pick the worst as the witness."""
+        residual = jnp.where(mask[:, None], residual0 - V @ C, 0.0)
+        rel = jnp.sqrt(jnp.sum(residual**2, axis=0)) / res_scale
+        worst = jnp.argmax(rel).astype(jnp.int32)
+        return rel[worst], residual[:, worst], worst
+
     def _body(state: tuple) -> tuple:
-        V, residual, blocked, idx, m, _, _, p2 = state
+        V, C, r_w, w, blocked, idx, m, _, _, p2 = state
 
         i = jnp.argmax(p2)
         # p2 = 1 - sum(V^2) is a cancellation: once the basis nearly spans the
@@ -243,15 +327,25 @@ def _select_centers(
         # kernel translate against the existing basis, then normalise by the
         # power function at the new centre.
         k_col = _gaussian_kernel(X, X[i][None, :], gamma)[:, 0]
-        v = (k_col - V @ V[i]) / sqrt_p
+        V_i = jax.lax.optimization_barrier(V[i])
+        v = (k_col - V @ V_i) / sqrt_p
+        # At its own centre the new basis function equals the power there,
+        # so set that entry exactly. Recomputed as (1 - V_i @ V_i) / sqrt_p it
+        # can round to zero in float32 once the power nears rounding level,
+        # and a zero there makes the triangular factor in _solve_ridge
+        # singular.
+        v = v.at[i].set(sqrt_p)
 
         # Interpolation residual in the same basis: one coefficient row per
-        # output slice, since all slices share this basis. Re-mask after the
-        # update: v is dense, so the outer product writes minus-interpolant
-        # values into held-out rows. Without the mask those rows accumulate
-        # and the stopping norm below never converges inside cross-validation.
-        c = residual[i] / sqrt_p  # (S,)
-        residual = jnp.where(mask[:, None], residual - jnp.outer(v, c), 0.0)
+        # output slice, since all slices share this basis. The residual at
+        # the new centre is Y[i] minus the interpolant so far, V[i] @ C. The
+        # witness residual is re-masked after its update: v is dense, so the
+        # update writes minus-interpolant values into held-out rows. Without
+        # the mask those rows accumulate and the stopping norm below never
+        # converges inside cross-validation.
+        c = (residual0[i] - V_i @ C) / sqrt_p  # (S,)
+        C = C.at[m].set(c)
+        r_w = jnp.where(mask, r_w - v * c[w], 0.0)
 
         V = V.at[:, m].set(v)
         # Also block every exact copy of the new centre. At a copy the true
@@ -270,21 +364,77 @@ def _select_centers(
         # Stopping quantities for the next iteration. Clamp the power at zero
         # so exhausted candidates (all -inf) terminate instead of producing a
         # NaN under the square root.
-        p2_next = jnp.where(blocked, -jnp.inf, 1.0 - jnp.sum(V * V, axis=1))
+        # "exact" rebuilds p2 from the whole basis each step. "incremental"
+        # subtracts the new column's square only: one fewer read of V per
+        # step, but different rounding, and the greedy is sensitive enough to
+        # rounding that it then often picks different centres.
+        if greedy_update == "incremental":
+            p2_next = jnp.where(blocked, -jnp.inf, p2 - v * v)
+        else:
+            p2_next = jnp.where(blocked, -jnp.inf, 1.0 - jnp.sum(V * V, axis=1))
         power = jnp.sqrt(jnp.maximum(jnp.max(p2_next), 0.0))
         # Held-out rows are re-masked to exactly zero above, and selected
         # points are interpolated exactly, so summing over all rows equals
         # summing over the active training rows. Relative to each slice's own
-        # norm, so the rule is scale-free.
-        res = jnp.max(jnp.sqrt(jnp.sum(residual**2, axis=0)) / res_scale)
-        return (V, residual, blocked, idx, m, power, res, p2_next)
+        # norm, so the rule is scale-free. While the witness is above tau_R
+        # the maximum over the slices is too, so the loop goes on either way.
+        res = jnp.sqrt(jnp.sum(r_w**2)) / res_scale[w]
+        if n_slices > 1:
+            res, r_w, w = jax.lax.cond(
+                res > tol_residual,
+                lambda: (res, r_w, w),
+                lambda: _all_slices(V, C),
+            )
+        return (V, C, r_w, w, blocked, idx, m, power, res, p2_next)
 
-    _, _, _, idx, m, _, _, _ = jax.lax.while_loop(_cond, _body, init)
-    return idx, m
+    for width in widths:
+        V, C, *rest = state
+        pad = width - V.shape[1]
+        state = (
+            jnp.pad(V, ((0, 0), (0, pad))),
+            jnp.pad(C, ((0, pad), (0, 0))),
+            *rest,
+        )
+        state = jax.lax.while_loop(lambda s, width=width: _cond(s) & (s[6] < width), _body, state)
+    V, *_, idx, m, _, _, _ = state
+    return idx, m, V
+
+
+def _phase_widths(max_centers: int) -> tuple[int, ...]:
+    """Return the static basis widths the greedy loop grows through.
+
+    Widths double from ``_FIRST_PHASE_WIDTH`` and end at ``max_centers``, so
+    a step never reads more than about twice the columns it needs.
+
+    Args:
+        max_centers: Final number of basis columns.
+
+    Returns:
+        Increasing widths, the last equal to ``max_centers``.
+    """
+    widths = []
+    width = _FIRST_PHASE_WIDTH
+    while width < max_centers:
+        widths.append(width)
+        width *= 2
+    widths.append(max_centers)
+    return tuple(widths)
 
 
 class _NormalEquations(NamedTuple):
     """Ridge-independent pieces of the regularised coefficient solve.
+
+    The system is posed in the Newton basis ``V`` the greedy built, not in the
+    kernel translates. With ``A_nm = V L^T`` and ``A_mm = L L^T``, where ``L``
+    is ``V`` at the centres (lower triangular), the RKHS-regularised problem
+    ``min ||Y - A_nm alpha||^2 + ridge * alpha^T A_mm alpha`` becomes
+    ``min ||Y - V beta||^2 + ridge * ||beta||^2`` with ``beta = L^T alpha``.
+    The two are equal in exact arithmetic. In floating point they are not:
+    ``A_nm^T A_nm`` squares the condition number of the cross-kernel, which
+    for a Gaussian kernel exceeds ``1 / eps`` of float32 at ordinary settings
+    (measured: ``6e8`` on Ishigami, ``N=600``, 60 centres). The Newton basis
+    is the stable pivoted-Cholesky factor of the kernel, so ``V^T V`` stays
+    well conditioned (``cond(V) = 145`` on the same case).
 
     Everything here depends on ``X``, ``Y``, the selected centres, and
     ``gamma``, but not on ``ridge``. :func:`_cross_validate` builds one per
@@ -296,20 +446,19 @@ class _NormalEquations(NamedTuple):
             ``(max_centers,)``.
         centers: Selected centres, shape ``(max_centers, D)``, padded with
             duplicates.
-        A_nm: Masked cross-kernel between training points and centres, shape
-            ``(n, max_centers)``.
-        A_mm: Masked centre Gram, shape ``(max_centers, max_centers)``.
-        AtA: ``A_nm^T A_nm``, shape ``(max_centers, max_centers)``.
-        AtY: ``A_nm^T Y`` over the training rows, shape ``(max_centers, S)``.
+        L: Newton basis at the centres, lower triangular, shape
+            ``(max_centers, max_centers)``. Inactive slots hold the identity.
+        VtV: ``V^T V`` over the training rows, shape
+            ``(max_centers, max_centers)``.
+        VtY: ``V^T Y`` over the training rows, shape ``(max_centers, S)``.
         m: Scalar count of centres actually selected.
     """
 
     active: Array
     centers: Array
-    A_nm: Array
-    A_mm: Array
-    AtA: Array
-    AtY: Array
+    L: Array
+    VtV: Array
+    VtY: Array
     m: Array
 
 
@@ -318,20 +467,20 @@ def _normal_equations(
     Y: Array,
     idx: Array,
     m: Array,
+    V: Array,
     *,
-    gamma: Array | float,
     train_mask: Array | None = None,
 ) -> _NormalEquations:
-    """Build the ridge-independent normal-equation matrices.
+    """Build the ridge-independent normal-equation matrices in the Newton basis.
 
     Args:
         X: Training inputs, shape ``(n, D)``.
         Y: Training outputs, shape ``(n, S)``, output slices already flattened.
-        idx: Selected row indices from :func:`_select_centers`, shape
+        idx: Selected row indices from :func:`_newton_greedy`, shape
             ``(max_centers,)``.
         m: Scalar count of centres actually selected.
-        gamma: Positive Gaussian shape parameter the centres were selected
-            with.
+        V: Newton basis from :func:`_newton_greedy`, shape
+            ``(n, max_centers)``.
         train_mask: Boolean mask, shape ``(n,)``, or ``None``. ``False`` rows
             are excluded from the solve.
 
@@ -342,27 +491,31 @@ def _normal_equations(
     max_centers = idx.shape[0]
     mask = jnp.ones((n,), dtype=bool) if train_mask is None else train_mask.astype(bool)
 
-    # Unused slots point at row 0; masking their kernel columns to zero (and
-    # putting a 1 on their diagonal in _solve_ridge) forces their coefficients
-    # to be exactly zero, so the duplicate centre is inert.
+    # Unused slots point at row 0. Their V columns are exact zeros, and an
+    # identity block in L (plus a 1 on their diagonal in _solve_ridge) forces
+    # their coefficients to be exactly zero, so the duplicate centre is inert.
     active = jnp.arange(max_centers) < m
-    centers = X[idx]
-    A_nm = _gaussian_kernel(X, centers, gamma) * active[None, :] * mask[:, None]
-    A_mm = _gaussian_kernel(centers, centers, gamma) * active[None, :] * active[:, None]
+    both = active[:, None] & active[None, :]
+    # A Newton basis function vanishes at every earlier centre, so V[idx] is
+    # lower triangular up to rounding; tril makes that exact.
+    L = jnp.where(both, jnp.tril(V[idx]), 0.0) + jnp.diag(jnp.where(active, 0.0, 1.0))
+    V_train = jnp.where(mask[:, None], V, 0.0)
     Y_train = jnp.where(mask[:, None], Y, 0.0)
     return _NormalEquations(
         active=active,
-        centers=centers,
-        A_nm=A_nm,
-        A_mm=A_mm,
-        AtA=A_nm.T @ A_nm,
-        AtY=A_nm.T @ Y_train,
+        centers=X[idx],
+        L=L.astype(V.dtype),
+        VtV=V_train.T @ V_train,
+        VtY=V_train.T @ Y_train,
         m=m,
     )
 
 
 def _solve_ridge(eq: _NormalEquations, ridge: Array | float) -> Array:
     """Assemble the regularised system for one ridge value and solve it.
+
+    Solves ``(V^T V + ridge * I + JITTER * diag_mean * I) beta = V^T Y`` and
+    maps back to kernel-translate coefficients by ``L^T alpha = beta``.
 
     Args:
         eq: Ridge-independent matrices from :func:`_normal_equations`.
@@ -372,39 +525,41 @@ def _solve_ridge(eq: _NormalEquations, ridge: Array | float) -> Array:
         Expansion coefficients, shape ``(max_centers, S)``. Inactive rows are
         zero.
     """
-    G = eq.AtA + ridge * eq.A_mm
-    # Relative jitter: scale-free against gamma and the number of rows, which
-    # both move the magnitude of A_nm^T A_nm by orders of magnitude.
+    G = eq.VtV + jnp.diag(jnp.where(eq.active, ridge, 0.0)).astype(eq.VtV.dtype)
+    # Relative jitter: scale-free against the number of rows, which moves the
+    # magnitude of V^T V by orders of magnitude.
     diag_mean = jnp.sum(jnp.where(eq.active, jnp.diagonal(G), 0.0)) / jnp.maximum(eq.m, 1)
-    alpha = jnp.linalg.solve(G + jnp.diag(jnp.where(eq.active, _JITTER * diag_mean, 1.0)), eq.AtY)
-    # The default jitter is below float32 eps, so a singular Gram can still
+    beta = jnp.linalg.solve(G + jnp.diag(jnp.where(eq.active, _JITTER * diag_mean, 1.0)), eq.VtY)
+    # The default jitter is below float32 eps, so a singular system can still
     # give NaN there. Only then, re-solve with a larger jitter. A finite first
     # solve is returned unchanged, and the retry costs nothing unless it runs.
-    finite = jnp.all(jnp.isfinite(alpha))
+    finite = jnp.all(jnp.isfinite(beta))
     if isinstance(finite, jax.core.Tracer):
         # Traced (the cross-validation scorer): branch on the device.
-        return jax.lax.cond(
-            finite, lambda: alpha, lambda: _retry_solve(G, eq.AtY, eq.active, diag_mean)
+        beta = jax.lax.cond(
+            finite, lambda: beta, lambda: _retry_solve(G, eq.VtY, eq.active, diag_mean)
         )
-    # Eager (the final fit): branch on the host. An eager lax.cond would
-    # compile again on every call, because its branch closures are new.
-    return alpha if bool(finite) else _retry_solve(G, eq.AtY, eq.active, diag_mean)
+    elif not bool(finite):
+        # Eager (the final fit): branch on the host. An eager lax.cond would
+        # compile again on every call, because its branch closures are new.
+        beta = _retry_solve(G, eq.VtY, eq.active, diag_mean)
+    return jax.scipy.linalg.solve_triangular(eq.L.T, beta, lower=False)
 
 
-def _retry_solve(G: Array, AtY: Array, active: Array, diag_mean: Array) -> Array:
+def _retry_solve(G: Array, rhs: Array, active: Array, diag_mean: Array) -> Array:
     """Solve the ridge system again with a jitter of ``_JITTER_EPS`` epsilons.
 
     Args:
         G: Regularised normal matrix without jitter, ``(max_centers, max_centers)``.
-        AtY: Right-hand side, ``(max_centers, S)``.
+        rhs: Right-hand side, ``(max_centers, S)``.
         active: Boolean mask of the filled centre slots, ``(max_centers,)``.
         diag_mean: Mean of the active diagonal of ``G``.
 
     Returns:
-        Expansion coefficients, shape ``(max_centers, S)``.
+        Newton-basis coefficients ``beta``, shape ``(max_centers, S)``.
     """
     eps_jitter = jnp.maximum(_JITTER, _JITTER_EPS * jnp.finfo(G.dtype).eps)
-    return jnp.linalg.solve(G + jnp.diag(jnp.where(active, eps_jitter * diag_mean, 1.0)), AtY)
+    return jnp.linalg.solve(G + jnp.diag(jnp.where(active, eps_jitter * diag_mean, 1.0)), rhs)
 
 
 def _solve_coefficients(
@@ -412,6 +567,7 @@ def _solve_coefficients(
     Y: Array,
     idx: Array,
     m: Array,
+    V: Array,
     *,
     gamma: Array | float,
     ridge: Array | float,
@@ -419,32 +575,34 @@ def _solve_coefficients(
 ) -> _VKOGAState:
     """Solve for the expansion coefficients over already-selected centres.
 
-    Coefficients solve the RKHS-regularised normal equations over the
+    Coefficients solve the RKHS-regularised least-squares problem over the
     selected centres::
 
-        (A_nm^T A_nm + ridge * A_mm + JITTER * diag_mean * I) alpha = A_nm^T Y
+        min_alpha ||Y - A_nm alpha||^2 + ridge * alpha^T A_mm alpha
 
     ``A_nm`` is the ``(n, m)`` cross-kernel between training points and
-    centres, and ``A_mm`` is the ``(m, m)`` centre Gram. When ``m = n`` and
-    ``ridge`` dominates the jitter term this collapses to the paper's eq. (6):
-    ``A_nm = A_mm = A`` is then symmetric, so the system is
-    ``A (A + ridge*I) alpha = A Y``, that is ``(A + ridge*I) alpha = Y``.
+    centres, and ``A_mm`` is the ``(m, m)`` centre Gram. When ``m = n`` this
+    is the paper's eq. (6), ``(A + ridge*I) alpha = Y``. The solve itself runs
+    in the Newton basis ``V`` (see :class:`_NormalEquations`), because the
+    kernel-translate normal matrix ``A_nm^T A_nm`` is too ill-conditioned for
+    float32.
 
-    The ``JITTER * diag_mean * I`` term (see :func:`_solve_ridge`) is added
-    unconditionally, not just when the Gram is singular. ``diag_mean`` is the
-    mean active diagonal of ``A_nm^T A_nm + ridge * A_mm``, so this term
-    scales with the problem the same way ``ridge * A_mm`` does. At the module
-    default ``_JITTER = 1e-8`` it is about 2.2e-6 at a training size of 1024
-    rows. A caller-supplied ``ridge`` below that scale is therefore not the
-    regularisation in force: the jitter already dominates the diagonal, and
-    the reported ``VKOGAResult.ridge`` undercounts it.
+    A ``JITTER * diag_mean * I`` term (see :func:`_solve_ridge`) is added to
+    the Newton-basis system unconditionally. ``diag_mean`` is the mean active
+    diagonal of ``V^T V + ridge * I``, so the term acts as an extra ridge of
+    ``JITTER * diag_mean``: about 3e-8 to 2e-7 at 1024 training rows on
+    uniform inputs. A caller-supplied ``ridge`` below that scale is therefore
+    not the regularisation in force, and the reported ``VKOGAResult.ridge``
+    undercounts it.
 
     Args:
         X: Training inputs, shape ``(n, D)``.
         Y: Training outputs, shape ``(n, S)``, output slices already flattened.
-        idx: Selected row indices from :func:`_select_centers`, shape
+        idx: Selected row indices from :func:`_newton_greedy`, shape
             ``(max_centers,)``.
         m: Scalar count of centres actually selected.
+        V: Newton basis from :func:`_newton_greedy`, shape
+            ``(n, max_centers)``.
         gamma: Positive Gaussian shape parameter the centres were selected
             with.
         ridge: RKHS regularisation parameter (the paper's lambda).
@@ -461,12 +619,15 @@ def _solve_coefficients(
     mask = jnp.ones((n,), dtype=bool) if train_mask is None else train_mask.astype(bool)
     n_train = jnp.sum(mask)
 
-    eq = _normal_equations(X, Y, idx, m, gamma=gamma, train_mask=mask)
+    eq = _normal_equations(X, Y, idx, m, V, train_mask=mask)
     centers = eq.centers
     alpha = _solve_ridge(eq, ridge)  # (max_centers, S)
 
-    # Training-fit diagnostic, per slice, over the rows actually fitted.
-    sq_err = jnp.where(mask[:, None], (Y - eq.A_nm @ alpha) ** 2, 0.0)
+    # Training-fit diagnostic, per slice, over the rows actually fitted. It
+    # evaluates the kernel translates, as predict does, so it scores the
+    # surrogate the caller gets.
+    A_nm = _gaussian_kernel(X, centers, gamma) * eq.active[None, :]
+    sq_err = jnp.where(mask[:, None], (Y - A_nm @ alpha) ** 2, 0.0)
     rmse = jnp.sqrt(jnp.sum(sq_err, axis=0) / jnp.maximum(n_train, 1))
     rmse = jnp.where(n_train > 0, rmse, jnp.full((n_slices,), jnp.nan))
 
@@ -486,6 +647,7 @@ def _fit_vkoga(
     *,
     gamma: Array | float,
     max_centers: int,
+    greedy_update: GreedyUpdate = "exact",
     ridge: Array | float = _DEFAULT_RIDGE,
     tol_power: Array | float = _DEFAULT_TOL_POWER,
     tol_residual: Array | float = _DEFAULT_TOL_RESIDUAL,
@@ -501,6 +663,8 @@ def _fit_vkoga(
         X: Training inputs, shape ``(n, D)``.
         Y: Training outputs, shape ``(n, S)``, output slices already flattened.
         gamma: Positive Gaussian shape parameter.
+        greedy_update: ``"exact"`` or ``"incremental"``; see
+            :func:`jaxgsa.vkoga.analyze`.
         max_centers: Hard cap on the number of centres, and the static array
             size of the returned state. Silently capped at ``n``.
         ridge: RKHS regularisation parameter (the paper's lambda).
@@ -513,16 +677,17 @@ def _fit_vkoga(
     Returns:
         The fitted :class:`_VKOGAState`.
     """
-    idx, m = _select_centers(
+    idx, m, V = _newton_greedy(
         X,
         Y,
         gamma=gamma,
         max_centers=max_centers,
+        greedy_update=greedy_update,
         tol_power=tol_power,
         tol_residual=tol_residual,
         train_mask=train_mask,
     )
-    return _solve_coefficients(X, Y, idx, m, gamma=gamma, ridge=ridge, train_mask=train_mask)
+    return _solve_coefficients(X, Y, idx, m, V, gamma=gamma, ridge=ridge, train_mask=train_mask)
 
 
 def _predict_vkoga(state: _VKOGAState, X_new: Array) -> Array:
@@ -564,31 +729,225 @@ def _content_digest(*arrays: ArrayLike) -> bytes:
 
 
 @functools.partial(
-    jax.jit, static_argnames=("max_centers", "n_folds", "tol_power", "tol_residual")
+    jax.jit,
+    static_argnames=("max_centers", "n_folds", "tol_power", "tol_residual", "greedy_update"),
 )
+def _cv_fold_sse(
+    X: Array,
+    Y: Array,
+    fold_of: Array,
+    fold: Array,
+    ridge_vec: Array,
+    gamma: Array,
+    *,
+    max_centers: int,
+    greedy_update: GreedyUpdate = "exact",
+    n_folds: int,
+    tol_power: float,
+    tol_residual: float,
+) -> tuple[Array, Array]:
+    """Held-out squared errors of one ``(gamma, fold)`` pair, for every ridge.
+
+    The data are arguments, not frozen constants, so the program compiles once
+    per shape, dtype and static setting and is reused by every new dataset
+    and every grid point.
+
+    Args:
+        X: Training inputs, shape ``(n, D)``.
+        Y: Training outputs, shape ``(n, S)``.
+        fold_of: Fold index of each row, shape ``(n,)``.
+        fold: Scalar index of the held-out fold.
+        ridge_vec: Ridge grid, shape ``(R,)``.
+        gamma: Scalar Gaussian shape parameter.
+        greedy_update: ``"exact"`` or ``"incremental"``; see
+            :func:`jaxgsa.vkoga.analyze`.
+        max_centers: Centre cap passed through to each fit.
+        n_folds: Number of folds.
+        tol_power: Absolute power-function stopping tolerance.
+        tol_residual: Relative residual stopping tolerance.
+
+    Returns:
+        ``(sse_slice, sse_total)`` of shapes ``(R, S)`` and ``(R,)``: the
+        held-out sum of squared errors per slice, and over all slices.
+    """
+    n = X.shape[0]
+    train = fold_of != fold
+    # One greedy sweep per (fold, gamma): selection is ridge-free.
+    idx, m, V = _newton_greedy(
+        X,
+        Y,
+        gamma=gamma,
+        max_centers=max_centers,
+        greedy_update=greedy_update,
+        tol_power=tol_power,
+        tol_residual=tol_residual,
+        train_mask=train,
+    )
+    # The normal-equation matrices and the prediction kernel are also
+    # ridge-free: build them once per (fold, gamma) and reuse them for
+    # the whole ridge grid. Only the assembly-and-solve repeats.
+    eq = _normal_equations(X, Y, idx, m, V, train_mask=train)
+    block = -(-n // n_folds)
+    (held_idx,) = jnp.nonzero(~train, size=block, fill_value=0)
+    valid = jnp.arange(block) < jnp.sum(~train)
+    K_pred = _gaussian_kernel(X[held_idx], eq.centers, gamma)
+    Y_held = Y[held_idx]
+
+    def _ridge_sse(ridge: Array) -> tuple[Array, Array]:
+        err = Y_held - K_pred @ _solve_ridge(eq, ridge)
+        held = jnp.where(valid[:, None], err**2, 0.0)
+        # Per-slice sums for cv_rmse; the pooled sum is reduced
+        # straight from the full array so the grid choice keeps
+        # its original summation order.
+        return jnp.sum(held, axis=0), jnp.sum(held)
+
+    return jax.lax.map(_ridge_sse, ridge_vec)  # ((n_ridges, S), (n_ridges,))
+
+
+@functools.partial(jax.jit, static_argnames=("n",))
+def _cv_reduce(sse_slice: Array, sse_total: Array, *, n: int) -> tuple[Array, Array]:
+    """Pool the per-fold squared errors into RMSE scores.
+
+    Args:
+        sse_slice: Per-slice sums, shape ``(G, F, R, S)``.
+        sse_total: Pooled sums, shape ``(G, F, R)``.
+        n: Training rows. The folds partition them, so every row is held out
+            exactly once.
+
+    Returns:
+        ``(per_slice, pooled)`` of shapes ``(G, R, S)`` and ``(G, R)``.
+    """
+    n_slices = sse_slice.shape[-1]
+    per_slice = jnp.sqrt(jnp.sum(sse_slice, axis=1) / n)
+    pooled = jnp.sqrt(jnp.sum(sse_total, axis=1) / (n * n_slices))
+    return per_slice, pooled
+
+
+def _cv_workers(
+    n: int, n_slices: int, max_centers: int, n_ridges: int, itemsize: int, n_tasks: int
+) -> int:
+    """Return how many ``(gamma, fold)`` programs may run at the same time.
+
+    Each program is one long greedy loop of small kernels, so one program
+    keeps about one core busy. Running several from a thread pool uses the
+    other cores. Each running program holds its own buffers, so the count
+    is also capped by the memory budget.
+
+    Args:
+        n: Training rows.
+        n_slices: Output slices ``S``.
+        max_centers: Centre cap.
+        n_ridges: Ridge grid size.
+        itemsize: Bytes per element of the working dtype.
+        n_tasks: Number of ``(gamma, fold)`` programs to run.
+
+    Returns:
+        Worker count in ``[1, n_tasks]``.
+    """
+    # The Newton basis, the cross-kernel and the masked copies of it (about
+    # 4 n x m), the outputs and their masked copy (2 n x S), the centre
+    # matrices (3 m x m), and the right-hand sides and solutions of the
+    # ridge grid ((R + 4) m x S).
+    per_task = itemsize * (
+        4 * n * max_centers
+        + 2 * n * n_slices
+        + 3 * max_centers * max_centers
+        + (n_ridges + 4) * max_centers * n_slices
+    )
+    by_memory = get_memory_budget() // max(per_task, 1)
+    return int(max(1, min(n_tasks, _usable_cpus(), by_memory)))
+
+
+def _usable_cpus() -> int:
+    """Return the number of CPUs this process may run on.
+
+    Respects affinity and cgroup limits where the platform reports them,
+    and falls back to the machine's CPU count.
+
+    Returns:
+        A CPU count of at least 1.
+    """
+    process_cpu_count = getattr(os, "process_cpu_count", None)
+    if process_cpu_count is not None:
+        return process_cpu_count() or 1
+    sched_getaffinity = getattr(os, "sched_getaffinity", None)
+    if sched_getaffinity is not None:
+        return len(sched_getaffinity(0)) or 1
+    return os.cpu_count() or 1
+
+
+def _thread_local_config() -> list[tuple[Any, Any]] | None:
+    """Capture the JAX config values set on the calling thread only.
+
+    Context managers such as ``jax.enable_x64()`` or ``jax.default_device()``
+    set a thread-local value, which a pool thread does not see. Each pair
+    here is re-entered in the worker by :func:`_in_config`.
+
+    Returns:
+        ``(state, value)`` pairs for every config option with a thread-local
+        value, or ``None`` if this JAX version does not expose them. The
+        caller then runs everything on its own thread.
+    """
+    try:
+        from jax._src import config as jax_config  # noqa: PLC0415
+
+        unset = jax_config.config_ext.unset
+        states = list(jax_config.config_states.values())
+        return [(state, value) for state in states if (value := state.get_local()) is not unset]
+    except AttributeError:
+        return None
+
+
+def _in_config(
+    local: list[tuple[Any, Any]], fn: Callable[[], tuple[Array, Array]]
+) -> tuple[Array, Array]:
+    """Run ``fn`` with the captured thread-local config values entered.
+
+    Args:
+        local: Pairs from :func:`_thread_local_config`.
+        fn: Zero-argument function to run.
+
+    Returns:
+        ``fn()``.
+    """
+    from jax._src import config as jax_config  # noqa: PLC0415
+
+    with contextlib.ExitStack() as stack:
+        for state, value in local:
+            stack.enter_context(jax_config.StateContextManager(state, value))
+        return fn()
+
+
 def _cv_scores(
     X: Array,
     Y: Array,
     fold_of: Array,
     ridge_vec: Array,
-    gammas: Array,
+    gammas: np.ndarray,
     *,
     max_centers: int,
+    greedy_update: GreedyUpdate = "exact",
     n_folds: int,
     tol_power: float,
     tol_residual: float,
 ) -> tuple[Array, Array]:
     """Score every ``(gamma, ridge)`` pair by k-fold held-out RMSE.
 
-    The data are arguments, not frozen constants, so the program compiles once
-    per shape, dtype and static setting and is reused by every new dataset.
+    Each ``(gamma, fold)`` pair is one call of :func:`_cv_fold_sse`. The
+    pairs are independent, so after the first call (which compiles the
+    program) they run from a thread pool, several at a time, each under the
+    caller's thread-local JAX config. Each pair runs the same program
+    whichever thread runs it, so the scores do not depend on the number of
+    workers.
 
     Args:
         X: Training inputs, shape ``(n, D)``.
         Y: Training outputs, shape ``(n, S)``.
         fold_of: Fold index of each row, shape ``(n,)``.
         ridge_vec: Ridge grid, shape ``(R,)``.
-        gammas: Gamma grid, shape ``(G,)``.
+        gammas: Gamma grid, host array of shape ``(G,)`` in ``X.dtype``.
+        greedy_update: ``"exact"`` or ``"incremental"``; see
+            :func:`jaxgsa.vkoga.analyze`.
         max_centers: Centre cap passed through to each fit.
         n_folds: Number of folds.
         tol_power: Absolute power-function stopping tolerance.
@@ -597,52 +956,50 @@ def _cv_scores(
     Returns:
         ``(per_slice, pooled)`` of shapes ``(G, R, S)`` and ``(G, R)``.
     """
-    n = X.shape[0]
-    n_slices = Y.shape[1]
-    fold_ids = jnp.arange(n_folds)
+    n, n_slices = Y.shape
+    tasks = [(g, f) for g in range(len(gammas)) for f in range(n_folds)]
+    fold_dtype = fold_of.dtype
 
-    def _score_gamma(gamma: Array) -> tuple[Array, Array]:
-        def _fold_sse(fold: Array) -> tuple[Array, Array]:
-            train = fold_of != fold
-            # One greedy sweep per (fold, gamma): selection is ridge-free.
-            idx, m = _select_centers(
-                X,
-                Y,
-                gamma=gamma,
-                max_centers=max_centers,
-                tol_power=tol_power,
-                tol_residual=tol_residual,
-                train_mask=train,
-            )
-            # The normal-equation matrices and the prediction kernel are also
-            # ridge-free: build them once per (fold, gamma) and reuse them for
-            # the whole ridge grid. Only the assembly-and-solve repeats.
-            eq = _normal_equations(X, Y, idx, m, gamma=gamma, train_mask=train)
-            block = -(-n // n_folds)
-            (held_idx,) = jnp.nonzero(~train, size=block, fill_value=0)
-            valid = jnp.arange(block) < jnp.sum(~train)
-            K_pred = _gaussian_kernel(X[held_idx], eq.centers, gamma)
-            Y_held = Y[held_idx]
+    def _run(task: tuple[int, int]) -> tuple[Array, Array]:
+        g, f = task
+        out = _cv_fold_sse(
+            X,
+            Y,
+            fold_of,
+            np.asarray(f, dtype=fold_dtype),
+            ridge_vec,
+            gammas[g],
+            max_centers=max_centers,
+            greedy_update=greedy_update,
+            n_folds=n_folds,
+            tol_power=tol_power,
+            tol_residual=tol_residual,
+        )
+        return jax.block_until_ready(out)
 
-            def _ridge_sse(ridge: Array) -> tuple[Array, Array]:
-                err = Y_held - K_pred @ _solve_ridge(eq, ridge)
-                held = jnp.where(valid[:, None], err**2, 0.0)
-                # Per-slice sums for cv_rmse; the pooled sum is reduced
-                # straight from the full array so the grid choice keeps
-                # its original summation order.
-                return jnp.sum(held, axis=0), jnp.sum(held)
-
-            return jax.lax.map(_ridge_sse, ridge_vec)  # ((n_ridges, S), (n_ridges,))
-
-        # lax.map runs the folds sequentially: vmap would hold n_folds
-        # copies of the (n, n) kernel work live at once, which is the
-        # memory wall here long before it is a speed win.
-        sse_slice, sse_total = jax.lax.map(_fold_sse, fold_ids)
-        per_slice = jnp.sqrt(jnp.sum(sse_slice, axis=0) / n)  # (n_ridges, n_slices)
-        pooled = jnp.sqrt(jnp.sum(sse_total, axis=0) / (n * n_slices))  # (n_ridges,)
-        return per_slice, pooled
-
-    return jax.lax.map(_score_gamma, gammas)
+    # The first call compiles; the pool then reuses that one program.
+    results = [_run(tasks[0])]
+    workers = _cv_workers(
+        n, n_slices, max_centers, int(ridge_vec.shape[0]), X.dtype.itemsize, len(tasks) - 1
+    )
+    # Pool threads do not inherit thread-local JAX config (for example
+    # ``with jax.enable_x64():``), so each task re-enters the caller's values.
+    local = _thread_local_config()
+    if workers > 1 and local is not None:
+        pool = ThreadPoolExecutor(max_workers=workers)
+        futures = [pool.submit(_in_config, local, functools.partial(_run, t)) for t in tasks[1:]]
+        try:
+            results.extend(future.result() for future in futures)
+        finally:
+            # On an error, drop the queued tasks so it surfaces promptly.
+            pool.shutdown(wait=True, cancel_futures=True)
+    else:
+        results.extend(_run(task) for task in tasks[1:])
+    sse_slice = jnp.stack([r[0] for r in results]).reshape(
+        len(gammas), n_folds, *results[0][0].shape
+    )
+    sse_total = jnp.stack([r[1] for r in results]).reshape(len(gammas), n_folds, -1)
+    return _cv_reduce(sse_slice, sse_total, n=n)
 
 
 def _cross_validate(
@@ -652,6 +1009,7 @@ def _cross_validate(
     gammas: ArrayLike,
     ridges: ArrayLike,
     max_centers: int,
+    greedy_update: GreedyUpdate = "exact",
     n_folds: int = 10,
     tol_power: float = _DEFAULT_TOL_POWER,
     tol_residual: float = _DEFAULT_TOL_RESIDUAL,
@@ -679,6 +1037,8 @@ def _cross_validate(
         Y: Training outputs, shape ``(n, S)``, output slices already flattened.
         gammas: Candidate Gaussian shape parameters, any 1-D array-like.
         ridges: Candidate RKHS regularisation parameters, any 1-D array-like.
+        greedy_update: ``"exact"`` or ``"incremental"``; see
+            :func:`jaxgsa.vkoga.analyze`.
         max_centers: Centre cap passed through to each fit.
         n_folds: Number of folds, at least 2. Capped at ``n``.
         tol_power: Absolute power-function stopping tolerance (tau_P).
@@ -719,8 +1079,9 @@ def _cross_validate(
         Y,
         fold_of,
         ridge_vec,
-        jnp.asarray(gamma_grid, dtype=X.dtype),
+        gamma_grid.astype(X.dtype),
         max_centers=max_centers,
+        greedy_update=greedy_update,
         n_folds=n_folds,
         tol_power=tol_power,
         tol_residual=tol_residual,

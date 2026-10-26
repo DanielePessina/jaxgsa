@@ -11,6 +11,7 @@ convenience over those result methods.
 from __future__ import annotations
 
 import dataclasses
+import math
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 import jax
@@ -19,7 +20,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.bootstrap import bootstrap_draws, interval
+from jaxgsa._core.bootstrap import bootstrap_draws, bootstrap_draws_host, interval
 from jaxgsa._core.entry import (
     bootstrap_checks,
     check_scalars,
@@ -61,6 +62,8 @@ _IRREGULAR_KWARGS = (
     "conf_level",
     "ci_method",
     "key",
+    "batch_size",
+    "slice_chunk_size",
     "on_invalid",
     "keep_replicates",
 )
@@ -179,6 +182,51 @@ def _raise_refused_hdmr_backend_marginals(problem: "Problem", method: str) -> No
         raise ValueError(f"{exc} For jaxgsa.shapley, pass backend='pce'.") from None
 
 
+def _chunk_kwargs(
+    backend: str,
+    batch_size: int | None,
+    slice_chunk_size: int | None,
+    backend_kwargs: dict[str, Any],
+    method: str,
+) -> dict[str, Any]:
+    """Validate the two chunking keywords and add them to the backend's arguments.
+
+    Both backends take ``batch_size`` (rows of ``X`` per fit batch). Only
+    the HDMR backend takes ``slice_chunk_size``: the PCE fit solves every
+    output slice in one shared least-squares system, so it has no slice
+    axis to chunk.
+
+    Args:
+        backend: ``"pce"`` or ``"hdmr"``.
+        batch_size: Rows per fit batch, or ``None``.
+        slice_chunk_size: Output slices per fit chunk, or ``None``.
+        backend_kwargs: The other fit arguments the caller passed.
+        method: Public entry point, for the error message.
+
+    Returns:
+        ``backend_kwargs`` plus every chunking keyword that was set.
+
+    Raises:
+        ValueError: If either keyword is not ``None`` or an integer of at
+            least 1, or if ``slice_chunk_size`` is set with the PCE backend.
+    """
+    check_scalars(
+        (
+            positive_int("batch_size", batch_size),
+            positive_int("slice_chunk_size", slice_chunk_size),
+            require(
+                not (backend == "pce" and slice_chunk_size is not None),
+                "slice_chunk_size applies to backend='hdmr' only. The PCE backend "
+                "fits every output slice in one shared solve, so it has no slice "
+                "chunks. Use batch_size to bound the PCE fit's memory.",
+            ),
+        ),
+        method=method,
+    )
+    chunks = {"batch_size": batch_size, "slice_chunk_size": slice_chunk_size}
+    return {**backend_kwargs, **{k: v for k, v in chunks.items() if v is not None}}
+
+
 def _indices_3d(
     problem: "Problem",
     X: Array,
@@ -249,6 +297,8 @@ def indices(
     *,
     backend: Literal["pce", "hdmr"] = "pce",
     include_correlative: bool = False,
+    batch_size: int | None = None,
+    slice_chunk_size: int | None = None,
     **backend_kwargs: Any,
 ) -> ShapleyIndices:
     """Compute Shapley effects as plain arrays, with no diagnostics.
@@ -289,10 +339,11 @@ def indices(
         backend: Surrogate providing the variance decomposition, ``"pce"``
             (default) or ``"hdmr"``.
         include_correlative: HDMR-only flag, as in :func:`analyze`.
+        batch_size: As in :func:`analyze`.
+        slice_chunk_size: As in :func:`analyze`. HDMR backend only.
         **backend_kwargs: Fit arguments passed to the chosen backend's core:
-            ``order``/``ridge``/``fit_ratio``/``batch_size`` for PCE,
-            ``order``/``max_iter``/``n_intervals``/``ridge``/
-            ``slice_chunk_size``/``batch_size`` for HDMR.
+            ``order``/``ridge``/``fit_ratio`` for PCE,
+            ``order``/``max_iter``/``n_intervals``/``ridge`` for HDMR.
 
     Returns:
         A :class:`ShapleyIndices` ``(Sh, S1, ST)``, at the shapes ``analyze``
@@ -304,7 +355,9 @@ def indices(
             parameter (either backend), ``problem.correlation`` declares a
             dependence structure with the PCE backend, or ``problem`` has a
             lognormal or Weibull parameter with the HDMR backend — exactly
-            the refusals :func:`analyze` makes.
+            the refusals :func:`analyze` makes. Also if ``batch_size`` or
+            ``slice_chunk_size`` is not an integer of at least 1, or
+            ``slice_chunk_size`` is set with the PCE backend.
     """
     from jaxgsa.shapley import _SPEC
 
@@ -320,6 +373,9 @@ def indices(
             ),
         ),
         method="jaxgsa.shapley.indices",
+    )
+    backend_kwargs = _chunk_kwargs(
+        backend, batch_size, slice_chunk_size, backend_kwargs, "jaxgsa.shapley.indices"
     )
     if backend == "pce":
         _raise_correlated_pce_backend(problem, "jaxgsa.shapley.indices")
@@ -377,6 +433,14 @@ def _bootstrap_indices(
     surrogate fits, an order of magnitude above a row resample of an
     estimator that only re-reduces per-row numbers.
 
+    The PCE backend runs every replicate in one jitted ``lax.map``
+    (:func:`~jaxgsa._core.bootstrap.bootstrap_draws`). The HDMR backend
+    makes the choice :func:`jaxgsa.hdmr.analyze` makes
+    (:func:`jaxgsa.hdmr._analyze._jit_replicates`): a small single-batch fit
+    runs jitted, and a larger or streamed fit runs as a host loop of eager
+    fits (:func:`~jaxgsa._core.bootstrap.bootstrap_draws_host`), so the peak
+    stays at the point fit's peak. The row draws are the same either way.
+
     Args:
         problem: Parameter names and distributions.
         X: Input samples with invalid rows already removed, shape ``(N, D)``.
@@ -391,7 +455,27 @@ def _bootstrap_indices(
         One stacked draw array per index field, each with a leading axis of
         length ``n_bootstrap`` followed by the canonical ``(T, K, D)`` shape.
     """
-    draws = bootstrap_draws(
+    run = bootstrap_draws
+    if backend == "hdmr":
+        from jaxgsa.hdmr._analyze import _jit_replicates
+
+        N, D = X.shape
+        L = math.prod(Y_3d.shape[1:])
+        itemsize = jnp.dtype(jnp.result_type(X.dtype, Y_3d.dtype, float)).itemsize
+        # The defaults are _hdmr_core's, which is what the replicate fits.
+        jit_ok = _jit_replicates(
+            N,
+            D,
+            L,
+            order=backend_kwargs.get("order", 2),
+            n_intervals=backend_kwargs.get("n_intervals", 2),
+            itemsize=itemsize,
+            batch_size=backend_kwargs.get("batch_size"),
+            slice_chunk_size=backend_kwargs.get("slice_chunk_size"),
+        )
+        if not jit_ok:
+            run = bootstrap_draws_host
+    draws = run(
         key,
         n_bootstrap,
         _shapley_replicate,
@@ -417,6 +501,8 @@ def analyze(
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | int | None = None,
+    batch_size: int | None = None,
+    slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
@@ -477,6 +563,16 @@ def analyze(
         key: A ``jax.random`` key for the bootstrap resampling. Required when
             ``n_bootstrap > 0``. Pass ``jax.random.key(0)`` if you have an
             integer seed.
+        batch_size: Rows of ``X`` per fit batch, passed to the backend
+            (:func:`jaxgsa.pce.analyze` or :func:`jaxgsa.hdmr.analyze`). It
+            bounds the fit's peak memory and never changes an index.
+            ``None`` (default) lets the backend derive it from the memory
+            budget. An explicit value must be an integer of at least 1.
+        slice_chunk_size: Output slices per fit chunk, passed to
+            :func:`jaxgsa.hdmr.analyze`. HDMR backend only: the PCE backend
+            fits every output slice in one shared solve, so setting it with
+            ``backend="pce"`` raises ``ValueError``. ``None`` (default) lets
+            the backend derive it from the memory budget.
         verbose: If ``True`` (default), print a short summary to stdout: the
             problem and the data, the wall-clock timing, and the top
             parameters by ``Sh``. Pass ``False`` for a silent run. The
@@ -486,7 +582,8 @@ def analyze(
             ``result.ci``. Off by default: the draws are large.
         **backend_kwargs: Passed through unchanged to the selected backend's
             ``analyze`` (e.g. ``order``/``ridge``/``fit_ratio`` for PCE,
-            ``order``/``n_intervals``/``ridge`` for HDMR). Python requires
+            ``order``/``n_intervals``/``ridge`` for HDMR). The two chunking
+            keywords are named parameters above instead. Python requires
             ``**kwargs`` to come last in a signature, which is why
             ``keep_replicates`` is not the final parameter here as it is on
             every other method.
@@ -504,8 +601,10 @@ def analyze(
             smooth surrogate over the inputs, which is undefined for
             unordered level codes), ``problem`` has a lognormal or Weibull
             parameter with the HDMR backend (the open tail biases the HDMR
-            fit; the PCE backend accepts them), or the underlying
-            ``analyze`` rejects its inputs.
+            fit; the PCE backend accepts them), ``batch_size`` or
+            ``slice_chunk_size`` is not an integer of at least 1,
+            ``slice_chunk_size`` is set with the PCE backend, or the
+            underlying ``analyze`` rejects its inputs.
         TypeError: If ``backend_kwargs`` contains a keyword the selected
             backend's ``analyze`` does not accept.
 
@@ -552,10 +651,12 @@ def analyze(
     check_scalars(
         (
             *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
-            positive_int("slice_chunk_size", backend_kwargs.get("slice_chunk_size")),
-            positive_int("batch_size", backend_kwargs.get("batch_size")),
+            one_of("backend", backend, ("pce", "hdmr")),
         ),
         method="jaxgsa.shapley.analyze",
+    )
+    backend_kwargs = _chunk_kwargs(
+        backend, batch_size, slice_chunk_size, backend_kwargs, "jaxgsa.shapley.analyze"
     )
     # The backend prints no summary of its own: one shapley call prints one
     # block. A caller-supplied verbose inside backend_kwargs is stripped, not
@@ -642,12 +743,88 @@ def analyze(
             K=K,
             invalid=result.invalid,
             timings=[("backend fit + Shapley (includes compile on the first call)", elapsed)],
-            notes=[f"backend: {backend}", f"order: {result.order}"],
+            notes=[
+                f"backend: {backend}",
+                f"order: {result.order}",
+                *_chunk_notes(
+                    backend,
+                    problem,
+                    X,
+                    Y,
+                    n_runs=n_runs,
+                    n_slices=T * K,
+                    order=result.order,
+                    backend_kwargs=backend_kwargs,
+                    batch_size=batch_size,
+                    slice_chunk_size=slice_chunk_size,
+                ),
+            ],
             index_name="Sh",
             values=result.Sh,
             conf=result.Sh_conf,
         )
     return result
+
+
+def _chunk_notes(
+    backend: str,
+    problem: "Problem",
+    X: Array,
+    Y: Array,
+    *,
+    n_runs: int,
+    n_slices: int,
+    order: int | None,
+    backend_kwargs: dict[str, Any],
+    batch_size: int | None,
+    slice_chunk_size: int | None,
+) -> list[str]:
+    """The verbose lines for the chunking keywords the backend ran with.
+
+    Each backend reports the widths its fit resolves, through the resolver
+    the fit itself runs.
+
+    Args:
+        backend: ``"pce"`` or ``"hdmr"``.
+        problem: The problem the backend fitted.
+        X: The caller's inputs.
+        Y: The caller's outputs.
+        n_runs: Rows the fit used, after any drop.
+        n_slices: Flattened output slices ``T*K``.
+        order: The fitted order the result reports.
+        backend_kwargs: The keywords forwarded to the backend.
+        batch_size: The caller's rows per batch, or ``None``.
+        slice_chunk_size: The caller's slices per chunk, or ``None``.
+
+    Returns:
+        One line per keyword the backend reads.
+    """
+
+    def origin(value: int | None) -> str:
+        return "user-set" if value is not None else "resolved from the memory budget"
+
+    dtype = jnp.result_type(jnp.asarray(X).dtype, jnp.asarray(Y).dtype, jnp.float32)
+    if backend != "hdmr":
+        from jaxgsa.pce._analyze import _batch_note
+
+        fitted = order if order is not None else int(backend_kwargs.get("order", 3))
+        return [_batch_note(problem, n_runs, n_slices, dtype, fitted, batch_size)]
+    from jaxgsa.hdmr._analyze import _resolved_widths
+
+    b, cs = _resolved_widths(
+        problem,
+        n_runs,
+        n_slices,
+        dtype,
+        order=order if order is not None else int(backend_kwargs.get("order", 2)),
+        n_intervals=int(backend_kwargs.get("n_intervals", 2)),
+        batch_size=batch_size,
+        slice_chunk_size=slice_chunk_size,
+    )
+    return [
+        f"batch_size: {b} ({origin(batch_size)})",
+        f"slice_chunk_size: {cs} ({origin(slice_chunk_size)})",
+    ]
 
 
 def _with_intervals(

@@ -49,15 +49,15 @@ jaxgsa.sobol.analyze
   timing:
     estimators (includes compile on the first call): 0.9928 s
     slice_chunk_size: 1 (resolved from the memory budget)
-    bootstrap slice_chunk_size: 1 (resolved from the memory budget)
+    bootstrap resamples per call: 500 (resolved from the memory budget)
     estimator: saltelli-jansen
   results: top 3 of 3 parameters by ST
-    1. x1  ST=0.5551  [0.4804, 0.6329]
-    2. x2  ST=0.4398  [0.4049, 0.4844]
-    3. x3  ST=0.2411  [0.2156, 0.2707]
-x1  S1= 0.3270  95% CI [ 0.2603,  0.3877]
-x2  S1= 0.4432  95% CI [ 0.3939,  0.4989]
-x3  S1= 0.0113  95% CI [-0.0422,  0.0661]
+    1. x1  ST=0.5551  [0.4763, 0.6418]
+    2. x2  ST=0.4398  [0.4038, 0.4824]
+    3. x3  ST=0.2411  [0.2141, 0.2686]
+x1  S1= 0.3270  95% CI [ 0.2689,  0.3959]
+x2  S1= 0.4432  95% CI [ 0.3883,  0.4939]
+x3  S1= 0.0113  95% CI [-0.0420,  0.0712]
 ```
 
 ```
@@ -68,7 +68,7 @@ With `n_bootstrap > 0` the verbose table gains bracketed bounds next to each
 `ST`, so you can read the ranking and its uncertainty without writing any
 printing code.
 
-Look at `x3`. Its `S1` is 0.0113 and the interval runs from -0.0422 to 0.0661,
+Look at `x3`. Its `S1` is 0.0113 and the interval runs from -0.0420 to 0.0712,
 straight through zero. The Ishigami function's analytic first-order index for
 `x3` is exactly 0: it enters the output only through its interaction with `x1`.
 The interval is telling you the truth, and the point estimate on its own would
@@ -76,9 +76,10 @@ have you reporting a small positive main effect that does not exist. A negative
 lower bound is normal here, because the first-order estimator is a difference
 of means and is not constrained to be non-negative.
 
-`x1` and `x2` do not overlap, so ranking them is supported. If two intervals
-did overlap, the run does not support ranking those two inputs no matter how
-far apart the point estimates sit.
+The `S1` intervals of `x1` and `x2` overlap a little: the `x1` interval ends at
+0.3959 and the `x2` interval starts at 0.3883. So this run does not support
+ranking those two inputs by `S1`, even though the point estimates sit 0.12
+apart.
 
 `result.ci` records how the interval was made. Store it with the numbers. A
 `*_conf` array on its own is an interval of unknown level and unknown method.
@@ -128,14 +129,14 @@ print(f"60 fresh designs:        mean={draws.mean():.4f}  sd={draws.std(ddof=1):
 ```
 
 ```
-bootstrap on one design: S1(x1)=0.2932  95% CI [0.1879, 0.4053]  width=0.2174
+bootstrap on one design: S1(x1)=0.2932  95% CI [0.1841, 0.3996]  width=0.2155
 60 fresh designs:        mean=0.3151  sd=0.0434  2*1.96*sd=0.1700
 ```
 
 The analytic value is 0.3139, and the mean over 60 independent designs is
 0.3151, so the estimator is essentially unbiased at this size. But the real
-95% spread of the estimator is 0.170 wide and the bootstrap claimed 0.217. The
-interval is about 28% too wide. That is the safe direction to be wrong in, and
+95% spread of the estimator is 0.170 wide and the bootstrap claimed 0.216. The
+interval is about 27% too wide. That is the safe direction to be wrong in, and
 it is worth knowing before you conclude that your study needs four times the
 budget.
 
@@ -161,14 +162,14 @@ for n in (512, 8192, 65536):
 ```
 
 ```
-n_runs=   512  ST(x1)=0.5804  CI [0.2561, 0.9346]  width=0.6786
-n_runs=  8192  ST(x1)=0.5551  CI [0.4804, 0.6329]  width=0.1525
-n_runs= 65536  ST(x1)=0.5560  CI [0.5222, 0.5859]  width=0.0636
+n_runs=   512  ST(x1)=0.5804  CI [0.2822, 0.9437]  width=0.6615
+n_runs=  8192  ST(x1)=0.5551  CI [0.4763, 0.6418]  width=0.1654
+n_runs= 65536  ST(x1)=0.5560  CI [0.5255, 0.5867]  width=0.0613
 ```
 
-512 runs is useless: the interval spans 0.26 to 0.93 and does not even
-establish that `x1` explains more than a quarter of the variance. Sixteen times
-the budget cuts the width by 4.4x, and another eightfold cut it by 2.4x. So
+512 runs is useless: the interval spans 0.28 to 0.94 and does not even
+establish that `x1` explains more than 30% of the variance. Sixteen times
+the budget cuts the width by 4.0x, and another eightfold cut it by 2.7x. So
 halving an interval costs roughly four times the model runs. Decide up front
 how tight the answer has to be, because you cannot buy the last factor of two
 cheaply.
@@ -200,24 +201,24 @@ for nb in (0, 100, 500, 2000, 10000):
 ```
 
 ```
-n_bootstrap=     0      1.4 ms  no interval
-n_bootstrap=   100      9.9 ms  S1(x1) CI [0.2551, 0.3806]  width=0.1255
-n_bootstrap=   500     36.8 ms  S1(x1) CI [0.2603, 0.3877]  width=0.1274
-n_bootstrap=  2000    141.5 ms  S1(x1) CI [0.2642, 0.3909]  width=0.1267
-n_bootstrap= 10000    784.9 ms  S1(x1) CI [0.2654, 0.3914]  width=0.1260
+n_bootstrap=     0      1.3 ms  no interval
+n_bootstrap=   100      4.4 ms  S1(x1) CI [0.2802, 0.3898]  width=0.1095
+n_bootstrap=   500      6.6 ms  S1(x1) CI [0.2689, 0.3959]  width=0.1270
+n_bootstrap=  2000     15.8 ms  S1(x1) CI [0.2648, 0.3934]  width=0.1285
+n_bootstrap= 10000     89.1 ms  S1(x1) CI [0.2654, 0.3929]  width=0.1275
 ```
 
 Timings are from one laptop CPU and exclude the JIT compile, which the warm-up
 call absorbs. The pattern is what matters, not the milliseconds.
 
 From 500 upward the endpoints move in the third decimal. 100 is enough to rank
-parameters, 500 is enough to report two decimals, and 10000 buys nothing but a
-second of compute. Use 500 unless you are plotting the bootstrap distribution
+parameters, 500 is enough to report two decimals, and 10000 buys nothing but extra
+compute. Use 500 unless you are plotting the bootstrap distribution
 itself.
 
 Two costs do scale, though. The resample loop runs the estimator
 `n_bootstrap` times over the full output array, so a `(N, T=100, K=5)` output
-multiplies that second by 500. And `keep_replicates=True` stores every draw.
+multiplies that cost by 500. And `keep_replicates=True` stores every draw.
 
 ## Keeping the draws
 
@@ -253,8 +254,8 @@ S1 draws shape: (500, 3)
 S2 draws shape: (500, 3, 3)
 S2 draws symmetric: True
 S2 draws diagonal: [nan]
-S1 68% CI: [[0.2908, 0.4158, -0.0166], [0.3577, 0.4692, 0.0422]]
-S1 95% CI: [[0.2603, 0.3939, -0.0422], [0.3877, 0.4989, 0.0661]]
+S1 68% CI: [[0.2959, 0.4165, -0.0127], [0.361, 0.4727, 0.0431]]
+S1 95% CI: [[0.2689, 0.3883, -0.042], [0.3959, 0.4939, 0.0712]]
 ```
 
 The leading axis is the resample. Everything after it is the shape of that

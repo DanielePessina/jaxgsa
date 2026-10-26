@@ -400,3 +400,160 @@ def test_stats_step_blocked_matches_whole():
     rtol = 1e-9 if dt == jnp.float64 else 1e-3
     for a, c in zip(whole, blocked, strict=True):
         np.testing.assert_allclose(np.asarray(c), np.asarray(a), rtol=rtol, atol=rtol * 10)
+
+
+def test_stats_path_choice_keeps_indices(monkeypatch, hdmr_ishigami_xy):
+    """Forcing the whole-F or the blocked stats path leaves every index put.
+
+    The choice reads an absolute byte cap, not the memory budget, so a
+    larger budget cannot pick the slower whole-F path either.
+    """
+    X, Y = hdmr_ishigami_xy
+    fields = ("S1", "ST", "Sa", "Sb", "S")
+    runs = []
+    for cap in (0, 2**62):
+        monkeypatch.setattr(_fit, "_STATS_WHOLE_MAX_BYTES", cap)
+        res = analyze_hdmr(PROBLEM, X, Y, order=2, verbose=False)
+        runs.append({f: np.asarray(getattr(res, f)) for f in fields})
+    rtol = 1e-9 if runs[0]["S1"].dtype == np.float64 else 1e-4
+    for f in fields:
+        np.testing.assert_allclose(runs[1][f], runs[0][f], rtol=rtol, atol=rtol)
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap under a small budget
+# ---------------------------------------------------------------------------
+
+
+def _bootstrap_data(n: int = 400, seed: int = 0):
+    rng = np.random.default_rng(seed)
+    X = jnp.asarray(rng.uniform(-np.pi, np.pi, size=(n, 3)))
+    return X, jaxgsa.benchmarks.ishigami.evaluate(X)
+
+
+def test_jit_replicates_only_for_small_one_batch_fits():
+    """A streamed or large fit bootstraps in a host loop, a small one in one jit."""
+    from jaxgsa.hdmr._analyze import _jit_replicates
+
+    def jit_ok(L: int = 1, batch_size: int | None = None, chunk: int | None = None) -> bool:
+        return _jit_replicates(
+            800,
+            3,
+            L,
+            order=2,
+            n_intervals=2,
+            itemsize=4,
+            batch_size=batch_size,
+            slice_chunk_size=chunk,
+        )
+
+    assert jit_ok()
+    assert not jit_ok(batch_size=100)
+    assert not jit_ok(L=4, chunk=2)
+    jaxgsa.config.set_memory_budget(32, unit="kb")
+    assert not jit_ok()
+
+
+def test_streamed_bootstrap_draws_match_the_jitted_loop():
+    """The host loop makes the jitted loop's draws, to float noise.
+
+    Both loops split the key the same way and draw the same rows, so every
+    replicate refits the same resample. Only the order of the reductions can
+    differ.
+    """
+    from jaxgsa._core.bootstrap import bootstrap_draws, bootstrap_draws_host
+    from jaxgsa.hdmr._analyze import _hdmr_replicate
+
+    X, Y = _bootstrap_data()
+    static = (
+        ("problem", PROBLEM),
+        ("order", 2),
+        ("max_iter", 50),
+        ("n_intervals", 2),
+        ("ridge", 1e-6),
+        ("slice_chunk_size", None),
+        ("batch_size", 100),
+    )
+    key = jax.random.key(3)
+    host = bootstrap_draws_host(key, 3, _hdmr_replicate, (X, Y), static=static)
+    mapped = bootstrap_draws(key, 3, _hdmr_replicate, (X, Y), static=static)
+    for name in ("Sa", "Sb", "S", "ST"):
+        assert host[name].shape == mapped[name].shape
+        np.testing.assert_allclose(
+            np.asarray(host[name]), np.asarray(mapped[name]), rtol=RTOL, atol=PAIR_ATOL
+        )
+
+    result = analyze_hdmr(
+        PROBLEM,
+        X,
+        Y,
+        order=2,
+        max_iter=50,
+        batch_size=100,
+        n_bootstrap=3,
+        key=key,
+        keep_replicates=True,
+        verbose=False,
+    )
+    assert isinstance(result, jaxgsa.hdmr.HDMRResult)
+    assert result.ci is not None and result.ci.replicates is not None
+    np.testing.assert_allclose(
+        np.asarray(result.ci.replicates["ST"]).reshape(3, -1),
+        np.asarray(host["ST"]).reshape(3, -1),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+_PEAK_SCRIPT = """
+import resource, warnings
+import jax, numpy as np
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
+
+warnings.simplefilter("ignore")
+compiles = []
+jax.monitoring.register_event_duration_secs_listener(
+    lambda e, d, **_: compiles.append(e)
+    if e == "/jax/core/compile/backend_compile_duration" else None
+)
+jaxgsa.config.set_memory_budget(32, unit="kb")
+rng = np.random.default_rng(0)
+X = rng.uniform(-np.pi, np.pi, size=(800, 3))
+Y = np.asarray(evaluate(X))
+kw = dict(order=2, verbose=False)
+jaxgsa.hdmr.analyze(PROBLEM, X, Y, **kw)
+point_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+n0 = len(compiles)
+r = jaxgsa.hdmr.analyze(PROBLEM, X, Y, n_bootstrap=3, key=0, **kw)
+jax.block_until_ready(r.ST_conf)
+boot_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+n1 = len(compiles)
+jaxgsa.hdmr.analyze(PROBLEM, X, Y, n_bootstrap=3, key=0, **kw)
+print(point_mb, boot_mb, n1 - n0, len(compiles) - n1)
+"""
+
+
+def test_streamed_bootstrap_peak_stays_at_the_point_fit():
+    """At a 32 KiB budget the bootstrap adds almost nothing to the point fit's peak.
+
+    The fit streams in many row batches here. Run as one jitted ``lax.map``,
+    its Python row loops unrolled, and the program alone took 1.3 GB of RSS
+    and 12 s to compile against 0.46 GB for the point fit (measured,
+    float64, 2026-10-25). The host loop reuses the point fit's compiled
+    steps, so the peak stays put and only small programs (the row draw, the
+    gathers, the interval) compile. The peak is read in a fresh process,
+    because ``ru_maxrss`` never falls and other tests have raised it here.
+    """
+    import subprocess
+    import sys
+
+    out = subprocess.run(
+        [sys.executable, "-c", _PEAK_SCRIPT], capture_output=True, text=True, check=True
+    ).stdout.split()
+    point, boot, n_compiles, n_repeat = (int(v) for v in out[-4:])
+    # ru_maxrss is in bytes on macOS and in KiB on Linux.
+    scale = 1 if sys.platform == "darwin" else 1024
+    assert (boot - point) * scale < 250 * 2**20
+    assert n_compiles <= 40
+    assert n_repeat == 0

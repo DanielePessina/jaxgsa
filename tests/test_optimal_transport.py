@@ -111,7 +111,7 @@ class TestOTBasic:
 
         The default chunk width comes from the active memory budget and the
         working set in bytes, so a budget of 1 MiB has to cut the output
-        into narrower chunks than the default 512 MiB does. The budget
+        into narrower chunks than the default budget does. The budget
         changes how the work is cut up, never what it computes. The
         tolerance is there because a narrower vmap lets XLA reassociate the
         float32 reductions, the same reason the chunk-size test beside this
@@ -119,11 +119,12 @@ class TestOTBasic:
         """
         X, _, Y3 = ishigami_xy_series
         r_default = analyze(ishigami.PROBLEM, X, Y3)
+        saved_budget = jaxgsa.config.get_memory_budget(unit="b")
         jaxgsa.config.set_memory_budget(1, unit="mib")
         try:
             r_small = analyze(ishigami.PROBLEM, X, Y3)
         finally:
-            jaxgsa.config.set_memory_budget(512, unit="mib")
+            jaxgsa.config.set_memory_budget(saved_budget, unit="b")
         np.testing.assert_allclose(np.asarray(r_default.ot), np.asarray(r_small.ot), atol=1e-7)
 
     def test_n_classes_changes_result(self, ishigami_xy_4k):

@@ -83,18 +83,18 @@ jaxgsa.pce.analyze
     fit + estimator (includes compile on the first call): 1.297 s
     order: 8
     fit: single-pass
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 2000 (resolved from the memory budget)
   results: top 3 of 3 parameters by ST
     1. x1  ST=0.5571
     2. x2  ST=0.4429
     3. x3  ST=0.2432
-S1: [3.1396696e-01 4.4286722e-01 1.3369385e-06]
-ST: [0.55712277 0.44291088 0.24315709]
-S2: [[          nan 8.7613635e-06 2.4312074e-01]
- [8.7613635e-06           nan 8.7073577e-06]
- [2.4312074e-01 8.7073577e-06           nan]]
+S1: [3.1396699e-01 4.4286692e-01 1.3369730e-06]
+ST: [0.55712306 0.44291052 0.24315737]
+S2: [[          nan 8.7608669e-06 2.4312104e-01]
+ [8.7608669e-06           nan 8.7072131e-06]
+ [2.4312104e-01 8.7072131e-06           nan]]
 order: 8
-CV RMSE: 0.073799685
+CV RMSE: 0.07379973
 std(Y): 3.7769964
 ```
 
@@ -135,6 +135,12 @@ print("CV RMSE:", low.cv_rmse)
 ```
 
 ```text
+JaxgsaWarning: jaxgsa.pce: explained_variance is 0.48 on at least one output
+slice, below 0.5, so the surrogate leaves more than half of the output variance
+unexplained. Every index is computed from the fit, so they describe the
+surrogate rather than your model. Raise order until cv_rmse stops falling, or
+use jaxgsa.hdmr for a response with kinks a polynomial cannot follow.
+
 jaxgsa.pce.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
@@ -145,28 +151,28 @@ jaxgsa.pce.analyze
     fit + estimator (includes compile on the first call): 1.434 s
     order: 3
     fit: single-pass
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 2000 (resolved from the memory budget)
   results: top 3 of 3 parameters by ST
     1. x1  ST=0.9375
     2. x3  ST=0.3023
     3. x2  ST=0.06529
-S1: [0.63639057 0.05677766 0.0026459 ]
-ST: [0.9375337  0.06528562 0.3023086 ]
+S1: [0.6363907  0.05677774 0.00264589]
+ST: [0.9375336  0.06528573 0.3023083 ]
 CV RMSE: 2.7552462
 ```
 
-Nothing here errors. Nothing warns. The indices are finite, ordered, and
-wrong.
+Nothing here errors. One warning says the fit explains less than half of the
+variance. The indices are finite, ordered, and wrong.
 
 x2's true S1 is 0.4424 and the degree-3 fit reports 0.0568, low by a factor of
 eight. The ranking inverts. x2 falls from second to last and x3 climbs past
 it. Present this table to a modelling team and they will stop measuring x2.
-The only signal that anything is amiss is `cv_rmse = 2.755` against a
+Apart from that warning, the only signal is `cv_rmse = 2.755` against a
 `std(Y)` of 3.777, which is 73% of the output spread. A degree-3 polynomial
 cannot bend the way $\sin^2(x_2)$ bends over $[-\pi, \pi]$, so it fits x2's
 contribution as noise and hands the leftover variance to whoever will take it.
 
-This is the failure mode of every surrogate method, and it is quiet. Check
+This is the failure mode of every surrogate method, and it is easy to miss. Check
 `cv_rmse` first, then read the indices. If it is high, raise `order` and refit
 until it stops falling.
 
@@ -195,7 +201,7 @@ leave-one-out error, so they differ only in float32 summation order.
 Leave it at `None` and the memory budget decides. jaxgsa estimates the
 resident cost of the design matrix, the QR factorization and the LOO
 residuals; under the budget it runs a single pass, over it streams over
-auto-sized blocks. The budget defaults to about 512 MiB and moves with
+auto-sized blocks. The budget defaults to about 2 GiB and moves with
 `jaxgsa.config.set_memory_budget`.
 
 An explicit value always wins over the budget. `batch_size=250` on the N=2000
@@ -243,7 +249,7 @@ print("cv_rmse:", result.cv_rmse)
 coefficients: (165,)
 multi_index: (165, 3)
 order: 8
-cv_rmse: 0.073799685
+cv_rmse: 0.07379973
 ```
 
 165 is the term count for degree 8 in 3 inputs. Each term has one coefficient
@@ -277,7 +283,7 @@ print("Max error:", jnp.max(jnp.abs(Y_pred - Y_true)))
 
 ```text
 Y_pred shape: (100,)
-Max error: 0.1725297
+Max error: 0.17251158
 ```
 
 100 predictions for 100 new rows. The 0.17 is a worst case over those rows,
@@ -314,7 +320,7 @@ Data variables:
 Attributes:
     order:     8
     streamed:  0
-0.31396696
+0.313967
 ```
 
 S1 and ST carry one `param` dimension. S2 is a matrix, so it needs `param_i`
@@ -337,8 +343,8 @@ budget.
 Correlated inputs raise `ValueError`. PCE's orthogonality argument assumes
 independent marginals, so a declared `problem.correlation` breaks the step
 from coefficients to partial variances. The error message says so and names
-the alternatives: [RS-HDMR](/examples/hdmr), [VKOGA](/examples/vkoga) and
-[Kucherenko](/examples/kucherenko). This refusal is deliberate. Silently wrong
+the alternatives: [RS-HDMR](/guide/methods/hdmr), [VKOGA](/guide/methods/vkoga) and
+[Kucherenko](/guide/methods/kucherenko). This refusal is deliberate. Silently wrong
 indices are worse than no indices.
 
 Everything the polynomial cannot represent is missing from the indices, and
@@ -348,10 +354,10 @@ its absence is reported through `cv_rmse` alone.
 
 - [Basic Example](/examples/basic) for the Sobol workflow when you can afford
   a structured Saltelli design.
-- [RS-HDMR](/examples/hdmr) for the other given-data surrogate, which uses
+- [RS-HDMR](/guide/methods/hdmr) for the other given-data surrogate, which uses
   B-splines and handles correlated inputs.
-- [Shapley Effects](/examples/shapley) for a fair allocation read off this
+- [Shapley Effects](/guide/methods/shapley) for a fair allocation read off this
   same fit.
-- [DGSM](/examples/dgsm) for derivative-based sensitivity bounds.
+- [DGSM](/guide/methods/dgsm) for derivative-based sensitivity bounds.
 - [Methods](/guide/methods) for the theory behind PCE.
 - [API Reference](/api/#given-data-methods) for full parameter documentation.

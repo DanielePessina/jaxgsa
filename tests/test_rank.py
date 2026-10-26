@@ -400,6 +400,26 @@ class TestPureCore:
         assert grad.shape == Y.shape
         assert bool(jnp.all(jnp.isfinite(grad)))
 
+    def test_gradient_memory_does_not_keep_one_copy_per_parameter(self):
+        """Reverse mode saves ``rows`` per parameter, not gathered copies of Y.
+
+        Without the checkpoint, the parameter map saved the gathered and
+        rolled ``(N, T, K)`` output of every parameter: about 20x Y of temp
+        at D = 8. Measured at about 4x Y with it.
+        """
+        n, d, cols = 2048, 8, 100
+        problem = Problem.from_dict({f"x{i}": (0.0, 1.0) for i in range(d)})
+        X = jnp.asarray(np.random.default_rng(0).random((n, d)), jnp.float32)
+        y = jax.ShapeDtypeStruct((n, cols), jnp.float32)
+
+        def total(y_):
+            return rank.indices(problem, X, y_).S1.sum()
+
+        stats = jax.jit(jax.grad(total)).lower(y).compile().memory_analysis()
+        assert stats is not None
+        temp = stats.temp_size_in_bytes
+        assert temp < 8 * n * cols * 4, temp / (n * cols * 4)
+
 
 @pytest.mark.slow
 class TestROracle:

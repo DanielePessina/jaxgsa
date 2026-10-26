@@ -112,7 +112,7 @@ jaxgsa.dgsm.analyze
   timing:
     model sweep + estimator (includes compile on the first call): 0.4897 s
     gradients: reverse-mode autodiff (T*K=1, D=4)
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 20000 (resolved from the memory budget)
   results: top 4 of 4 parameters by nu
     1. porosity   nu=3.036e+04
     2. roughness  nu=1.224e+04
@@ -243,8 +243,8 @@ print("upper_conf :\n", r.upper_bound_conf)
 ```
 upper      : [5.1130295e-01 1.6365178e+00 6.2900642e-03 2.2747044e-07]
 upper_conf :
- [[4.8108885e-01 1.5754701e+00 5.8326428e-03 2.1166989e-07]
- [5.4571772e-01 1.7020985e+00 6.8604066e-03 2.4694691e-07]]
+ [[4.8051926e-01 1.5706676e+00 5.8615389e-03 2.1187255e-07]
+ [5.5060714e-01 1.6994357e+00 6.7995354e-03 2.4531076e-07]]
 ```
 
 The resampling unit is one sample row, which is the right unit here: `nu` and
@@ -299,7 +299,7 @@ The script also warns that every upper bound exceeds 1, the smallest being
 value of the run is the containment check and the $\nu$ ranking
 (x2 > x3 > x1).
 
-![DGSM lower and upper bounds bracketing the analytical total-order indices on Ishigami](./figures/dgsm_benchmark_ishigami-dgsm-bounds-vs-analytical-s-t.png)
+![DGSM lower and upper bounds bracketing the analytical total-order indices on Ishigami](../../examples/figures/dgsm_benchmark_ishigami-dgsm-bounds-vs-analytical-s-t.png)
 
 **Linear model.** The same pattern, with coefficients $(1, 2, 3)$:
 
@@ -331,7 +331,7 @@ collapse of both bounds onto $S_T$ happens on Gaussian marginals, where the
 Poincare constant is $\operatorname{Var}(x_i)$ rather than
 $(b-a)^2/\pi^2$.
 
-![DGSM bounds collapsing onto the exact total-order indices for the additive linear model](./figures/dgsm_benchmark_linear-model-dgsm-bounds-collapse-to-exact-s-t.png)
+![DGSM bounds collapsing onto the exact total-order indices for the additive linear model](../../examples/figures/dgsm_benchmark_linear-model-dgsm-bounds-collapse-to-exact-s-t.png)
 
 ## Forward mode or reverse mode, chosen by shape
 
@@ -389,7 +389,7 @@ jaxgsa.dgsm.analyze
   timing:
     model sweep + estimator (includes compile on the first call): 0.6843 s
     gradients: forward-mode autodiff (T*K=40, D=3)
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 4000 (resolved from the memory budget)
   results: top 3 of 3 parameters by nu, mean over 40 output slices
     1. frequency  nu=82.16
     2. damping    nu=2.081
@@ -451,7 +451,7 @@ jaxgsa.dgsm.analyze
   timing:
     estimator (includes compile on the first call): 0.203 s
     gradients: user-supplied dfdx
-    batch_size: auto (resolved from the memory budget)
+    batch_size: not used (pre-computed dfdx, no bootstrap)
   results: top 4 of 4 parameters by nu
     1. porosity   nu=3.198e+04
     2. roughness  nu=1.229e+04
@@ -560,9 +560,9 @@ On the pre-computed path, `dfdx` mirrors `Y` with one extra trailing `(D,)`:
 
 - [Basic example](/examples/basic) for the Sobol workflow when you need the
   exact variance shares the bounds only bracket.
-- [Morris](/examples/morris) for the same screening idea with finite differences
+- [Morris](/guide/methods/morris) for the same screening idea with finite differences
   instead of derivatives, for models JAX cannot differentiate.
-- [eFAST](/examples/efast) for frequency-based variance decomposition.
-- [PCE](/examples/pce) for analytical Sobol indices from expansion coefficients.
+- [eFAST](/guide/methods/efast) for frequency-based variance decomposition.
+- [PCE](/guide/methods/pce) for analytical Sobol indices from expansion coefficients.
 - [Methods](/guide/methods) for the theory and the method comparison.
 - [API reference](/api/#given-data-methods) for every parameter.

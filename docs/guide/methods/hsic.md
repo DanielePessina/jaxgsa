@@ -83,11 +83,11 @@ jaxgsa.hsic.analyze
     1. x1  T=0.8192
     2. x3  T=0.1662
     3. x2  T=0.05517
-R2:  [0.17024249 0.01001166 0.02882576]
-T:   [0.8192214  0.05516746 0.16617651]
+R2:  [0.17024454 0.01001067 0.02882455]
+T:   [0.8192088  0.05517024 0.16619332]
 p_values: [0.00497512 0.00497512 0.00497512]
-hsic_raw: [0.01507914 0.00089377 0.0025357 ]
-sum of R2: 0.20907990634441376
+hsic_raw: [0.01507932 0.00089368 0.00253559]
+sum of R2: 0.20907975733280182
 ```
 
 The block above the arrays is the verbose summary. `verbose=True` is the 1.0
@@ -125,9 +125,9 @@ missing. R2-HSIC indices are individual dependence measures, one per input,
 each independently normalized to [0, 1]. They are not shares of anything, so
 they do not add to 1, and the residual is not "unexplained variance". If you
 need numbers that partition the output variance, use
-[Sobol](/examples/basic) or [PCE](/examples/pce). If you want a number that
+[Sobol](/examples/basic) or [PCE](/guide/methods/pce). If you want a number that
 partitions the output *distribution*, no such thing exists here either;
-[Borgonovo delta](/examples/borgonovo) and [PAWN](/examples/pawn) are also
+[Borgonovo delta](/guide/methods/borgonovo) and [PAWN](/guide/methods/pawn) are also
 per-input measures.
 
 The practical consequence: compare R2-HSIC values against each other, and
@@ -154,9 +154,9 @@ for b in (0.5, 1.0, 2.0):
 ```
 
 ```
-bandwidth=0.5: R2=[0.10485364 0.07125119 0.03178893]  T=[0.5324777  0.38032645 0.19353473]
-bandwidth=1.0: R2=[0.17024249 0.01001166 0.02882576]  T=[0.8192214  0.05516746 0.16617651]
-bandwidth=2.0: R2=[0.21803978 0.00576837 0.01242837]  T=[0.9236343  0.02539974 0.06154101]
+bandwidth=0.5: R2=[0.10485408 0.0712513  0.03178859]  T=[0.5324838  0.38032433 0.1935405 ]
+bandwidth=1.0: R2=[0.17024454 0.01001067 0.02882455]  T=[0.8192088  0.05517024 0.16619332]
+bandwidth=2.0: R2=[0.21804838 0.00577381 0.0124179 ]  T=[0.9236818  0.02538207 0.06159621]
 ```
 
 This is the failure mode to know about. At `bandwidth=2.0` the kernel is wide
@@ -227,9 +227,9 @@ jaxgsa.hsic.analyze
   results: top 4 of 4 parameters by T
     1. x1     T=0.8092
     2. x3     T=0.1708
-    3. x2     T=0.05836
-    4. inert  T=0.01558
-R2: [0.16442999 0.00859407 0.02879681 0.00051462]
+    3. x2     T=0.05837
+    4. inert  T=0.01559
+R2:  [0.16443375 0.00859426 0.02879651 0.00051297]
 p_values: [0.00497512 0.00497512 0.00497512 0.80597013]
 ```
 
@@ -287,8 +287,8 @@ jaxgsa.hsic.analyze
     2. x2  T=0.3587
     3. x1  T=0.2289
 R2 shape: (2, 3)
-[[0.0531356  0.18776427 0.52900743]
- [0.22435711 0.23674569 0.22942325]]
+[[0.05313455 0.18776193 0.5290061 ]
+ [0.22435622 0.23674537 0.22942361]]
 ```
 
 One `analyze` call covered both outputs, and both outputs cost one kernel
@@ -322,7 +322,7 @@ Coordinates:
   * output    (output) <U9 72B 'linear' 'quadratic'
   * param     (param) <U2 24B 'x1' 'x2' 'x3'
 Data variables:
-    R2        (output, param) float32 24B 0.05314 0.1878 0.529 ... 0.2367 0.2294
+    R2        (output, param) float32 24B 0.05313 0.1878 0.529 ... 0.2367 0.2294
     T         (output, param) float32 24B 0.08565 0.3215 0.717 ... 0.396 0.3711
     p_values  (output, param) float32 24B 0.004975 0.004975 ... 0.004975
     hsic_raw  (output, param) float32 24B 0.004868 0.01734 ... 0.02192 0.02094
@@ -331,7 +331,7 @@ Attributes:
     n_perms:    200
 
 <xarray.DataArray 'R2' (output: 2)> Size: 8B
-array([0.0531356 , 0.22435711], dtype=float32)
+array([0.05313455, 0.22435622], dtype=float32)
 Coordinates:
   * output   (output) <U9 72B 'linear' 'quadratic'
     param    <U2 8B 'x1'
@@ -362,13 +362,13 @@ D is always the last axis.
 
 ## Memory: reduce N, or screen first
 
-HSIC keeps the D raw input kernels, their D augmented complement products,
-the full augmented product, and one output kernel resident at the same time.
-Peak memory is about `(2D + 1)` full `N x N` float arrays. At N = 10000 and
-D = 10 in float32 that is roughly 8 GB.
+HSIC works on full `N x N` kernels. It holds only as many input kernels at
+once as the [memory budget](/guide/configuration#memory-budget) allows and
+builds the rest again when it needs them. It always needs about six `N x N`
+float arrays. At N = 10000 in float32 one such array is 400 MB, so a small
+budget cannot go below about 2.4 GB.
 
-**There is no `batch_size` keyword on `hsic.analyze`, and no other keyword
-bounds this.** That is not an oversight. A row-blocked kernel build was
+**There is no `batch_size` keyword on `hsic.analyze`.** That is not an oversight. A row-blocked kernel build was
 implemented, measured, and removed: it bounded a transient of the build while
 the resident stacks stayed exactly as large, so it bought nothing. If a
 sample does not fit, you have two honest options.
@@ -377,10 +377,10 @@ Thin N. HSIC converges quickly in N, and a ranking that is stable between
 N = 2000 and N = 4000 will not change at N = 20000. Take a random subset and
 check that the ranking holds.
 
-Or lower D by screening first. Run [Morris](/examples/morris) or
-[PAWN](/examples/pawn), both cheap and linear in memory, drop the inputs they
-find inert, and give HSIC the survivors. Memory is linear in D and quadratic
-in N, so halving D halves the footprint while halving N quarters it. Thin the
+Or lower D by screening first. Run [Morris](/guide/methods/morris) or
+[PAWN](/guide/methods/pawn), both cheap and linear in memory, drop the inputs they
+find inert, and give HSIC the survivors. The cost is linear in D and quadratic
+in N, so halving D halves it while halving N quarters it. Thin the
 sample first if you only need one of the two.
 
 ## Other things worth knowing
@@ -396,12 +396,11 @@ output of extreme magnitude is still worth rescaling by hand, because the
 squared distances the kernel builds can overflow float32 long before the
 index would care. `(Y - Y.mean(0)) / Y.std(0)` changes nothing else.
 
-In float32 the HSIC V-statistic cancels three large sums against each other,
-and `analyze` warns that only three or four correct digits survive. On the
-Ishigami run above, float32 and float64 agreed to five digits, so the warning
-was conservative there. Do not assume that. Turn on float64 with
-`jax.config.update("jax_enable_x64", True)` before the analysis when small
-indices or close rankings matter.
+float32 is safe for HSIC. jaxgsa computes the index as one sum over the
+product of two centred kernels, so no large sums cancel. On Ishigami up to
+N = 4096, float32 stays within 3e-6 relative of float64 for every parameter.
+This includes a dummy input with R2 near 6e-4. The p-values are the same in
+both precisions.
 
 Correlated inputs are fine. HSIC is a dependence measure and assumes nothing
 about input independence, so a declared `problem.correlation` does not
@@ -409,8 +408,8 @@ invalidate the indices. Each index then reads as total association with the
 output, which includes influence borrowed from correlated partners. An input
 the model never reads can score above 0 when it correlates with one the model
 does read. That reading is correct. If you need the direct effect separated
-from the borrowed one, use [VKOGA](/examples/vkoga) or
-[Kucherenko](/examples/kucherenko).
+from the borrowed one, use [VKOGA](/guide/methods/vkoga) or
+[Kucherenko](/guide/methods/kucherenko).
 
 Above about D = 15 the total-order product kernel can underflow in float32.
 Enable float64 or screen the input list down.
@@ -419,9 +418,9 @@ Enable float64 or screen the input list down.
 
 - [Basic example](/examples/basic) for the Sobol variance decomposition and
   its Saltelli design.
-- [PAWN](/examples/pawn) and [Borgonovo delta](/examples/borgonovo), the
+- [PAWN](/guide/methods/pawn) and [Borgonovo delta](/guide/methods/borgonovo), the
   other two given-data methods that read the whole output distribution.
-- [Optimal transport](/examples/optimal-transport) for a given-data index
+- [Optimal transport](/guide/methods/optimal-transport) for a given-data index
   that splits into a location shift and a reshape.
 - [Methods](/guide/methods) for the theory and a side-by-side comparison.
 - [API reference](/api/#given-data-methods) for every parameter.

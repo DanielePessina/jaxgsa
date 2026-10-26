@@ -109,9 +109,9 @@ print("snapshot velocity    :", np.asarray(snapshot_result.S1[1, :]))
 time S1     (40, 2, 4)
 snapshot S1 (2, 4)
 displacement @ last t: [-0.003  0.161 -0.018  0.663]
-velocity     @ last t: [ 0.021  0.689 -0.07   0.   ]
+velocity     @ last t: [ 0.021  0.689 -0.07  -0.   ]
 snapshot displacement: [-0.003  0.161 -0.018  0.663]
-snapshot velocity    : [ 0.021  0.689 -0.07   0.   ]
+snapshot velocity    : [ 0.021  0.689 -0.07  -0.   ]
 ```
 
 The index array mirrors the output array with `N` replaced by `D` and moved to
@@ -140,7 +140,7 @@ print("displacement S1 for amplitude, t = 0 / 2.56 / 5:", np.asarray(time_result
 
 ```text
 displacement S1 for offset,    t = 0 / 2.56 / 5: [0.953 0.499 0.663]
-displacement S1 for amplitude, t = 0 / 2.56 / 5: [0.   0.008 -0.003]
+displacement S1 for amplitude, t = 0 / 2.56 / 5: [ 0.     0.008 -0.003]
 ```
 
 At `t = 0` the sine is zero, so displacement is the offset and nothing else, and
@@ -424,6 +424,6 @@ characters and one keyword, and the labels come out right.
   parameter, output and time name.
 - [Bootstrap Confidence Intervals](/examples/bootstrap) for putting an interval
   on each of those 320 numbers.
-- [RS-HDMR Example](/examples/hdmr) for the same shapes on the surrogate route.
+- [RS-HDMR guide page](/guide/methods/hdmr) for the same shapes on the surrogate route.
 - [Screen first, then quantify](/examples/advanced-workflow) for cutting 20 inputs to 4 with Morris,
   then spending the Sobol budget on the survivors.

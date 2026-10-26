@@ -142,8 +142,9 @@ control, such as `~/.cache/jaxgsa-jax`.
 ## Memory budget
 
 jaxgsa bounds peak transient memory by processing data in blocks and sizing
-each block against a byte budget. The default is 512 MiB. Reading and writing
-it:
+each block against a byte budget. The default is 2 GiB. The budget bounds the
+transient arrays inside an analysis' forward pass. It does not bound the inputs,
+the compile memory or reverse-mode gradients. Reading and writing it:
 
 ```python
 import jaxgsa
@@ -158,8 +159,8 @@ print(jaxgsa.config.get_memory_budget())
 ```
 
 ```
-512.0
-536870912
+2048.0
+2147483648
 0.0625
 ```
 
@@ -171,12 +172,12 @@ answer does not change either way, only the peak.
 
 Most of the library, as of 1.0:
 
-- surrogate `predict` for PCE and HDMR,
-- the output-slice chunking of Sobol, HDMR, PAWN, Borgonovo, eFAST, and optimal transport,
+- surrogate `predict` for PCE, HDMR and VKOGA,
+- the output-slice chunking of Sobol, HDMR, PAWN, Borgonovo, eFAST, optimal
+  transport, Kucherenko, Morris and rank,
 - the Sobol bootstrap and the Morris resample chunking,
 - the DGSM Jacobian batching,
-- HSIC, which checks whether it can handle all inputs at once within the
-  budget. If not, it handles them one at a time,
+- HSIC, which holds as many input kernels at once as the budget allows,
 - the PCE S2 pair-mask chunking,
 - the PCE and HDMR streaming fits, which engage on their own when the
   single-pass design matrix would not fit.
@@ -197,7 +198,7 @@ grid.
 | `tb`, `tib` | 1 099 511 627 776 (1024⁴) |
 
 Every unit is binary. `mb` means 1024², not 1000², because memory is counted in
-binary units, and because it makes `set_memory_budget(512)` restate the default
+binary units, and because it makes `set_memory_budget(2048)` restate the default
 exactly. `mib` is an exact synonym of `mb`, and the same holds for each other
 pair. Names ignore case and surrounding whitespace, so `"MB"`, `" mb "` and
 `"Mb"` are one unit. Anything else raises and lists what it accepts:
@@ -224,7 +225,8 @@ Four rules, and they hold everywhere the keyword appears.
 **`batch_size` sizes row blocks, clamped to N.** It is a cap on how many rows
 are resident, not a request for a particular block count. Passing more rows
 than you have is legal and means "one shot". Below 1 it raises:
-`ValueError: batch_size must be >= 1, got 0`.
+`ValueError: batch_size must be an integer >= 1, got 0`.
+A float such as `2.0` raises the same `ValueError`.
 
 **`None` derives the width from the memory budget.** That is the default
 everywhere.
@@ -233,21 +235,28 @@ everywhere.
 selects a different algorithm, so the indices do not depend on it. Only the
 peak memory and the wall clock do.
 
-**`hsic.analyze` has no `batch_size` at all.** Its estimator holds `2D + 1`
-resident `N x N` kernel matrices, and no row block bounds those. At `D = 10`
-and `N = 20000`, that is 21 matrices of 400 million float32 entries, about
-34 GB, and no keyword makes it smaller. Passing one gets you `TypeError:
+**`hsic.analyze` has no `batch_size` at all.** Its estimator works on
+`N x N` kernel matrices, and no row block bounds those. The budget sets how
+many input kernels it holds at once, but it always needs about six. At
+`N = 20000` each is 400 million float32 entries, about 1.6 GB, and no keyword
+makes it smaller. Passing one gets you `TypeError:
 analyze() got an unexpected keyword argument 'batch_size'`, which is the honest
 answer. HSIC's memory is set by `N`, so lower `N`.
 
 ### Which keyword each method takes
 
-| Keyword | Blocks over | `analyze` functions |
+| Keyword | Blocks over | Methods |
 | --- | --- | --- |
-| `batch_size` | rows of `X` | `pce`, `hdmr`, `dgsm`, `vkoga`, and `SurrogateResult.predict` |
-| `slice_chunk_size` | flattened `(T, K)` output slices | `sobol`, `hdmr`, `pawn`, `borgonovo`, `efast`, `optimal_transport` |
+| `batch_size` | rows of `X` | `pce`, `hdmr`, `dgsm`, `vkoga`, `shapley`, and `SurrogateResult.predict` |
+| `slice_chunk_size` | flattened `(T, K)` output slices | `sobol`, `efast`, `borgonovo`, `pawn`, `optimal_transport`, `hdmr`, `kucherenko`, `morris`, `rank`, and `shapley` with `backend="hdmr"` |
 | `resample_chunk_size` | bootstrap replicates | `morris` |
-| none | | `hsic`, `shapley`, `kucherenko` |
+| none | | `hsic` |
+
+Each keyword is on `analyze` and, where the method has one, on `indices`
+too. `vkoga` and `kucherenko` have no `indices`. `shapley` passes both
+keywords to its backend. The PCE backend fits every output slice in one
+shared solve, so `slice_chunk_size` with `backend="pce"` raises
+`ValueError`.
 
 `slice_chunk_size` and `resample_chunk_size` follow the same four rules over
 their own axis, clamped to the number of slices or replicates there are.
@@ -278,7 +287,7 @@ lines that differ plus the results, because the problem and timing sections are
 identical and machine-specific:
 
 ```
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 4096 (resolved from the memory budget)
   results: top 3 of 3 parameters by nu
     1. x2  nu=24.49
     2. x3  nu=10.77
@@ -290,7 +299,7 @@ identical and machine-specific:
     2. x3  nu=10.77
     3. x1  nu=7.806
 
-    batch_size: 1000000000 (user-set)
+    batch_size: 4096 (user-set)
   results: top 3 of 3 parameters by nu
     1. x2  nu=24.49
     2. x3  nu=10.77
@@ -301,7 +310,7 @@ Every summary also carries `gradients: reverse-mode autodiff (T*K=1, D=3)`.
 DGSM picks its autodiff mode from the shape, `jacfwd` when `T*K > D` and
 `jacrev` otherwise. There is no keyword for it.
 
-The summary echoes the value you passed, not the clamp. The effective width is
+The summary prints the width that ran, after the clamp. The effective width is
 `min(batch_size, N)`, so the third call ran in one shot over all 4096 rows.
 
 Lowering the budget shows the `None` rule moving. Here is a time-resolved Sobol
@@ -317,7 +326,7 @@ Y = (
     + 0.1 * (X[:, 2] ** 4)[:, None] * jnp.sin(X[:, 0])[:, None] * t[None, :]
 )[:, :, None]
 
-jaxgsa.sobol.analyze(design, Y)          # default 512 MiB
+jaxgsa.sobol.analyze(design, Y)          # default 2 GiB
 jaxgsa.config.set_memory_budget(8)       # 8 MiB
 jaxgsa.sobol.analyze(design, Y)
 ```
@@ -329,14 +338,14 @@ jaxgsa.sobol.analyze(design, Y)
     2. x1  ST=0.2634
     3. x3  ST=0.1129
 
-    slice_chunk_size: 81 (resolved from the memory budget)
+    slice_chunk_size: 40 (resolved from the memory budget)
   results: top 3 of 3 parameters by ST, mean over 200 output slices
     1. x2  ST=0.7319
     2. x1  ST=0.2634
     3. x3  ST=0.1129
 ```
 
-At 512 MiB all 200 slices fit in one device call. At 8 MiB jaxgsa takes them 81
+At 2 GiB all 200 slices fit in one device call. At 8 MiB jaxgsa takes them 40
 at a time. Same indices to four digits. Note that the ranking line averages over
 the 200 slices; the per-slice indices are in `result.ST`, shape `(200, 1, 3)`.
 
@@ -362,11 +371,11 @@ jaxgsa.pce.analyze(problem5, X5, Y5, order=6)
 ```
     order: 6
     fit: single-pass
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 20000 (resolved from the memory budget)
 
     order: 6
     fit: streamed
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 47 (resolved from the memory budget)
 ```
 
 Read the `fit:` line if you care which one ran. Streaming trades passes over

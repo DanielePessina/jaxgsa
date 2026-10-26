@@ -31,6 +31,7 @@ import jax.numpy as jnp
 from jax import Array
 
 from jaxgsa._core.batching import apply_batched, resolve_batch_size
+from jaxgsa._core.entry import check_scalars, positive_int
 from jaxgsa._core.validation import _validate_x
 from jaxgsa.problem import Problem
 
@@ -84,7 +85,7 @@ class SurrogateResult(ABC):
                 are linear in the batch size with a large per-row constant,
                 so single-shot evaluation at large ``N_new`` can exhaust
                 memory. ``None`` (default) derives a batch size from a fixed
-                transient-memory budget (~512 MiB); an int fixes the rows
+                transient-memory budget (~2 GiB); an int fixes the rows
                 per batch, and ``batch_size >= N_new`` forces a single-shot
                 call. Each row's prediction is independent, so batching only
                 perturbs predictions at the level of floating-point
@@ -101,6 +102,9 @@ class SurrogateResult(ABC):
                 parameter, ``batch_size`` is not a positive integer, or this
                 result carries no fitted surrogate state.
         """
+        # The same rule as every analysis keyword: a float, a bool or a value
+        # below 1 raises ValueError naming the keyword, before any work.
+        check_scalars((positive_int("batch_size", batch_size),))
         X = jnp.asarray(X)
         _validate_x(self.problem, X)
         plan = self._predict_plan(X)

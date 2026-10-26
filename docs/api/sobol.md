@@ -238,6 +238,7 @@ the derivative is dominated by rounding.
 
 Related docs:
 
+- [Sobol' guide page](/guide/methods/sobol)
 - [Bootstrap Confidence Intervals](/examples/bootstrap)
 - [xarray Output](/examples/xarray)
 - [Methods](/guide/methods)

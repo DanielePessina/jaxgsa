@@ -20,7 +20,7 @@ from jax import Array
 
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import get_memory_budget
-from jaxgsa._core.bootstrap import bootstrap_draws, interval
+from jaxgsa._core.bootstrap import bootstrap_draws, bootstrap_draws_host, interval
 from jaxgsa._core.entry import (
     _METHOD_ALIAS,
     ScalarCheck,
@@ -56,7 +56,12 @@ from jaxgsa.hdmr._engine import (
     _build_B3,
     _compute_f_crits,
 )
-from jaxgsa.hdmr._fit import _fit_hdmr, pair_solve_warning
+from jaxgsa.hdmr._fit import (
+    _fit_bytes_per_row,
+    _fit_hdmr,
+    _resolve_fit_widths,
+    pair_solve_warning,
+)
 from jaxgsa.hdmr._result import HDMRResult, _HDMRFit
 from jaxgsa.problem import Problem
 
@@ -283,6 +288,56 @@ def _get_hdmr_static_data(D: int, order: int, n_intervals: int) -> _HDMRStaticDa
         m3=m3,
         beta2=beta2,
         beta3=beta3,
+    )
+
+
+def _resolved_widths(
+    problem: Problem,
+    n_rows: int,
+    n_slices: int,
+    dtype: np.dtype,
+    *,
+    order: int,
+    n_intervals: int,
+    batch_size: int | None,
+    slice_chunk_size: int | None,
+) -> tuple[int, int]:
+    """Resolve the row batch and slice chunk a fit of these sizes runs with.
+
+    The same resolver :func:`jaxgsa.hdmr._fit._fit_hdmr` runs: cheap
+    arithmetic, so a verbose summary reports the widths rather than
+    re-deriving them by hand.
+
+    Args:
+        problem: The problem the fit is for.
+        n_rows: Rows of the design.
+        n_slices: Flattened output slices ``T*K``.
+        dtype: The fit dtype.
+        order: The requested expansion order; it is clamped to ``D`` here.
+        n_intervals: Number of B-spline intervals.
+        batch_size: The caller's rows per batch, or ``None``.
+        slice_chunk_size: The caller's slices per chunk, or ``None``.
+
+    Returns:
+        ``(batch_size, slice_chunk_size)`` as the fit resolves them.
+    """
+    D = problem.n_params
+    fitted_order = min(order, D)
+    static = _get_hdmr_static_data(D, fitted_order, n_intervals)
+    return _resolve_fit_widths(
+        n_rows,
+        D,
+        n_slices,
+        jnp.dtype(dtype).itemsize,
+        fitted_order,
+        static.n2,
+        static.n3,
+        static.n,
+        static.m1,
+        static.m2,
+        static.m3,
+        batch_size,
+        slice_chunk_size,
     )
 
 
@@ -634,16 +689,22 @@ def analyze(
     if verbose:
         elapsed = _verbose.stop(t0, result.ST)
         _, T, K = ctx.Y3.shape
-        slice_note = (
-            f"slice_chunk_size: {slice_chunk_size} (user-set)"
-            if slice_chunk_size is not None
-            else "slice_chunk_size: auto (resolved from the memory budget)"
+        b, cs = _resolved_widths(
+            problem,
+            int(X.shape[0]),
+            T * K,
+            jnp.result_type(X.dtype, Y.dtype),
+            order=order,
+            n_intervals=n_intervals,
+            batch_size=batch_size,
+            slice_chunk_size=slice_chunk_size,
         )
-        batch_note = (
-            f"batch_size: {batch_size} (user-set)"
-            if batch_size is not None
-            else "batch_size: auto (resolved from the memory budget)"
+        slice_origin = (
+            "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
         )
+        batch_origin = "user-set" if batch_size is not None else "resolved from the memory budget"
+        slice_note = f"slice_chunk_size: {cs} ({slice_origin})"
+        batch_note = f"batch_size: {b} ({batch_origin})"
         _verbose.analysis_summary(
             method="jaxgsa.hdmr.analyze",
             problem=problem,
@@ -989,6 +1050,65 @@ def _hdmr_replicate(
     return {name: getattr(core, name) for name in _INDEX_FIELDS}
 
 
+_JIT_REPLICATE_SHARE = 16
+"""A fit whose working set is at most ``budget / _JIT_REPLICATE_SHARE`` jits its replicates."""
+
+
+def _jit_replicates(
+    N: int,
+    D: int,
+    L: int,
+    *,
+    order: int,
+    n_intervals: int,
+    itemsize: int,
+    batch_size: int | None,
+    slice_chunk_size: int | None,
+) -> bool:
+    """Say whether the bootstrap replicates can run as one jitted program.
+
+    Traced as one program, the fit keeps more buffers live than the eager
+    fit, because XLA schedules all of its passes together. Its Python row
+    and slice loops also unroll, so a streamed fit compiles one copy of
+    every pass per row batch. Measured at float64, order 2, the default 2 GiB
+    budget:
+
+    * D=10, N=20000 (one row batch): one jitted replicate peaked at 1.7 GB
+      RSS, the eager fit at 0.9-1.2 GB.
+    * D=3, N=800 at a 32 KiB budget (many row batches): the program took 12 s
+      and 1.3 GB to compile, against 0.5 GB for the eager fit.
+
+    The eager host loop costs dispatch time instead, about 5-35 ms per
+    replicate, which dominates a small fit (a jitted replicate at D=3,
+    N=800 takes about 1 ms). So the jitted path is kept for the fits where
+    its extra memory is small next to the budget: one row batch, one slice
+    chunk, and a working set within ``1/16`` of the budget.
+
+    Args:
+        N: Number of rows.
+        D: Number of parameters.
+        L: Number of flattened output slices.
+        order: Requested expansion order, clamped to ``D`` here.
+        n_intervals: B-spline intervals per dimension.
+        itemsize: Bytes per element of the fit's dtype.
+        batch_size: The caller's rows per batch, or ``None``.
+        slice_chunk_size: The caller's slices per chunk, or ``None``.
+
+    Returns:
+        ``True`` when the replicates should run in one jitted ``lax.map``.
+    """
+    if batch_size is not None and batch_size < N:
+        return False
+    if slice_chunk_size is not None and slice_chunk_size < L:
+        return False
+    s = _get_hdmr_static_data(D, min(order, D), n_intervals)
+    per_row = _fit_bytes_per_row(D, s.m1, s.m2, s.m3, s.n2, s.n3, s.n, L, itemsize)
+    # The pair solver's per-lane state, which also caps the slice chunk.
+    lane_fixed = 7 * s.n2 * s.m2 * itemsize
+    working_set = N * per_row + L * lane_fixed
+    return working_set * _JIT_REPLICATE_SHARE <= get_memory_budget()
+
+
 def _bootstrap_indices(
     problem: Problem,
     X: Array,
@@ -1008,9 +1128,18 @@ def _bootstrap_indices(
     One replicate is a full refit: the rows are drawn with replacement, the
     B-spline bases are rebuilt on them, the backfitting runs again and the
     F-test is redone. No part of an HDMR index survives a resample without
-    that, so the replicates run as a sequential ``lax.map`` over independent fits and
-    the cost is ``n_bootstrap`` fits — an order of magnitude above a method
-    that only re-reduces per-row numbers it already holds.
+    that, so the cost is ``n_bootstrap`` fits — an order of magnitude above a
+    method that only re-reduces per-row numbers it already holds.
+
+    How the replicates run depends on the fit's size; the row draws are the
+    same either way (see :func:`_jit_replicates`). A small fit runs all
+    replicates in one jitted ``lax.map``
+    (:func:`~jaxgsa._core.bootstrap.bootstrap_draws`), which is fastest. A
+    larger or streamed fit runs as a host loop of eager fits
+    (:func:`~jaxgsa._core.bootstrap.bootstrap_draws_host`). Each fit then
+    runs pass by pass, as the point estimate does, so the peak is the point
+    fit's peak and does not grow with ``n_bootstrap`` or with the number of
+    row batches.
 
     The row draw is shared by every output slice, exactly as the point
     estimate shares one basis across slices.
@@ -1033,8 +1162,20 @@ def _bootstrap_indices(
         length ``n_bootstrap`` followed by the canonical ``(T, K, ...)``
         shape.
     """
-
-    return bootstrap_draws(
+    N, D = X.shape
+    L = math.prod(Y.shape[1:])
+    itemsize = jnp.dtype(jnp.result_type(X.dtype, Y.dtype, float)).itemsize
+    jit_ok = _jit_replicates(
+        N,
+        D,
+        L,
+        order=order,
+        n_intervals=n_intervals,
+        itemsize=itemsize,
+        batch_size=batch_size,
+        slice_chunk_size=slice_chunk_size,
+    )
+    return (bootstrap_draws if jit_ok else bootstrap_draws_host)(
         key,
         n_bootstrap,
         _hdmr_replicate,
@@ -1110,7 +1251,13 @@ def _analyze_hdmr_core(
             stable components. Decrease it if genuine sharp features are being
             oversmoothed. The second-order blocks are rank-deficient (they are
             orthogonal to the first-order space), so they use at least
-            ``sqrt(eps)`` of the working precision whatever you pass.
+            ``sqrt(eps)`` of the working precision whatever you pass. In
+            float64 there is one more floor: the ridge of each pair is at
+            least ``sqrt(eps)`` times that pair's Gram before the projection.
+            This stops round-off from creating pair indices when an input
+            does not fill its bounds. It can raise a small ridge: below about
+            1.75e-7 at ``n_intervals=2``, and below about 1.2e-6 at
+            ``n_intervals=1``, where it also raises the default ridge.
         slice_chunk_size: Maximum number of (T, K) output slices fitted per
             vmap. It caps peak device memory for large T*K, and a smaller
             value trades speed for memory. ``None`` (default) derives the

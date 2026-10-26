@@ -94,7 +94,9 @@ def test_order_one_second_order_indices_are_zero_and_nan_when_constant():
 def _three_inputs(n: int = 2000) -> tuple[jaxgsa.Problem, np.ndarray, np.random.Generator]:
     rng = np.random.default_rng(0)
     problem = jaxgsa.Problem(["a", "b", "c"], [(0, 1)] * 3)
-    return problem, rng.uniform(0, 1, (n, 3)).astype(np.float32), rng
+    # The active precision: float32 data is fitted in float32 even under x64.
+    dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+    return problem, rng.uniform(0, 1, (n, 3)).astype(dtype), rng
 
 
 def _gaussian_fit(order: int, n: int, seed: int, **kwargs):
@@ -477,7 +479,7 @@ def test_ridge_qr_solves_the_normal_equations():
     Phi = jnp.asarray(rng.standard_normal((200, 8)).astype(dtype))
     Y = jnp.asarray(rng.standard_normal((200, 3)).astype(dtype))
     ridge = 0.05
-    coefficients, R = ridge_qr(Phi, Y, ridge)
+    coefficients, R, _, _ = ridge_qr(Phi, Y, ridge)
     gram = Phi.T @ Phi + ridge * jnp.eye(8, dtype=Phi.dtype)
     tol = 1e-10 if jax.config.jax_enable_x64 else 5e-4
     np.testing.assert_allclose(

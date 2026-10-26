@@ -18,6 +18,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
+from jax.core import Tracer
 
 from jaxgsa._core.warning_types import JaxgsaWarning
 
@@ -642,8 +643,60 @@ def _layout_of(Y: Array) -> YLayout:
     return YLayout.TIME_SERIES
 
 
+def _reshape_without_copy(Y: Array, shape: tuple[int, ...]) -> Array:
+    """Reshape a concrete CPU array into a new array that shares its buffer.
+
+    An eager ``jnp.reshape`` (or ``Y[:, None, :]``) outside ``jit`` runs as
+    its own XLA program, and that program writes a full copy of ``Y``. On a
+    CPU backend the buffer can be shared instead: ``np.asarray`` exposes it
+    as a read-only NumPy view, NumPy reshapes the view for free, and
+    ``jax.device_put(..., may_alias=True)`` wraps it back into a JAX array
+    without copying. JAX arrays are immutable and the view is read-only, so
+    nothing can write through the shared buffer.
+
+    Anything else takes the plain ``reshape``: a tracer (under ``jit`` the
+    reshape is free anyway), a NumPy array (its reshape is already a view),
+    an array on an accelerator (``np.asarray`` would copy it to the host), a
+    sharded array, or a buffer NumPy could not view without a copy.
+
+    Args:
+        Y: The array to reshape.
+        shape: Target shape, with the same number of elements as ``Y``.
+
+    Returns:
+        ``Y`` reshaped to ``shape``, with the same values and dtype.
+    """
+    if (
+        isinstance(Y, Tracer)
+        or not isinstance(Y, jax.Array)
+        or not Y.is_fully_addressable
+        or len(Y.sharding.device_set) != 1
+        or next(iter(Y.sharding.device_set)).platform != "cpu"
+    ):
+        return Y.reshape(shape)
+    view = np.asarray(Y)
+    if view.size and view.__array_interface__["data"][0] != Y.unsafe_buffer_pointer():
+        # NumPy copied the buffer, so aliasing it would not save anything.
+        return Y.reshape(shape)
+    # Keep the placement the caller had: a committed array stays committed to
+    # its device, an uncommitted one stays free to move.
+    sharding = Y.sharding if Y.committed else None
+    out = jax.device_put(view.reshape(shape), sharding, may_alias=True)
+    if isinstance(out, Tracer) or out.sharding.device_set != Y.sharding.device_set:
+        # Under an outer trace (a concrete Y closed over by a jitted or
+        # differentiated function) device_put is staged, not run; and an
+        # uncommitted Y can sit off the current default device. Either way
+        # the plain reshape keeps what the caller had.
+        return Y.reshape(shape)
+    return out
+
+
 def _prepare_Y(Y: Array) -> tuple[Array, YLayout]:
     """Promote Y to the canonical 3-D shape ``(N, T, K)``.
+
+    The promotion only inserts singleton axes, so on a CPU backend the result
+    shares ``Y``'s buffer (see :func:`_reshape_without_copy`) rather than
+    holding a second full copy of the outputs.
 
     Args:
         Y: Model output array with 1, 2, or 3 dimensions.
@@ -655,9 +708,9 @@ def _prepare_Y(Y: Array) -> tuple[Array, YLayout]:
     # Normalize to 3-D so downstream kernels always see (samples, T, K)
     # without shape-dependent branching.
     if Y.ndim == 1:  # scalar output per sample -- both T and K are singleton
-        return Y[:, None, None], YLayout.SCALAR
+        return _reshape_without_copy(Y, (Y.shape[0], 1, 1)), YLayout.SCALAR
     if Y.ndim == 2:  # multi-output but single timestep -- only T is singleton
-        return Y[:, None, :], YLayout.MULTI_OUTPUT
+        return _reshape_without_copy(Y, (Y.shape[0], 1, Y.shape[1])), YLayout.MULTI_OUTPUT
     return Y, YLayout.TIME_SERIES
 
 
@@ -737,12 +790,30 @@ def _zero_variance_stats(flat: Array) -> tuple[Array, Array]:
 
 
 @jax.jit
-def _promote_with_zero_stats(Y: Array) -> tuple[Array | None, Array, Array]:
-    """Promote ``Y`` to ``(N, T, K)`` and compute its zero-variance stats at once.
+def _zero_variance_stats_of(Y: Array) -> tuple[Array, Array]:
+    """:func:`_zero_variance_stats` of ``Y`` at any rank, flattened inside ``jit``.
 
-    Fuses what :func:`_prepare_Y` and the zero-variance check would each
-    compile on their own. A rank-3 ``Y`` is not returned, so the caller keeps
-    the array it has instead of receiving a copy.
+    Flattening the trailing axes eagerly would be its own XLA program and
+    would write a full copy of ``Y``; inside the trace it is free.
+
+    Args:
+        Y: Model output with 1, 2 or 3 dimensions, samples first.
+
+    Returns:
+        The mask of :func:`_zero_variance_mask` over ``Y.reshape(N, -1)``,
+        and its sum.
+    """
+    return _zero_variance_stats(Y.reshape(Y.shape[0], -1))
+
+
+def _promote_with_zero_stats(Y: Array) -> tuple[Array | None, Array, Array]:
+    """Promote ``Y`` to ``(N, T, K)`` and compute its zero-variance stats.
+
+    The stats run as one compiled program over ``Y`` at its own rank. The
+    promotion goes through :func:`_prepare_Y`, which shares ``Y``'s buffer on
+    a CPU backend: returned from the compiled program instead, the promoted
+    array would be a full copy of ``Y``. A rank-3 ``Y`` is not returned, so
+    the caller keeps the array it has.
 
     Args:
         Y: Model output with 1, 2 or 3 dimensions.
@@ -750,12 +821,10 @@ def _promote_with_zero_stats(Y: Array) -> tuple[Array | None, Array, Array]:
     Returns:
         ``(Y3, mask, count)``. ``Y3`` is ``None`` when ``Y`` is already rank 3.
     """
-    mask, count = _zero_variance_stats(Y.reshape(Y.shape[0], -1))
-    if Y.ndim == 1:
-        return Y[:, None, None], mask, count
-    if Y.ndim == 2:
-        return Y[:, None, :], mask, count
-    return None, mask, count
+    mask, count = _zero_variance_stats_of(Y)
+    if Y.ndim == 3:
+        return None, mask, count
+    return _prepare_Y(Y)[0], mask, count
 
 
 def _join_capped(labels: list[str], *, limit: int = 5) -> str:
@@ -840,7 +909,8 @@ def _warn_zero_variance_slices(
     # A slice that does vary, but so little that its variance underflows to
     # zero in the working dtype: only the variance test sees that one.
     if zero_stats is None:
-        zero_mask, n_zero_dev = _zero_variance_stats(Y.reshape(Y.shape[0], -1))
+        # Flattened inside jit: an eager reshape would copy all of Y.
+        zero_mask, n_zero_dev = _zero_variance_stats_of(Y)
     else:
         zero_mask, n_zero_dev = zero_stats
     n_zero = int(n_zero_dev)

@@ -95,15 +95,16 @@ jaxgsa.shapley.analyze
     backend fit + Shapley (includes compile on the first call): 2.112 s
     backend: pce
     order: 8
+    batch_size: 2000 (resolved from the memory budget)
   results: top 3 of 3 parameters by Sh
     1. x2  Sh=0.4418
     2. x1  Sh=0.4362
     3. x3  Sh=0.122
-Sh: [0.43615592 0.44182348 0.12202042]
-sum: 0.9999998
-S1: [3.1413424e-01 4.4180435e-01 9.9179010e-07]
-ST: [0.55818665 0.4418516  0.24404898]
-explained_variance: 1.0339365
+Sh: [0.43615595 0.44182357 0.12202043]
+sum: 0.99999994
+S1: [3.1413427e-01 4.4180450e-01 9.9165698e-07]
+ST: [0.55818665 0.4418517  0.24404901]
+explained_variance: 0.99969065
 ```
 
 The summary block prints by default. `verbose=False` silences it. The
@@ -125,10 +126,10 @@ x2 is the purely additive input on Ishigami — it enters only through
 `Sh = 0.4418` and `ST = 0.4419` here, against an exact 0.4424. Where the three
 indices agree, the input acts alone and any one of them is the whole story.
 
-The sum prints 0.9999998 rather than 1. That is float32 rounding over a
+The sum prints 0.99999994 rather than 1. That is float32 rounding over a
 165-term expansion, not a modelling gap. Do not chase it.
 
-![Shapley effects on Ishigami bracketed between S1 and ST for every input, from the PCE backend](./figures/shapley_gsa_ishigami-s-1-leq-mathrm-sh-leq-s-t-pce-backend-o.png)
+![Shapley effects on Ishigami bracketed between S1 and ST for every input, from the PCE backend](../../examples/figures/shapley_gsa_ishigami-s-1-leq-mathrm-sh-leq-s-t-pce-backend-o.png)
 
 ## Ground-truth check
 
@@ -216,7 +217,7 @@ fit: `order=8` reproduces the analytical effects to 0.0006. Each result also
 reports the order it actually fit as `result.order` (`effective order: 8` in
 the scalar run above), so a saved analysis records its own truncation.
 
-![Shapley effect estimates converging onto the analytical values as the surrogate order is swept from 2 to 8](./figures/shapley_gsa_mathrm-sh-convergence-with-surrogate-order-dashe.png)
+![Shapley effect estimates converging onto the analytical values as the surrogate order is swept from 2 to 8](../../examples/figures/shapley_gsa_mathrm-sh-convergence-with-surrogate-order-dashe.png)
 
 ## Backends
 
@@ -257,7 +258,7 @@ This example adds a second output with a known answer. Y2 is a sum of squares
 over symmetric bounds, so it has no interactions and its three inputs are
 interchangeable. Its shares must come out at 1/3 each, which is how you check
 the multi-output path did not scramble an axis. `n_intervals=4` widens the B-spline
-basis, for the reason on the [RS-HDMR page](/examples/hdmr).
+basis, for the reason on the [RS-HDMR page](/guide/methods/hdmr).
 
 ```python
 import jax.numpy as jnp
@@ -414,8 +415,8 @@ contribution `Sa + Sb` and does accept a declared correlation. It is an
 ANCOVA-based attribution. A true conditional-variance Shapley effect needs an
 estimator of the variance remaining once a group of inputs is held fixed, and
 jaxgsa does not have one yet. For conditional-variance indices under
-dependence, leave Shapley behind: [VKOGA](/examples/vkoga) works from given
-data through a kernel surrogate, [Kucherenko](/examples/kucherenko) uses its
+dependence, leave Shapley behind: [VKOGA](/guide/methods/vkoga) works from given
+data through a kernel surrogate, [Kucherenko](/guide/methods/kucherenko) uses its
 own design and your actual model. Neither returns a per-parameter allocation
 summing to 1.
 
@@ -429,12 +430,12 @@ samples, `order` in `{1, 2, 3}`, clamped with a warning when
 
 ## See also
 
-- [PCE](/examples/pce) for the default backend's surrogate, its leave-one-out
+- [PCE](/guide/methods/pce) for the default backend's surrogate, its leave-one-out
   error and its emulator.
-- [RS-HDMR](/examples/hdmr) for the multi-output backend's surrogate.
+- [RS-HDMR](/guide/methods/hdmr) for the multi-output backend's surrogate.
 - [Basic Example](/examples/basic) for the Sobol workflow when you can afford
   a structured Saltelli design.
-- [Borgonovo Delta](/examples/borgonovo) for a moment-independent importance
+- [Borgonovo Delta](/guide/methods/borgonovo) for a moment-independent importance
   measure from the same given-data setting.
 - [Methods](/guide/methods) for the theory and when to prefer Sh over S1/ST.
 - [API Reference](/api/#shapley-effects) for full parameter documentation.

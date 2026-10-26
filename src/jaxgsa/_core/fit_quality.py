@@ -104,6 +104,71 @@ SINGULAR_PIVOT_THRESHOLD_F32 = 1e-5
 # below 1e-4. float64 never reaches the line before it reaches the one above.
 AMBIGUOUS_PIVOT_THRESHOLD_F32 = 1e-4
 
+# Limit on how far the total indices may move when the ridge is doubled
+# (float64 only; see jaxgsa.pce._engine.ridge_sensitivity).
+#
+# When the inputs do not fill their declared bounds, a small direction of the
+# data is large on the declared domain, where the indices are read, and a
+# ridge that shrinks it moves them. Measured in float64 on an additive cubic,
+# D = 4, N = 4096, inputs on [0, 0.3], order 6: ``ridge=1e-8`` biased ST by
+# 0.25, and doubling it moved ST by 5e-2 (3.6e-3 on [0.495, 0.505], order 3).
+# With the default ridge, doubling it moves ST by about 1e-7 on accurate
+# fits, including an order-20 Hermite fit where the ridge is 1.4e-3 of the
+# smallest Gram eigenvalue (a test on that ratio warned there). Float32
+# refuses such designs through the pivot share first.
+RIDGE_SENSITIVITY_THRESHOLD = 1e-3
+
+
+def warn_ridge_dominance(
+    namespace: str, sensitivity: Array, pivot_share: Array, *, advice: str
+) -> None:
+    """Warn when the indices depend on the ridge.
+
+    float64 only (see :data:`RIDGE_SENSITIVITY_THRESHOLD`). ``sensitivity`` is
+    one fit's :func:`jaxgsa.pce._engine.ridge_sensitivity`, or one value per
+    bootstrap replicate; the message then counts the replicates. A fit whose
+    pivot share is below :data:`ILL_CONDITIONED_PIVOT_THRESHOLD` is skipped:
+    the rank check already warns about it, and its smallest direction is at
+    round-off level, where any ridge matters.
+
+    Args:
+        namespace: The public function the message speaks for.
+        sensitivity: ``max |ST(2 ridge) - ST(ridge)|``, a scalar or shape
+            ``(n_bootstrap,)``.
+        pivot_share: The pivot share of the same fits, same shape.
+        advice: What to do about it. Appended to the message.
+
+    Warns:
+        JaxgsaWarning: If a float64 sensitivity is above
+            :data:`RIDGE_SENSITIVITY_THRESHOLD`.
+    """
+    values = np.asarray(sensitivity)
+    if values.dtype != np.float64:
+        return
+    shares = np.asarray(pivot_share)
+    bad = (
+        np.isfinite(values)
+        & (values > RIDGE_SENSITIVITY_THRESHOLD)
+        & (shares >= ILL_CONDITIONED_PIVOT_THRESHOLD)
+    )
+    if not bad.any():
+        return
+    if values.ndim == 0:
+        lead = f"{namespace}: doubling the ridge moves ST by {float(values):.1e}"
+    else:
+        lead = (
+            f"{namespace}: in {int(bad.sum())} of {values.size} bootstrap replicates, "
+            f"doubling the ridge moves ST by more than {RIDGE_SENSITIVITY_THRESHOLD:.0e}"
+        )
+    warnings.warn(
+        f"{lead}, so the indices depend on the ridge: it shrinks a direction "
+        "the data resolves. This happens when the inputs do not fill their "
+        f"declared bounds, or when the ridge is large. {advice}",
+        skip_file_prefixes=(PACKAGE_DIR,),
+        category=JaxgsaWarning,
+    )
+
+
 # Limit on the residual of an input that is a linear combination of others.
 #
 # Regress input j, centred and scaled to unit spread, on the inputs before it.

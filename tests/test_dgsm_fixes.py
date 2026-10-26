@@ -166,3 +166,76 @@ def test_truncated_gaussian_poincare_is_continuous_at_the_tail_switch() -> None:
     assert np.max(np.abs(np.diff(c))) < 3.5e-5
     mirror = np.array([poincare_constant(GaussianSpec(0.0, 1.0, high=-float(x))) for x in lows])
     np.testing.assert_allclose(c, mirror, rtol=1e-9)
+
+
+@pytest.mark.parametrize("x64", [False, True], ids=["f32", "f64"])
+@pytest.mark.parametrize("standardize", [False, True])
+@pytest.mark.parametrize("c", [0.053902783001748715, 0.1, -3.7])
+def test_constant_output_bounds_are_nan(c, standardize, x64):
+    """A constant output slice has NaN bounds, as the zero-variance warning says.
+
+    A constant float slice's variance rounds to a tiny positive value, so a
+    ``variance == 0`` test missed it and reported ``0 / round-off = 0``.
+    analyze (point and interval) and indices must use the warning's test.
+    """
+    with jax.enable_x64(x64):
+        dtype = jnp.float64 if x64 else jnp.float32
+        X = _sample(500).astype(dtype)
+
+        def fn(x):
+            return jnp.stack([x[0] + x[1] ** 2, jnp.asarray(c, x.dtype)])
+
+        with pytest.warns(jaxgsa.JaxgsaWarning, match="zero variance"):
+            res = dgsm.analyze(
+                PROBLEM,
+                X,
+                fn=fn,
+                standardize_outputs=standardize,
+                n_bootstrap=10,
+                key=0,
+                verbose=False,
+            )
+        ix = dgsm.indices(PROBLEM, X, fn=fn, standardize_outputs=standardize)
+        assert res.upper_bound_conf is not None and res.lower_bound_conf is not None
+        for v in (
+            res.upper_bound[1],
+            res.lower_bound[1],
+            res.upper_bound_conf[:, 1],
+            res.lower_bound_conf[:, 1],
+            ix.upper_bound[1],
+            ix.lower_bound[1],
+        ):
+            assert bool(jnp.all(jnp.isnan(v)))
+        for v in (res.upper_bound[0], res.lower_bound[0], ix.upper_bound[0], ix.lower_bound[0]):
+            assert bool(jnp.all(jnp.isfinite(v)))
+
+
+@pytest.mark.parametrize("x64", [False, True], ids=["f32", "f64"])
+@pytest.mark.parametrize("standardize", [False, True])
+@pytest.mark.parametrize("c", [0.1, 0.0])
+def test_constant_slice_keeps_other_slice_gradients_finite(c, standardize, x64):
+    """grad through indices with a constant slice: finite and unchanged elsewhere.
+
+    The NaN bounds of the constant slice must not leak into the gradient of
+    the other slice, whose value must equal the gradient without the
+    constant slice at all.
+    """
+    with jax.enable_x64(x64):
+        dtype = jnp.float64 if x64 else jnp.float32
+        X = _sample(400).astype(dtype)
+
+        def y0(x):
+            return jnp.sin(x[0]) + 7.0 * jnp.sin(x[1]) ** 2
+
+        def fn2(x):
+            return jnp.stack([y0(x), jnp.asarray(c, x.dtype)])
+
+        def total(X_, fn, pick):
+            out = dgsm.indices(PROBLEM, X_, fn=fn, standardize_outputs=standardize)
+            return jnp.sum(pick(out.upper_bound)) + jnp.sum(pick(out.lower_bound))
+
+        g = jax.grad(total)(X, fn2, lambda a: a[0])
+        g_ref = jax.grad(total)(X, y0, lambda a: a)
+        assert bool(jnp.all(jnp.isfinite(g)))
+        rtol = 1e-10 if x64 else 1e-4
+        np.testing.assert_allclose(np.asarray(g), np.asarray(g_ref), rtol=rtol, atol=rtol)

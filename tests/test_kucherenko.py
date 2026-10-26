@@ -568,3 +568,43 @@ class TestBootstrapMatchesGather:
         chunked = _bootstrap_estimates(*args)
         for a, b in zip(whole, chunked, strict=True):
             np.testing.assert_allclose(a, b, rtol=1e-10, atol=1e-12)
+
+
+def test_bootstrap_chunks_are_released(monkeypatch):
+    """The chunked bootstrap frees each float64 chunk before the next one.
+
+    Each chunk keeps only its joint block. A view into the chunk would keep
+    the whole materialised float64 chunk alive, so the resident host memory
+    would grow to the full float64 design over the chunks. The resident
+    memory at every bootstrap call is checked against that size.
+    """
+    import tracemalloc
+
+    from jaxgsa.kucherenko import _analyze
+
+    D, S = 3, 400
+    problem = Problem.from_dict({f"x{i}": (0.0, 1.0) for i in range(D)})
+    design = jaxgsa.kucherenko.sample(problem, base_n=512, seed=0, verbose=False)
+    X = np.asarray(design.samples)
+    base = (np.sin(6 * X[:, 0]) + X[:, 1] ** 2 + X[:, 0] * X[:, 2]).astype(np.float32)
+    Y = jax.numpy.asarray(base[:, None] * np.linspace(0.5, 1.5, S, dtype=np.float32))
+    design_f64_bytes = X.shape[0] * S * 8
+
+    resident: list[int] = []
+    orig = _analyze._bootstrap_estimates
+
+    def spy(*args, **kwargs):
+        resident.append(tracemalloc.get_traced_memory()[0])
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(_analyze, "_bootstrap_estimates", spy)
+    saved_budget = jaxgsa.config.get_memory_budget(unit="b")
+    jaxgsa.config.set_memory_budget(1, unit="mib")
+    tracemalloc.start()
+    try:
+        jaxgsa.kucherenko.analyze(design, Y, n_bootstrap=16, key=0, verbose=False)
+    finally:
+        tracemalloc.stop()
+        jaxgsa.config.set_memory_budget(saved_budget, unit="b")
+    assert len(resident) > 8  # many chunks, so a leak would accumulate
+    assert max(resident) - resident[0] < design_f64_bytes / 3

@@ -7,7 +7,8 @@ jaxgsa.kucherenko.sample(problem, n_samples=None, *, base_n=None,
                          -> KucherenkoSamples
 
 jaxgsa.kucherenko.analyze(samples, Y, *, n_bootstrap=0, conf_level=0.95,
-                          ci_method="quantile", key=None, on_invalid="raise",
+                          ci_method="quantile", key=None,
+                          slice_chunk_size=None, on_invalid="raise",
                           verbose=True, keep_replicates=False)
                           -> KucherenkoResult | IrregularResult
 ```
@@ -88,6 +89,7 @@ jaxgsa.kucherenko.analyze
     invalid: none found in 4096 base points (policy 'raise')
   timing:
     compute: 0.05247 s
+    slice_chunk_size: 1 (resolved from the memory budget)
     design: gaussian (2D+1 = 7 blocks of 4096 base points)
   results: top 3 of 3 parameters by ST
     1. x2  ST=0.425
@@ -329,7 +331,7 @@ retain sampled rows and provenance, not callable code. VKOGA's declared
 marginals must match the sampler, because its coordinate transform and
 component bases still use them. Training data must cover the analysis
 distribution (see
-[VKOGA training data](/examples/vkoga#training-data-must-cover-the-analysis-distribution)).
+[VKOGA training data](/guide/methods/vkoga#training-data-must-cover-the-analysis-distribution)).
 Dependence fitting remains explicit, never triggered just by supplying data.
 
 See the [complete example](/examples/correlated-inputs#custom-dependence-without-a-copula).
@@ -361,9 +363,15 @@ indices. Base points are not contiguous in the array: base point `k` occupies
 rows `k`, `N + k`, `2N + k` and so on, and `result.invalid` reports them. See
 [Failed model runs](/api/#failed-model-runs).
 
+`slice_chunk_size` caps how many flattened `T*K` output slices the estimators
+read at once. Every index is computed per slice, so it changes the peak memory
+and the wall clock, not the indices. `None` derives it from the memory budget.
+The verbose summary prints the width it used.
+
 `analyze` raises `ValueError` on a `Y` that violates the shape contract, on an
 unknown `on_invalid`, on a non-finite sample under `"raise"`, when fewer than 2
-base points survive a drop, and on the usual bootstrap-argument checks
+base points survive a drop, on a `slice_chunk_size` that is not an integer of at
+least 1, and on the usual bootstrap-argument checks
 (`n_bootstrap < 0`, `conf_level` outside `(0, 1)`, an unknown `ci_method`, or
 `n_bootstrap > 0` with no `key`).
 
@@ -469,5 +477,5 @@ sampler again with `problem.with_sampler(f, sampler_dimension=k)`.
   [Multivariate sensitivity analysis to measure global contribution of input factors in dynamic models](https://doi.org/10.1016/j.ress.2010.12.002).
   *Reliability Engineering & System Safety*, 96(4), 450–459.
 
-See the [Kucherenko example](/examples/kucherenko), [Methods](/guide/methods),
+See the [Kucherenko guide page](/guide/methods/kucherenko), [Methods](/guide/methods),
 and the [API overview](/api/).

@@ -6,6 +6,7 @@ jaxgsa.vkoga.analyze(
     gamma=None,
     ridge=None,
     max_centers=None,
+    greedy_update="exact",
     n_folds=10,
     n_outer=512,
     n_inner=128,
@@ -103,24 +104,23 @@ jaxgsa.vkoga.analyze
     output: N=512 runs, T=1 x K=1 output slice
     invalid: none found in 512 rows (policy 'raise')
   timing:
-    fit + compute: 5.86 s
+    fit + compute: 4.135 s
     n_centers: 120
-    gamma: 7.533
-    ridge: 0.01
-    batch_size: auto (resolved from the memory budget)
+    gamma: 1.135
+    ridge: 4.642e-08
+    batch_size: 5592405 (resolved from the memory budget)
   results: top 3 of 3 parameters by S_TC
-    1. x2  S_TC=0.4913
-    2. x1  S_TC=0.3447
-    3. x3  S_TC=0.0009869
-
-S_TC [0.3447 0.4913 0.001 ]
-S_TU [0.4323 0.4185 0.247 ]
-S_U [0.2535 0.401  0.0009]
-S_C [0.0912 0.0903 0.    ]
-S_IU [0.1788 0.0175 0.2461]
+    1. x2  S_TC=0.515
+    2. x1  S_TC=0.3298
+    3. x3  S_TC=3.409e-05
+S_TC [0.3298 0.515  0.    ]
+S_TU [0.4269 0.4306 0.2452]
+S_U [0.2389 0.4232 0.    ]
+S_C [ 0.0909  0.0918 -0.    ]
+S_IU [0.188  0.0074 0.2452]
 ```
 
-`x3` has `S_TC = 0.001` and `S_TU = 0.247`. It has essentially no first-order
+`x3` has `S_TC` below 0.0001 and `S_TU = 0.245`. It has essentially no first-order
 effect and a large interaction effect, so it is the case where prioritisation
 and fixing disagree completely. `x1` and `x2` each pick up about 0.09 of
 `S_C`, the share that arrives through their 0.7 correlation with each other.
@@ -128,8 +128,8 @@ and fixing disagree completely. `x1` and `x2` each pick up about 0.09 of
 
 The same problem run through
 [`jaxgsa.kucherenko`](/api/kucherenko) on the real model gives
-`S1 = [0.325, 0.525, -0.001]` against `S_TC = [0.345, 0.491, 0.001]`, and
-`ST = [0.412, 0.425, 0.243]` against `S_TU = [0.432, 0.419, 0.247]`. The two
+`S1 = [0.325, 0.525, -0.001]` against `S_TC = [0.330, 0.515, 0.000]`, and
+`ST = [0.412, 0.425, 0.243]` against `S_TU = [0.427, 0.431, 0.245]`. The two
 methods are estimating the same two quantities, one through a surrogate and one
 through 28672 model runs.
 
@@ -210,6 +210,7 @@ See the [runnable custom-dependence example](/examples/correlated-inputs#custom-
 | `gamma` | `None` | Gaussian RBF shape parameter. `None` cross-validates over a grid. |
 | `ridge` | `None` | RKHS regularisation. `None` cross-validates over a grid. |
 | `max_centers` | `None` | Cap on greedily selected kernel centres. `None` means 300, itself capped at `N`. Lower it to cut fit time; too low and the surrogate underfits, which `cv_rmse` reports. |
+| `greedy_update` | `"exact"` | How the greedy updates the power function after each centre. `"exact"` rebuilds it from the whole Newton basis. `"incremental"` subtracts the new basis column only, which makes the greedy loop faster (cross-validation 4.2 s instead of 6.6 s in float64 on a D=8, N=4096 case). Its rounding differs, so it often selects different centres, and the indices move by about their Monte-Carlo error. |
 | `n_folds` | `10` | Folds for the hyperparameter cross-validation. At least 2. |
 | `n_outer` | `512` | Outer (conditioning) sample size per parameter. Rounded up to the next power of two for Sobol' balance. Raise this when `S_TU` looks noisy: it draws a fresh inner block per outer point, so its sampling error falls as `n_outer` grows. It does not help `S_TC`, which reuses one inner block across every outer point. |
 | `n_inner` | `128` | Inner (conditional) sample size per outer point, rounded up to a power of two. `S_TC` drops the i.i.d. inner-noise correction and leans on a large shared inner block, so do not lower `n_inner` to buy speed there: a small `n_inner` inflates a small `S_TC`, and raising `n_outer` will not fix it. |
@@ -219,8 +220,9 @@ See the [runnable custom-dependence example](/examples/correlated-inputs#custom-
 | `on_invalid` | `"raise"` | One training row is one unit, so `"drop"` removes the `(X, Y)` pair. The check runs before the hyperparameter search on purpose: one non-finite `Y` makes every cross-validation score non-finite, and the caller would otherwise meet a `RuntimeError` about failed kernel solves that names the wrong cause. `"drop"` needs at least `n_folds` rows to survive. |
 | `verbose` | `True` | Prints the summary block shown above. |
 
-Leaving both `gamma` and `ridge` to cross-validation costs a 10x10 grid of
-k-fold refits, which dominates the runtime. Pass both once you know good
+Leaving both `gamma` and `ridge` to cross-validation costs a grid of k-fold
+refits (10 `gamma` values by 10 `ridge` values in float32, 14 in float64, where
+the `ridge` grid continues down to about 1.7e-8), which dominates the runtime. Pass both once you know good
 values; the fitted values are reported on the result and in the verbose block.
 
 ## Confidence intervals
@@ -282,10 +284,14 @@ effects.
 
 ## Enable float64
 
-The coefficient solve forms $A^\top A$, which squares the condition number of
-the cross kernel. float32 cannot carry that for a small `gamma`. Call
-`jax.config.update("jax_enable_x64", True)` before fitting. `analyze` emits a
-`JaxgsaWarning` when x64 is off.
+The coefficient solve runs in the Newton basis that the greedy builds, so it
+stays stable in float32. Two float32 limits remain, both at small `gamma`: the
+greedy stops with fewer centres once the power function reaches float32
+rounding, and the kernel sum in prediction loses digits to cancellation. Call
+`jax.config.update("jax_enable_x64", True)` and pass float64 inputs before
+fitting. `analyze` emits a `JaxgsaWarning` whenever the fit runs in float32,
+including float32 inputs with x64 on. The fit runs in the wider dtype of `X`
+and `Y`, and every result field comes back in that dtype.
 
 ## What it refuses
 
@@ -305,7 +311,10 @@ method-specific cases:
 It raises `RuntimeError` when every cross-validation score is non-finite. Since
 the non-finite check now runs first, that is a genuine solver failure.
 
-It warns in four cases: a zero-variance output slice; float32; a cross-validated
+It warns in five cases: a zero-variance output slice, whose indices are NaN; a
+float32 fit; output slices with non-finite values under `on_invalid="propagate"`,
+whose indices are NaN while the other slices are fitted without them (under
+`"skip"` the same happens without a warning); a cross-validated
 error that is a large fraction of the output standard deviation, which makes
 every index untrustworthy; and `S_U` clipped to `S_TU` by a wide margin, which says
 the additive component functions cannot represent the model's interactions.
@@ -318,5 +327,5 @@ the additive component functions cannot represent the model's interactions.
 - Santin, G. & Haasdonk, B. (2021). [Kernel methods for surrogate modeling](https://doi.org/10.1515/9783110498967-009). In *Model Order Reduction, Volume 1: System- and Data-Driven Methods and Algorithms*, 311–354. De Gruyter. Newton basis and regularised kernel approximation.
 - Wirtz, D. & Haasdonk, B. (2013). [A vectorial kernel orthogonal greedy algorithm](https://doi.org/10.14658/PUPJ-DRNA-2013-Special_Issue-10). *Dolomites Research Notes on Approximation*, 6, 83–100. Source of the VKOGA name and a target-dependent selection variant.
 
-See the [VKOGA example](/examples/vkoga), [Methods](/guide/methods), and the
+See the [VKOGA guide page](/guide/methods/vkoga), [Methods](/guide/methods), and the
 [API overview](/api/).

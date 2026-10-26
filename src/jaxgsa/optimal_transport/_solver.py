@@ -59,6 +59,114 @@ _CHECK_EVERY = 10
 _GMRES_RESTART = 30
 
 
+def _log_kernel(C: Array, epsilon: Array, scale: Array) -> tuple[Array, Array]:
+    """Floor the cost normalizer and form the log-kernel.
+
+    Args:
+        C: Cost matrix, shape ``(N, P)``.
+        epsilon: Entropic regularization strength relative to ``scale``.
+        scale: The cost normalizer (scalar).
+
+    Returns:
+        ``(scale, log_K)``: the floored normalizer and the ``(N, P)``
+        log-kernel ``-(C / scale) / epsilon``.
+    """
+    dtype = C.dtype
+    # Regularization relative to the index's own normalizer, not the cost
+    # matrix's per-class maximum: see the docstring of _sinkhorn_w2.
+    scale = jnp.maximum(scale, jnp.asarray(jnp.finfo(dtype).tiny, dtype))
+    return scale, -(C / scale) / epsilon
+
+
+def _log_source(C: Array) -> Array:
+    """Log weights of the uniform source over the ``N`` rows of ``C``."""
+    N = C.shape[0]
+    return jnp.full((N,), -jnp.log(N), dtype=C.dtype)
+
+
+def _loop_potential(
+    log_K: Array, log_b: Array, log_a: Array, max_iter: Array, tol: Array
+) -> tuple[Array, Array]:
+    """Run the log-domain Sinkhorn loop to its stopping rule.
+
+    Args:
+        log_K: Log-kernel, shape ``(N, P)``.
+        log_b: Log target weights, shape ``(P,)``, ``-inf`` on padding.
+        log_a: Log source weights, shape ``(N,)``.
+        max_iter: Iteration cap (scalar).
+        tol: Stopping tolerance on the L1 target-marginal violation.
+
+    Returns:
+        ``(g_safe, err)``: the target potential with the padded entries
+        set to 0, and the L1 target-marginal violation at exit.
+    """
+    dtype = log_K.dtype
+    N = log_K.shape[0]
+    b = jnp.exp(log_b)
+    valid = jnp.isfinite(log_b)
+
+    def _err(log_f: Array, log_g: Array) -> Array:
+        """L1 violation of the target marginal of the implied plan."""
+        log_plan = log_f[:, None] + log_K + log_g[None, :]
+        return jnp.abs(jnp.exp(logsumexp(log_plan, axis=0)) - b).sum()
+
+    def _body(state: tuple[Array, Array, Array, Array]):
+        log_f, log_g, it, err = state
+        # Alternate scaling: after the f-update the source marginal is
+        # exact, so convergence is measured on the target side.
+        log_g = log_b - logsumexp(log_K + log_f[:, None], axis=0)
+        log_f = log_a - logsumexp(log_K + log_g[None, :], axis=1)
+        it = it + 1
+        # Measuring the residual costs a third full (N, P) reduction per
+        # iteration, so amortize it: refresh every _CHECK_EVERY iterations
+        # and on the final one; the carried value persists in between (it
+        # is > tol by construction, or the loop would have exited).
+        err = jax.lax.cond(
+            (it % _CHECK_EVERY == 0) | (it >= max_iter),
+            lambda: _err(log_f, log_g),
+            lambda: err,
+        )
+        return (log_f, log_g, it, err)
+
+    def _cond(state: tuple[Array, Array, Array, Array]) -> Array:
+        _, _, it, err = state
+        return (err > tol) & (it < max_iter)
+
+    init = (
+        jnp.zeros(N, dtype=dtype),
+        jnp.zeros(log_b.shape, dtype=dtype),
+        jnp.asarray(0, dtype=jnp.int32),
+        jnp.asarray(jnp.inf, dtype=dtype),
+    )
+    _, log_g, _, err = jax.lax.while_loop(_cond, _body, _body(init))
+    return jnp.where(valid, log_g, 0.0), err
+
+
+def _sinkhorn_potential(
+    C: Array, log_b: Array, epsilon: Array, max_iter: Array, tol: Array, scale: Array
+) -> tuple[Array, Array]:
+    """Run only the Sinkhorn loop of :func:`_sinkhorn_w2`, with no derivative.
+
+    Pass the result to :func:`_sinkhorn_w2` as ``potential``. The arguments
+    are those of :func:`_sinkhorn_w2`. Call it on values outside any
+    derivative (for example under ``jax.lax.stop_gradient``), because the
+    loop itself is not differentiable in reverse mode.
+
+    Args:
+        C: Cost matrix, shape ``(N, P)``.
+        log_b: Log target weights, shape ``(P,)``.
+        epsilon: Entropic regularization strength relative to ``scale``.
+        max_iter: Iteration cap (scalar).
+        tol: Stopping tolerance (scalar).
+        scale: The cost normalizer (scalar).
+
+    Returns:
+        ``(g_safe, err)``, as :func:`_loop_potential` returns them.
+    """
+    _, log_K = _log_kernel(C, epsilon, scale)
+    return _loop_potential(log_K, log_b, _log_source(C), max_iter, tol)
+
+
 def _sinkhorn_w2(
     C: Array,
     log_b: Array,
@@ -66,6 +174,7 @@ def _sinkhorn_w2(
     max_iter: Array,
     tol: Array,
     scale: Array,
+    potential: tuple[Array, Array] | None = None,
 ) -> tuple[Array, Array]:
     """Entropic OT cost from a uniform source onto one masked target class.
 
@@ -100,6 +209,12 @@ def _sinkhorn_w2(
         scale: The cost normalizer (scalar), the same one the caller
             divides the index by. Must be positive; the caller guards the
             degenerate (zero-variance) case before calling.
+        potential: The ``(g_safe, err)`` that :func:`_sinkhorn_potential`
+            returned for the same arguments, or ``None`` to run the loop
+            here. Passing it skips the loop and gives the same value and
+            the same derivative. A ``jax.checkpoint`` around this call then
+            rebuilds the cost blocks in the backward pass without solving
+            again.
 
     Returns:
         A tuple ``(cost, err)``. ``cost`` is the transport cost ``<P, C>``
@@ -108,40 +223,14 @@ def _sinkhorn_w2(
         ``err <= tol`` means the solve converged.
     """
     dtype = C.dtype
-    N = C.shape[0]
-    b = jnp.exp(log_b)
-    # Regularization relative to the index's own normalizer, not the cost
-    # matrix's per-class maximum: see the docstring above.
-    scale = jnp.maximum(scale, jnp.asarray(jnp.finfo(dtype).tiny, dtype))
-    log_K = -(C / scale) / epsilon  # (N, P) log-kernel
-    log_a = jnp.full((N,), -jnp.log(N), dtype=dtype)
+    scale, log_K = _log_kernel(C, epsilon, scale)
+    log_a = _log_source(C)
 
-    def _err(log_f: Array, log_g: Array) -> Array:
-        """L1 violation of the target marginal of the implied plan."""
-        log_plan = log_f[:, None] + log_K + log_g[None, :]
-        return jnp.abs(jnp.exp(logsumexp(log_plan, axis=0)) - b).sum()
-
-    def _body(state: tuple[Array, Array, Array, Array]):
-        log_f, log_g, it, err = state
-        # Alternate scaling: after the f-update the source marginal is
-        # exact, so convergence is measured on the target side.
-        log_g = log_b - logsumexp(log_K + log_f[:, None], axis=0)
-        log_f = log_a - logsumexp(log_K + log_g[None, :], axis=1)
-        it = it + 1
-        # Measuring the residual costs a third full (N, P) reduction per
-        # iteration, so amortize it: refresh every _CHECK_EVERY iterations
-        # and on the final one; the carried value persists in between (it
-        # is > tol by construction, or the loop would have exited).
-        err = jax.lax.cond(
-            (it % _CHECK_EVERY == 0) | (it >= max_iter),
-            lambda: _err(log_f, log_g),
-            lambda: err,
-        )
-        return (log_f, log_g, it, err)
-
-    def _cond(state: tuple[Array, Array, Array, Array]) -> Array:
-        _, _, it, err = state
-        return (err > tol) & (it < max_iter)
+    def _solve(_residual_fn, _guess: Array) -> tuple[Array, Array]:
+        """Run the stopping-rule loop, or return the caller's converged one."""
+        if potential is not None:
+            return potential
+        return _loop_potential(log_K, log_b, log_a, max_iter, tol)
 
     # Padded target columns hold log_g = -inf. The implicit derivative below
     # needs a finite root variable, so it works on log_g with the pads set
@@ -158,17 +247,6 @@ def _sinkhorn_w2(
         """One full scaling update of log_g minus log_g. Zero at the fixed point."""
         g_next = log_b - logsumexp(log_K + _f_from_g(g_safe)[:, None], axis=0)
         return jnp.where(valid, g_next, 0.0) - g_safe
-
-    def _solve(_residual_fn, _guess: Array) -> tuple[Array, Array]:
-        """Run the stopping-rule loop. Its iterates are the reported values."""
-        init = (
-            jnp.zeros(N, dtype=dtype),
-            jnp.zeros(log_b.shape, dtype=dtype),
-            jnp.asarray(0, dtype=jnp.int32),
-            jnp.asarray(jnp.inf, dtype=dtype),
-        )
-        _, log_g, _, err = jax.lax.while_loop(_cond, _body, _body(init))
-        return jnp.where(valid, log_g, 0.0), err
 
     n_valid = jnp.maximum(valid.sum(), 1)
 

@@ -29,25 +29,25 @@ def legendre_orthonormal(x: Array | np.ndarray, max_degree: int) -> Array | np.n
     the uniform measure on ``[-1, 1]`` (weight 1/2).
 
     The implementation follows the input type. JAX arrays (including tracers)
-    stay JAX. NumPy arrays stay NumPy. The recurrence runs in the backend's
-    default float dtype (float64 under x64), which is the same promotion the
-    Hermite basis applies. A float32 ``x`` therefore does not silently
-    downgrade a PCE design matrix, and mixed uniform/Gaussian problems get one
-    basis dtype.
+    stay JAX. NumPy arrays stay NumPy. A floating JAX ``x`` keeps its dtype,
+    as the Hermite basis does, so float32 data gives a float32 design matrix
+    under x64 too. A non-floating JAX ``x`` is cast to the backend's default
+    float dtype. A NumPy ``x`` always runs in float64 (the VKOGA
+    component fit relies on that).
 
     Args:
         x: ``(...,)`` points in ``[-1, 1]``.
         max_degree: Highest polynomial degree.
 
     Returns:
-        ``(..., max_degree + 1)`` basis values, in the default float dtype.
+        ``(..., max_degree + 1)`` basis values, in the dtype described above.
     """
     on_device = isinstance(x, jax.Array)
     xp = jnp if on_device else np
-    # The JAX backend's default float is float32 or float64 depending on the
-    # x64 flag; NumPy's is always float64. One helper answers the first
-    # question, so the flag is not read a third way here.
-    x = x.astype(default_float_dtype() if on_device else np.float64)
+    if not on_device:
+        x = x.astype(np.float64)
+    elif not jnp.issubdtype(x.dtype, jnp.floating):
+        x = x.astype(default_float_dtype())
     columns = [xp.ones_like(x)]
     if max_degree >= 1:
         columns.append(x)

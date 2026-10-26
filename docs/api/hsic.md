@@ -67,7 +67,7 @@ jaxgsa.hsic.analyze
 
 [0.135  0.0097 0.0252]
 [0.7996 0.0712 0.1873]
-[0.005  0.005  0.005 ]
+[0.005 0.005 0.005]
 ```
 
 That is the Ishigami function. `x3` enters it only through the `x3^4 * sin(x1)`
@@ -79,12 +79,14 @@ significant and none of them is more significant than the others.
 `verbose=True` is the default and produced the block above. Pass
 `verbose=False` for a silent run.
 
-## Memory is quadratic in N, and nothing bounds it
+## Memory is quadratic in N, and the budget bounds it
 
-The estimator holds the `D` input kernels, the `D` augmented complement
-products, the full augmented product and one output kernel at the same time.
-Peak memory is about `(2D + 1) * N^2` floats. At `D = 10` and `N = 20000` in
-float64 that is 67 GB.
+The estimator works on dense `N x N` kernels. It holds only as many input
+kernels at once as `jaxgsa.config.set_memory_budget` allows, and builds the
+rest again when it needs them. A smaller budget costs time, not accuracy. The
+estimator always needs about six `N x N` matrices, so at a large `N` a small
+budget is exceeded by that floor. At `N = 20000` in float64 one such matrix
+is 3.2 GB.
 
 **`analyze` takes no `batch_size`, on purpose.** A row-blocked kernel build was
 tried and removed: it bounded a transient of the build while the resident
@@ -162,10 +164,11 @@ the non-finite policy refuses, and any categorical parameter. Categorical
 parameters are rejected because the Gaussian input kernel would read a level
 code as a distance, and the code order is arbitrary.
 
-It warns on a zero-variance output slice, and on float32. The V-statistic
-subtracts three sums of the same magnitude, so single precision leaves three or
-four correct digits and the index moves with the row order of the sample. Turn
-x64 on before you trust a small index or a close ranking.
+It warns on a zero-variance output slice, on a constant input, and when
+near-ties make the median bandwidth almost zero. It does not warn on float32.
+The index is one sum over the product of two centred kernels, so no large sums
+cancel. On Ishigami up to N = 4096, float32 stays within 3e-6 relative of
+float64 for every parameter, a dummy input included.
 
 ## Traceable core
 
@@ -180,5 +183,5 @@ and has no default there either.
 - Da Veiga, S. (2015). [Global sensitivity analysis with dependence measures](https://doi.org/10.1080/00949655.2014.945932). *Journal of Statistical Computation and Simulation*, 85(7), 1283–1305. Develops dependence-based sensitivity measures, including normalized HSIC.
 - Larsen, T., and Alexanderian, A. (2026). [A new kernel-based approach for the global sensitivity analysis of models with correlated inputs](https://arxiv.org/abs/2603.00849). *arXiv preprint*, arXiv:2603.00849. Develops total HSIC indices using augmented kernels.
 
-See the [HSIC example](/examples/hsic), [Methods](/guide/methods), and the
+See the [HSIC guide page](/guide/methods/hsic), [Methods](/guide/methods), and the
 [API overview](/api/).

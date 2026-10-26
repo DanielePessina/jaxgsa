@@ -50,16 +50,16 @@ References:
 
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import Literal, NamedTuple, cast, overload
 
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.batching import get_memory_budget
+from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
 from jaxgsa._core.bootstrap import draw_row_matrix, interval
-from jaxgsa._core.entry import _user_stacklevel, bootstrap_checks, prepare
+from jaxgsa._core.entry import _user_stacklevel, bootstrap_checks, positive_int, prepare
 from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -72,6 +72,7 @@ from jaxgsa._core.result import CIInfo
 from jaxgsa._core.sampling import require_design
 from jaxgsa._core.validation import (
     _warn_zero_variance_slices,
+    _zero_variance_stats_of,
     as_key,
 )
 from jaxgsa.kucherenko._result import KucherenkoResult
@@ -85,65 +86,180 @@ _IRREGULAR_KWARGS = (
     "conf_level",
     "ci_method",
     "key",
+    "slice_chunk_size",
     "on_invalid",
     "keep_replicates",
 )
 
 
+class _HostBlocks:
+    """Design blocks of ``Y`` on the host, converted to float64 one block at a time.
+
+    The estimators read one ``(N, S)`` block at a time, so the float64 copy of
+    the whole design (twice the size of a float32 ``Y``) never has to exist.
+    Indexing with an integer converts that block (and drops the removed base
+    points); indexing with a slice returns a narrower lazy view. An
+    ``ndarray`` of shape ``(M, N, S)`` supports the same two operations, so
+    every estimator below takes either.
+    """
+
+    def __init__(
+        self,
+        Y_blocks: np.ndarray,
+        keep: np.ndarray | None,
+        cols: slice,
+        rows: range | None = None,
+    ) -> None:
+        """Wrap ``(n_blocks, N, S)`` outputs at their own dtype.
+
+        Args:
+            Y_blocks: The design outputs, blocks first. Not copied.
+            keep: Boolean mask of the surviving base points, shape ``(N,)``,
+                or ``None`` when every point survives.
+            cols: The output slices to read.
+            rows: The blocks this view covers. ``None`` means all of them.
+        """
+        self._Y = Y_blocks
+        self._keep = keep
+        self._cols = cols
+        self._rows = range(Y_blocks.shape[0]) if rows is None else rows
+
+    def __len__(self) -> int:
+        """Number of blocks in the view."""
+        return len(self._rows)
+
+    @overload
+    def __getitem__(self, index: int) -> np.ndarray: ...
+    @overload
+    def __getitem__(self, index: slice) -> _HostBlocks: ...
+    def __getitem__(self, index: int | slice) -> np.ndarray | _HostBlocks:
+        """Return block ``index`` as float64 ``(N, S)``, or a narrower view."""
+        if isinstance(index, slice):
+            return _HostBlocks(self._Y, self._keep, self._cols, self._rows[index])
+        block = np.asarray(self._Y[self._rows[index], :, self._cols], dtype=np.float64)
+        return block if self._keep is None else block[self._keep]
+
+    def materialize(self) -> np.ndarray:
+        """Every block of the view at once, shape ``(M, N, S)``, in float64."""
+        return np.stack([self[m] for m in range(len(self))])
+
+
+_Blocks = np.ndarray | _HostBlocks
+"""An ``(M, N, S)`` stack of blocks: an array, or a lazy :class:`_HostBlocks`."""
+
+
+class _JointMoments(NamedTuple):
+    """What the per-block estimators reuse from the joint block.
+
+    Attributes:
+        f_joint: Joint-block outputs, shape ``(N, S)``.
+        f0: Joint-block mean, the shared shift, shape ``(S,)``.
+        g_joint: Joint block centred on ``f0``, shape ``(N, S)``.
+        g_joint_mean: Mean of ``g_joint`` (rounding-level, kept for exactness),
+            shape ``(S,)``.
+        safe_variance: Output variance with ``NaN`` where it is not positive,
+            shape ``(S,)``.
+    """
+
+    f_joint: np.ndarray
+    f0: np.ndarray
+    g_joint: np.ndarray
+    g_joint_mean: np.ndarray
+    safe_variance: np.ndarray
+
+    @classmethod
+    def of(cls, f_joint: np.ndarray, safe_variance: np.ndarray) -> _JointMoments:
+        """Compute the moments of ``f_joint`` once, for every block after it."""
+        f0 = f_joint.mean(axis=0)
+        g_joint = f_joint - f0
+        return cls(f_joint, f0, g_joint, g_joint.mean(axis=0), safe_variance)
+
+
+def _closed_one(joint: _JointMoments, f_block: np.ndarray) -> np.ndarray:
+    """Single-loop closed (first-order) estimate for one block.
+
+    Both factors are shifted by one shared constant (the joint-block mean)
+    before the product. The estimator is algebraically unchanged: for any
+    shift c, mean((a-c)(b-c)) - mean(a-c) mean(b-c) == mean(ab) - mean(a)
+    mean(b). Numerically it is decisive: the uncentered product form loses the
+    O(1) covariance in rounding when Y carries a large mean, because
+    mean(f_joint f_first) and f0_joint f0_first are both O(mean^2). The cross
+    moment is an einsum, a per-slice dot product that never forms the
+    ``(N, S)`` product.
+
+    Args:
+        joint: Moments of the joint block.
+        f_block: Outputs of a block that keeps some columns of the joint rows,
+            shape ``(N, S)``.
+
+    Returns:
+        ``V(E(Y | kept columns)) / V(Y)``, shape ``(S,)``.
+    """
+    g_block = f_block - joint.f0
+    n = joint.f_joint.shape[0]
+    cov = np.einsum("ns,ns->s", g_block, joint.g_joint) / n
+    return (cov - joint.g_joint_mean * g_block.mean(axis=0)) / joint.safe_variance
+
+
+def _jansen_one(joint: _JointMoments, f_block: np.ndarray) -> np.ndarray:
+    """Jansen squared-difference estimate of ``E(V(Y | kept columns)) / V(Y)``.
+
+    It is a squared difference over a central-moment variance, so it is
+    shift-safe as it stands, and exactly 0 when the model ignores the redrawn
+    columns.
+
+    Args:
+        joint: Moments of the joint block.
+        f_block: Block outputs, shape ``(N, S)``.
+
+    Returns:
+        Shape ``(S,)``.
+    """
+    diff = joint.f_joint - f_block
+    np.square(diff, out=diff)
+    return 0.5 * diff.mean(axis=0) / joint.safe_variance
+
+
 def _closed_estimate(
-    f_joint: np.ndarray, f_block: np.ndarray, safe_variance: np.ndarray
+    f_joint: np.ndarray, f_block: _Blocks, safe_variance: np.ndarray
 ) -> np.ndarray:
-    """Single-loop closed (first-order) estimator for a stack of blocks.
+    """Closed (first-order) estimate of every block in a stack, one block at a time.
 
     Args:
         f_joint: Joint-block outputs, shape ``(N, S)``.
-        f_block: Outputs of blocks that keep some columns of the joint rows,
-            shape ``(M, N, S)``.
+        f_block: Block outputs, shape ``(M, N, S)``.
         safe_variance: Output variance with ``NaN`` where it is not positive,
             shape ``(S,)``.
 
     Returns:
-        ``V(E(Y | kept columns)) / V(Y)`` per block, shape ``(M, S)``.
+        Shape ``(M, S)``. See :func:`_closed_one`.
     """
-    N = f_joint.shape[0]
-    # Shift both factors by one shared constant (the joint-block mean)
-    # before the product. The estimator is algebraically unchanged: for any
-    # shift c, mean((a-c)(b-c)) - mean(a-c) mean(b-c) == mean(ab) - mean(a)
-    # mean(b). Numerically it is decisive: the uncentered product form loses
-    # the O(1) covariance in rounding when Y carries a large mean, because
-    # mean(f_joint f_first) and f0_joint f0_first are both O(mean^2). The ST
-    # estimator is a squared difference and the variance is a central moment,
-    # so both are already shift-safe.
-    f0_joint = f_joint.mean(axis=0)  # (S,)
-    g_joint = f_joint - f0_joint  # (N, S), centered
-    g_block = f_block - f0_joint[None, None]  # (M, N, S), same shift
-    # The cross-moment is a sum over the sample axis of a per-(m, s) dot
-    # product. The broadcast-multiply-then-mean form materialises a
-    # (M, N, S) intermediate; einsum accumulates the same dot without it.
-    # Both operate on the *centred* factors, so the shift-safety the
-    # estimator was designed for is unchanged (the two agree to ~1e-17 in
-    # float64, pure reassociation noise).
-    return (
-        np.einsum("dns,ns->ds", g_block, g_joint) / N
-        - g_joint.mean(axis=0)[None] * g_block.mean(axis=1)
-    ) / safe_variance
+    joint = _JointMoments.of(f_joint, safe_variance)
+    out = np.empty((len(f_block), f_joint.shape[1]))
+    for m in range(len(f_block)):
+        out[m] = _closed_one(joint, f_block[m])
+    return out
 
 
 def _jansen_estimate(
-    f_joint: np.ndarray, f_block: np.ndarray, safe_variance: np.ndarray
+    f_joint: np.ndarray, f_block: _Blocks, safe_variance: np.ndarray
 ) -> np.ndarray:
-    """Jansen squared-difference estimator of ``E(V(Y | kept columns)) / V(Y)``.
+    """Jansen estimate of every block in a stack, one block at a time.
 
     The arguments are as in :func:`_closed_estimate`. The result has shape
-    ``(M, S)`` and is exactly 0 when the model ignores the redrawn columns.
+    ``(M, S)``. See :func:`_jansen_one`.
     """
-    return 0.5 * ((f_joint[None] - f_block) ** 2).mean(axis=1) / safe_variance
+    joint = _JointMoments.of(f_joint, safe_variance)
+    out = np.empty((len(f_block), f_joint.shape[1]))
+    for m in range(len(f_block)):
+        out[m] = _jansen_one(joint, f_block[m])
+    return out
 
 
 def _estimate(
     f_joint: np.ndarray,
-    f_first: np.ndarray,
-    f_total: np.ndarray,
+    f_first: _Blocks,
+    f_total: _Blocks,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Run both single-loop estimators on one block of base points.
 
@@ -169,7 +285,7 @@ def _estimate(
 
 
 def _estimate_subsets(
-    f_a: np.ndarray, f_b: np.ndarray, f_blocks: np.ndarray, n_params: int
+    f_a: np.ndarray, f_b: np.ndarray, f_blocks: _Blocks, n_params: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Closed and total index of every subset from the ``subsets="all"`` design.
 
@@ -200,8 +316,15 @@ def _estimate_subsets(
     n_masks = 2**n_params - 1
     variance = np.concatenate([f_a, f_b], axis=0).var(axis=0)
     safe_variance = np.where(variance > 0.0, variance, np.nan)
-    closed_blocks = _closed_estimate(f_a, f_blocks, safe_variance)
-    total_of_complement = _jansen_estimate(f_a, f_blocks, safe_variance)
+    # One pass over the blocks for both estimates, so a lazy block is
+    # converted once.
+    joint = _JointMoments.of(f_a, safe_variance)
+    closed_blocks = np.empty((len(f_blocks), f_a.shape[1]))
+    total_of_complement = np.empty_like(closed_blocks)
+    for m in range(len(f_blocks)):
+        block = f_blocks[m]
+        closed_blocks[m] = _closed_one(joint, block)
+        total_of_complement[m] = _jansen_one(joint, block)
     one = np.where(variance > 0.0, 1.0, np.nan)
     closed = np.concatenate([closed_blocks, one[None]], axis=0)
     # total(u) comes from the block that keeps the complement of u.
@@ -209,6 +332,13 @@ def _estimate_subsets(
     total = np.concatenate([total_of_complement[complement - 1], one[None]], axis=0)
     return closed, total, variance
 
+
+# Live float64 (N,) columns per output slice while the point estimators run
+# one block at a time: the joint block and its centred copy, the converted
+# block and its centred copy or squared difference, and the second joint
+# block plus the pooled copy for the variance of subsets="all". The automatic
+# slice chunk width is sized against this and the memory budget.
+_KUCHERENKO_LIVE_COPIES = 6
 
 # Largest (chunk, N) weight matrix the bootstrap builds, in elements (32 MiB).
 _BOOT_WEIGHT_ELEMENTS = 1 << 22
@@ -366,6 +496,7 @@ def analyze(
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | int | None = None,
+    slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
@@ -413,6 +544,13 @@ def analyze(
         key: A ``jax.random`` key for the bootstrap resampling. Required when
             ``n_bootstrap > 0``. Pass ``jax.random.key(0)`` if you have an
             integer seed.
+        slice_chunk_size: Maximum number of flattened ``T*K`` output slices
+            the estimators read at once. Every index is computed per slice,
+            so the value changes only the peak memory and the wall clock,
+            never an index. ``None`` (default) derives one from the active
+            memory budget (:func:`jaxgsa.config.set_memory_budget`). An
+            explicit value wins over the budget, is clamped to the number of
+            slices, and must be an integer of at least 1.
         on_invalid: What to do about non-finite model outputs. The unit here
             is one base point, which appears once in the joint block and once
             in each of the ``2D`` conditional blocks, so a single bad value
@@ -442,8 +580,9 @@ def analyze(
             holds a non-finite value under ``on_invalid="raise"``; if fewer
             than 2 base points survive a drop; if ``n_bootstrap`` is negative,
             ``conf_level`` is not in ``(0, 1)``, ``ci_method`` is not
-            ``"quantile"`` or ``"gaussian"``, or ``n_bootstrap > 0`` and no
-            ``key`` was given.
+            ``"quantile"`` or ``"gaussian"``, ``n_bootstrap > 0`` and no
+            ``key`` was given, or ``slice_chunk_size`` is given and is not an
+            integer of at least 1.
 
     Warns:
         JaxgsaWarning: If any output slice has zero variance (its indices are
@@ -480,7 +619,10 @@ def analyze(
         problem,
         Y,
         on_invalid=on_invalid,
-        checks=bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
+        checks=(
+            *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
+            positive_int("slice_chunk_size", slice_chunk_size),
+        ),
         n_expected=samples.n_runs,
         # A base point k feeds the joint row and every conditional row with
         # the same k, so one non-finite output anywhere invalidates all of
@@ -497,51 +639,108 @@ def analyze(
         warn_zero_variance=False,
     )
     keep, invalid = ctx.keep, ctx.invalid
-    Y_canonical = ctx.Y3
-    n_time, n_out = Y_canonical.shape[1], Y_canonical.shape[2]
+    layout = ctx.layout
+    n_time, n_out = ctx.Y3.shape[1], ctx.Y3.shape[2]
+    out_axes = ctx.Y.shape[1:]
+    # The host estimators run in float64; the results come back in Y's dtype
+    # (float32 data stays float32 under x64).
+    out_dtype = (
+        ctx.Y.dtype if jnp.issubdtype(ctx.Y.dtype, jnp.floating) else jnp.result_type(float)
+    )
     n_slices = n_time * n_out
-    # (n_blocks, N, S) — block-major, matching the design's stacking order.
-    F = np.asarray(Y_canonical, dtype=np.float64).reshape(n_blocks, N, n_slices)
-    if not keep.all():
-        F = F[:, keep, :]
+    # A host view of the caller's Y, blocks first. On a CPU backend this is
+    # zero-copy, and NumPy's reshape of it is a view. ctx is dropped so the
+    # promoted copy it holds (ctx.Y3, a full copy of Y for rank 1 or 2) does
+    # not stay alive through the estimators.
+    Y_blocks = np.asarray(ctx.Y).reshape(n_blocks, N, n_slices)
+    del ctx
+    n_kept = int(keep.sum())
 
-    f_joint = F[0]  # (N, S)
-    if all_subsets:
-        f_other = F[1]  # (N, S) — independent joint block B
-        f_sub = F[2:]  # (2^D - 2, N, S) — block for mask m at row m - 1
-        f_first = f_total = None
-    else:
-        f_first = F[1 : D + 1]  # (D, N, S) — z redrawn given x_i
-        f_total = F[D + 1 :]  # (D, N, S) — x_i redrawn given z
+    t0 = _verbose.tic()
+    idx = None
+    if n_bootstrap > 0:
+        assert key is not None  # refused by the missing-key check above
+        idx = np.asarray(draw_row_matrix(key, n_bootstrap, n_kept))
 
-    # Warned on the caller's own output rank, so a (N, K) output reads "k=1"
-    # and not the made-up "(t=0, k=1)" the inserted time axis would give.
+    # The estimators work in float64 on the host. Converting all of Y at
+    # once costs twice its float32 size, plus the estimators' temporaries on
+    # top. Instead the point estimates read one (N, S) block at a time
+    # (_HostBlocks), and only when even that is over the memory budget (or
+    # the caller set slice_chunk_size) are the output slices taken a chunk at
+    # a time. Every estimate is per slice,
+    # so neither choice changes an index. The bootstrap reads every block of
+    # a chunk many times, so it converts its chunk once, sized to half the
+    # budget; it sizes its own resample temporaries from the budget.
+    per_slice = 2 * n_blocks * N * 8 if n_bootstrap > 0 else _KUCHERENKO_LIVE_COPIES * N * 8
+    width = resolve_batch_size(per_slice, n_slices, slice_chunk_size)
+    keep_mask = None if keep.all() else keep
+    parts: list[tuple[np.ndarray, ...]] = []
+    boot_parts: list[tuple[np.ndarray, np.ndarray]] = []
+    joint_parts: list[np.ndarray] = []
+    for start in range(0, n_slices, width):
+        lazy = _HostBlocks(Y_blocks, keep_mask, slice(start, start + width))
+        F: _Blocks = lazy.materialize() if idx is not None else lazy
+        f_joint = F[0]  # (N, w)
+        # Keep a copy: a view of F[0] would keep the whole materialised
+        # float64 chunk alive after ``del F``, for every chunk.
+        joint_parts.append(np.array(f_joint))
+        if all_subsets:
+            f_other = F[1]  # (N, w) — independent joint block B
+            f_sub = F[2:]  # (2^D - 2, N, w) — block for mask m at row m - 1
+            parts.append(_estimate_subsets(f_joint, f_other, f_sub, D))
+            if idx is not None:
+                assert isinstance(f_sub, np.ndarray)
+                boot_parts.append(_bootstrap_estimates(idx, f_joint, f_sub, None, f_other, D))
+        else:
+            f_first = F[1 : D + 1]  # (D, N, w) — z redrawn given x_i
+            f_total = F[D + 1 :]  # (D, N, w) — x_i redrawn given z
+            parts.append(_estimate(f_joint, f_first, f_total))
+            if idx is not None:
+                assert isinstance(f_first, np.ndarray) and isinstance(f_total, np.ndarray)
+                boot_parts.append(_bootstrap_estimates(idx, f_joint, f_first, f_total, None, D))
+        del F
+
+    # The joint block is 1 / n_blocks of the design, so the whole of it is
+    # cheap to hold for the one zero-variance warning over every slice.
+    f_joint = joint_parts[0] if len(joint_parts) == 1 else np.concatenate(joint_parts, axis=1)
+    del joint_parts
+    # One scan feeds the warning and the NaN mask below, so the slices the
+    # warning names are exactly the slices reported as NaN. The estimators'
+    # own ``variance > 0`` test misses a constant slice in float64: its mean
+    # rounds, so its variance is round-off (1e-31), not 0, and the indices
+    # came out as round-off ratios (0 for c = 0.1) instead of NaN.
+    zero_stats = _zero_variance_stats_of(cast(Array, f_joint))
+    zero_slices = np.asarray(zero_stats[0])  # (S,)
     _warn_zero_variance_slices(
-        f_joint.reshape((-1, *ctx.Y.shape[1:])),
+        # Read on the host, like the rest of this module (see its docstring).
+        cast(Array, f_joint.reshape((-1, *out_axes))),
         output_names=problem.output_names,
         method="jaxgsa.kucherenko.analyze",
         stacklevel=_user_stacklevel(),
+        zero_stats=zero_stats,
     )
-    t0 = _verbose.tic()
+    first_est, second_est, variance = (
+        np.concatenate([part[i] for part in parts], axis=-1) for i in range(3)
+    )
+    # (M, S) estimates: a flagged slice is NaN in every index, as warned.
+    first_est = np.where(zero_slices, np.nan, first_est)
+    second_est = np.where(zero_slices, np.nan, second_est)
     closed = subset_total = None
-    # The singleton indices of a subsets="all" design sit at the masks 2^i:
-    # S1_i from the block that keeps {i}, ST_i from the block that keeps every
-    # column but i (read through the total index of {i}).
     singles = (1 << np.arange(D)) - 1
     if all_subsets:
-        closed, subset_total, variance = _estimate_subsets(f_joint, f_other, f_sub, D)
+        closed, subset_total = first_est, second_est
         S1, ST = closed[singles], subset_total[singles]
     else:
-        assert f_first is not None and f_total is not None
-        S1, ST, variance = _estimate(f_joint, f_first, f_total)
+        S1, ST = first_est, second_est
 
     def _shape(index: np.ndarray) -> Array:
         """Reshape a ``(..., M, S)`` block to the output contract, ``M`` last."""
         lead = index.shape[:-2]
         arr = jnp.asarray(
-            np.moveaxis(index, -2, -1).reshape(*lead, n_time, n_out, index.shape[-2])
+            np.moveaxis(index, -2, -1).reshape(*lead, n_time, n_out, index.shape[-2]),
+            dtype=out_dtype,
         )
-        return ctx.squeeze(arr, n_trailing=1)
+        return layout.squeeze(arr, n_trailing=1)
 
     S1_conf: Array | None = None
     ST_conf: Array | None = None
@@ -549,22 +748,11 @@ def analyze(
     subset_total_conf: Array | None = None
     ci: CIInfo | None = None
     if n_bootstrap > 0:
-        assert key is not None  # refused by the missing-key check above
-        n_kept = f_joint.shape[0]
-        idx = np.asarray(draw_row_matrix(key, n_bootstrap, n_kept))
-
-        # Resamples read through count weights (no gathered block copies).
-        boot_first, boot_second = _bootstrap_estimates(
-            idx,
-            f_joint,
-            f_sub if f_first is None else f_first,
-            f_total,
-            f_other if all_subsets else None,
-            D,
+        boot_first, boot_second = (
+            np.concatenate([part[i] for part in boot_parts], axis=-1) for i in range(2)
         )  # (R, D or 2^D - 1, S)
-        # _shape already squeezes to the caller's own rank; interval() reads
-        # a shape only to broadcast [lower, upper], so it works the same on
-        # this squeezed layout as on the raw (T, K, D) one.
+        boot_first = np.where(zero_slices, np.nan, boot_first)
+        boot_second = np.where(zero_slices, np.nan, boot_second)
         point = {"S1": _shape(S1), "ST": _shape(ST)}
         if all_subsets:
             assert closed is not None and subset_total is not None
@@ -589,7 +777,9 @@ def analyze(
         if all_subsets:
             closed_conf, subset_total_conf = confs["closed"], confs["subset_total"]
 
-    variance_shaped = ctx.squeeze(jnp.asarray(variance.reshape(n_time, n_out)), n_trailing=0)
+    variance_shaped = layout.squeeze(
+        jnp.asarray(variance.reshape(n_time, n_out), dtype=out_dtype), n_trailing=0
+    )
     result = KucherenkoResult(
         S1=_shape(S1),
         ST=_shape(ST),
@@ -607,7 +797,7 @@ def analyze(
 
     if verbose:
         elapsed = _verbose.stop(t0, result.S1, result.ST)
-        n_kept = f_joint.shape[0]
+        origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
         _verbose.analysis_summary(
             method="jaxgsa.kucherenko.analyze",
             problem=problem,
@@ -618,9 +808,10 @@ def analyze(
             invalid=invalid,
             timings=[("compute", elapsed)],
             notes=[
+                f"slice_chunk_size: {width} ({origin})",
                 f"design: {problem.dependence} "
                 f"({'subsets=all, 2^D' if all_subsets else '2D+1'} = {n_blocks} "
-                f"blocks of {n_kept} base points)"
+                f"blocks of {n_kept} base points)",
             ],
             index_name="ST",
             values=result.ST,

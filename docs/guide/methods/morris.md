@@ -69,6 +69,7 @@ jaxgsa.morris.analyze
     invalid: none found in 50 trajectories (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.1226 s
+    slice_chunk_size: 1 (resolved from the memory budget)
   results: top 3 of 3 parameters by mu_star
     1. x1  mu_star=8.454
     2. x2  mu_star=7.875
@@ -102,7 +103,7 @@ x-axis against `sigma` on the y-axis. Points near the origin are droppable,
 points along the x-axis are additive, points climbing above the diagonal are
 the ones a variance decomposition will have to work for.
 
-![Morris mu-star-sigma plane for Ishigami from 100 trajectories, marking which inputs are additive and which interact](./figures/morris_gsa_ishigami-morris-mu-sigma-plane-trajectory-r-100.png)
+![Morris mu-star-sigma plane for Ishigami from 100 trajectories, marking which inputs are additive and which interact](../../examples/figures/morris_gsa_ishigami-morris-mu-sigma-plane-trajectory-r-100.png)
 
 The screening verdict here is that no input can be dropped. That is a real
 answer, and it cost 63 runs.
@@ -203,8 +204,8 @@ print("mu_star_conf:", res.mu_star_conf)
 
 ```
 mu_star     : [8.453911 7.875    7.498556]
-mu_star_conf: [[ 6.7042475  7.875      5.748894 ]
- [10.203573   7.8750005  9.24822  ]]
+mu_star_conf: [[6.573024  7.875     5.7488937]
+ [9.953622  7.8750005 9.248219 ]]
 ```
 
 Row 0 is the lower bound of each `mu_star` and row 1 the upper. All three
@@ -217,7 +218,7 @@ gives `x2` the identical elementary-effect magnitude for the grid reason above,
 so no resample can produce a different mean. A zero-width Morris interval means
 the design is not resolving the input, not that the design has nailed it.
 
-![Morris mu-star bar chart with 95% bootstrap confidence intervals from 500 resamples](./figures/morris_gsa_mu-with-95-bootstrap-cis-500-resamples.png)
+![Morris mu-star bar chart with 95% bootstrap confidence intervals from 500 resamples](../../examples/figures/morris_gsa_mu-with-95-bootstrap-cis-500-resamples.png)
 
 ## A cheap convergence check
 
@@ -255,7 +256,7 @@ A quarter of the trajectories still yields 53 unique evaluations, and the
 ranking does not move. `rankings stable: True` is a cheap gate to put in front
 of the expensive part of a screening pipeline.
 
-![Morris mu-star at r=100 against the same design downsampled to 25 trajectories](./figures/morris_gsa_mu-stability-under-downsampling-trajectory-desig.png)
+![Morris mu-star at r=100 against the same design downsampled to 25 trajectories](../../examples/figures/morris_gsa_mu-stability-under-downsampling-trajectory-desig.png)
 
 ## Radial design
 
@@ -287,7 +288,7 @@ secant slope with the steep parts averaged away. The radial number is the
 trustworthy one here. `n_levels` is ignored by this design, and
 `scramble=True` (the default) should stay on.
 
-![Morris mu-star for the trajectory and radial designs on the same 100-trajectory budget](./figures/morris_gsa_trajectory-vs-radial-mu-at-the-same-budget-r-100.png)
+![Morris mu-star for the trajectory and radial designs on the same 100-trajectory budget](../../examples/figures/morris_gsa_trajectory-vs-radial-mu-at-the-same-budget-r-100.png)
 
 ## Morris measures from a Saltelli design, for free
 
@@ -334,6 +335,7 @@ jaxgsa.morris.analyze
     invalid: none found in 512 trajectories (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.2207 s
+    slice_chunk_size: 1 (resolved from the memory budget)
   results: top 3 of 3 parameters by mu_star
     1. x2  mu_star=14.94
     2. x1  mu_star=8.611
@@ -375,7 +377,7 @@ additive contributions that block measures the same effect, so harvesting it
 would double the apparent sample size and narrow bootstrap intervals without
 adding information. It is deliberately left unused.
 
-![Sobol ST and derived Morris mu-star normalized to their own maxima, both from the same Saltelli design at zero extra model runs](./figures/morris_gsa_both-from-one-design-2048-model-runs-0-extra-256.png)
+![Sobol ST and derived Morris mu-star normalized to their own maxima, both from the same Saltelli design at zero extra model runs](../../examples/figures/morris_gsa_both-from-one-design-2048-model-runs-0-extra-256.png)
 
 ## Multi-output example
 
@@ -420,6 +422,7 @@ jaxgsa.morris.analyze
     invalid: none found in 50 trajectories (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.2276 s
+    slice_chunk_size: 2 (resolved from the memory budget)
   results: top 3 of 3 parameters by mu_star, mean over 2 output slices
     1. frequency  mu_star=1.904
     2. amplitude  mu_star=0.7952
@@ -504,6 +507,7 @@ jaxgsa.morris.analyze
     invalid: none found in 50 trajectories (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.1468 s
+    slice_chunk_size: 1 (resolved from the memory budget)
   results: top 2 of 2 parameters by mu_star
     1. x2  mu_star=20.47
     2. x1  mu_star=2
@@ -633,9 +637,9 @@ D is always the last axis.
 
 - [Basic example](/examples/basic) for the Sobol workflow, the natural next step
   once screening has told you which inputs deserve it.
-- [DGSM](/examples/dgsm) for the autodiff version of the same idea, with a
+- [DGSM](/guide/methods/dgsm) for the autodiff version of the same idea, with a
   provable bound on `ST` attached.
-- [eFAST](/examples/efast) for frequency-based variance decomposition.
+- [eFAST](/guide/methods/efast) for frequency-based variance decomposition.
 - [xarray labeled output](/examples/xarray) for named access by parameter,
   output and time.
 - [Methods](/guide/methods) for the theory and the method comparison.

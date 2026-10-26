@@ -101,7 +101,7 @@ print(np.asarray(r.delta).round(4))
 
 ```
 [0.2149 0.3387 0.1606]
-[0.2106 0.3347 0.1562]
+[0.2116 0.3344 0.1551]
 ```
 
 The correction is small here, about 0.004 on each parameter, and it moves in the
@@ -192,5 +192,5 @@ correction there, because there is no bootstrap.
 - Borgonovo, E. (2007). [A new uncertainty importance measure](https://doi.org/10.1016/j.ress.2006.04.015). *Reliability Engineering & System Safety*, 92(6), 771–784. Defines the moment-independent delta measure.
 - Plischke, E., Borgonovo, E., and Smith, C. L. (2013). [Global sensitivity measures from given data](https://doi.org/10.1016/j.ejor.2012.11.047). *European Journal of Operational Research*, 226(3), 536–550. Provides the given-data estimator and bootstrap bias correction.
 
-See the [Borgonovo delta example](/examples/borgonovo),
+See the [Borgonovo delta guide page](/guide/methods/borgonovo),
 [Methods](/guide/methods), and the [API overview](/api/).

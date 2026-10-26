@@ -35,7 +35,7 @@ print("ST ", np.asarray(res.ST).round(4))
 ```
 
 ```
-Sh  [0.4361 0.4424 0.1215] sum 1.0000000000000007
+Sh  [0.4361 0.4424 0.1215] sum 0.9999998211860657
 S1  [0.3146 0.4424 0.    ]
 ST  [0.5576 0.4425 0.243 ]
 ```
@@ -62,6 +62,8 @@ jaxgsa.shapley.analyze(
     conf_level=0.95,
     ci_method="quantile",
     key=None,
+    batch_size=None,
+    slice_chunk_size=None,
     on_invalid="raise",
     verbose=True,
     keep_replicates=False,
@@ -88,6 +90,7 @@ jaxgsa.shapley.analyze
     backend fit + Shapley (includes compile on the first call): 0.03328 s
     backend: pce
     order: 8
+    batch_size: 2000 (resolved from the memory budget)
   results: top 3 of 3 parameters by Sh
     1. x2  Sh=0.4424
     2. x1  Sh=0.4361
@@ -110,6 +113,8 @@ summary.
 | `on_invalid` | `"raise"` | Named here rather than left to `backend_kwargs` on purpose: naming it forwards it to exactly one backend `analyze`, which applies the policy exactly once. `ShapleyResult.invalid` is that backend's report. |
 | `n_bootstrap` | `0` | Row resamples on `Sh`, `S1` and `ST`. See below. |
 | `key` | `None` | A `jax.random` key. Required when `n_bootstrap > 0`. |
+| `batch_size` | `None` | Rows of `X` per fit batch, passed to the backend. Both backends take it. It changes the peak memory, not the indices. |
+| `slice_chunk_size` | `None` | Output slices per fit chunk, passed to the HDMR backend. The PCE backend fits every slice in one shared solve, so `slice_chunk_size` with `backend="pce"` raises `ValueError`. |
 | `verbose` | `True` | Prints the summary block shown above. |
 | `**backend_kwargs` | | Passed through unchanged to the selected backend's `analyze`: `order`, `ridge`, `fit_ratio` for PCE, `order`, `max_iter`, `n_intervals`, `ridge` for HDMR. A keyword the backend does not accept raises `TypeError`. |
 
@@ -178,7 +183,8 @@ underlying `analyze` rejects its inputs.
 ## Traceable core
 
 `jaxgsa.shapley.indices(problem, X, Y, *, backend="pce",
-include_correlative=False, **backend_kwargs)` returns a `ShapleyIndices`
+include_correlative=False, batch_size=None, slice_chunk_size=None,
+**backend_kwargs)` returns a `ShapleyIndices`
 named tuple `(Sh, S1, ST)` of bare
 arrays with none of the checks, so it composes with `jit`, `vmap` and `jacrev`.
 `explained_variance` lives on the result object only.
@@ -189,4 +195,4 @@ arrays with none of the checks, so it composes with `jit`, `vmap` and `jacrev`.
 - Owen, A. B. & Prieur, C. (2017). [On Shapley value for measuring importance of dependent inputs](https://doi.org/10.1137/16M1097717). *SIAM/ASA Journal on Uncertainty Quantification*, 5(1), 986–1002. Conditional-variance Shapley effects for dependent inputs, which differ from this implementation's correlated HDMR allocation.
 - Li, G., Rabitz, H., Yelvington, P. E., Oluwole, O. O., Bacon, F., Kolb, C. E. & Schoendorf, J. (2010). [Global sensitivity analysis for systems with independent and/or correlated inputs](https://doi.org/10.1021/jp9096919). *Journal of Physical Chemistry A*, 114(19), 6022–6032. ANCOVA structural and correlative decomposition used by the HDMR backend.
 
-See the [Shapley example](/examples/shapley) and the [API overview](/api/).
+See the [Shapley guide page](/guide/methods/shapley) and the [API overview](/api/).

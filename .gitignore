@@ -137,3 +137,6 @@ skills-lock.json
 
 # marimo session state: local edit history for the examples, not part of
 # the shipped documentation.
+
+# Local long benchmark sweep (not shipped)
+scripts/benchmark_sweep.py

@@ -17,11 +17,11 @@ jaxgsa to estimate each input's effect. It does not run your model for you.
 ## Why jaxgsa
 
 - **Many outputs in one call.** Time series and multi-output models are
-  analysed in one compiled JAX call, not one Python loop per output. On 300
-  output slices, Sobol with second-order indices is 35x faster than SALib, and
-  HDMR is about 1000x faster
+  analysed in one compiled JAX call, not one Python loop per output. On a
+  laptop CPU (Apple M1 Pro, float32), Sobol analysis of 1,000 time points
+  takes 78 ms, and sampling, evaluating and analysing 81,920 model runs with
+  1,000 outputs each takes 0.26 s
   ([benchmarks](https://danielepessina.github.io/jaxgsa/guide/benchmarks)).
-  For one scalar output, SALib is as fast or faster.
 - **Gradients come free.** DGSM gets model derivatives from JAX, and the
   estimator cores are differentiable, so an index can sit inside a larger
   JAX computation
@@ -118,6 +118,20 @@ runs ported analyses locally in the browser. Its source and development instruct
 are in `web/`. The Python
 package and documentation site have separate builds.
 
+## Use with a coding agent
+
+jaxgsa ships an [agent skill](skills/jaxgsa/SKILL.md). It tells a coding
+agent how to use the API and the caveats of each method. Install it with the
+[skills](https://github.com/vercel-labs/skills) CLI:
+
+```bash
+npx skills add DanielePessina/jaxgsa --skill jaxgsa
+```
+
+The CLI asks which agents to install it for, such as Claude Code, Codex or
+Cursor. To install it for Claude Code in all your projects, add
+`-g -a claude-code`.
+
 ## Develop
 
 ```bash
@@ -133,9 +147,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). To run the docs locally:
 npm --prefix docs install
 npm --prefix docs run docs:dev
 ```
-
-The repository also includes a [coding agent skill](skills/jaxgsa/SKILL.md)
-covering the API and method-specific caveats.
 
 ## Cite jaxgsa
 
@@ -169,6 +180,15 @@ To cite a specific release, use its version DOI instead. The
 [Zenodo record](https://doi.org/10.5281/zenodo.22099117) lists the DOI of
 each release. See [CITATION.cff](CITATION.cff) for machine-readable citation
 metadata.
+
+## Acknowledgements
+
+jaxgsa is designed, written and maintained by Daniele Pessina, as part of his
+work in the [Papathanasiou Lab](https://www.papathanlab.com/) (Life Science
+and Process Systems Engineering Lab, Imperial College London). The lab
+supported and funded its development.
+
+<a href="https://www.papathanlab.com/"><img src="https://danielepessina.github.io/jaxgsa/logos/papathanlab.svg" alt="Life Science and Process Systems Engineering Lab" height="48"></a>
 
 ## License
 

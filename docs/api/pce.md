@@ -4,7 +4,7 @@
 jaxgsa.pce.analyze(
     problem, X, Y, *,
     order=3,
-    ridge=1e-8,
+    ridge=None,
     fit_ratio=0.5,
     batch_size=None,
     n_bootstrap=0,
@@ -57,7 +57,7 @@ jaxgsa.pce.analyze
     fit + estimator (includes compile on the first call): 1.544 s
     order: 8
     fit: single-pass
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 2000 (resolved from the memory budget)
   results: top 3 of 3 parameters by ST
     1. x1  ST=0.5576
     2. x2  ST=0.4425
@@ -65,8 +65,8 @@ jaxgsa.pce.analyze
 
 S1       [0.3146 0.4424 0.    ]
 ST       [0.5576 0.4425 0.243 ]
-rmse     0.06354028731584549
-cv_rmse  0.08116015046834946
+rmse     0.06354032456874847
+cv_rmse  0.08115886896848679
 streamed False
 ```
 
@@ -96,7 +96,7 @@ silent run.
 | Argument | Default | What it changes |
 | --- | --- | --- |
 | `order` | `3` | Maximum total polynomial degree. Higher orders capture sharper nonlinearity and larger interactions, but the term count `C(D+order, order)` grows fast and needs more rows to fit. It is reduced automatically, with a warning, when the term count would exceed `fit_ratio * N`. |
-| `ridge` | `1e-8` | Tikhonov regularization on the least-squares fit. The default is small enough to be a guard against a singular design and nothing more. Raise it when coefficients look unstable, which happens with noisy `Y` or near-duplicate rows. A ridge of about 1e-3 or more hides a singular design from the rank check. Constant, duplicate and linearly dependent inputs still raise. |
+| `ridge` | `None` | Tikhonov regularization on the least-squares fit, as an absolute number. `None` picks it from the working dtype. In float32 it is `1e-8`. In float64 it is machine epsilon times the mean diagonal of the Gram matrix, so it does not bias a direction the data resolves, also when the inputs do not fill their declared bounds. A float64 design that is singular to round-off (for example a two-level input) gets `1e-12` times the mean diagonal instead, which gives the minimum-norm fit, and a design a tiny jitter away from singular gets a ridge that grows smoothly with that jitter. For this default the rank check reads the pivot share of the design without the ridge. With this default, a row the fit interpolates takes its leave-one-out residual from a fit with a ridge of `1e-10` times the mean diagonal, so a fit with as many rows as terms still gets an honest `cv_rmse`. In float64, a ridge whose doubling moves `ST` by more than 1e-3 warns. Raise it when coefficients look unstable, which happens with noisy `Y` or near-duplicate rows. A ridge of about 1e-3 or more hides a singular design from the rank check. Constant, duplicate and linearly dependent inputs still raise. |
 | `fit_ratio` | `0.5` | The terms-to-samples ceiling that triggers the `order` reduction. Lower it to demand more samples per term, which gives a more conservative fit that is harder to overfit. Must be `<= 1`: a value above 1 asks for more terms than one row per term can support. `order` is never reduced below 1 (`D + 1` terms), so a row count too small even for that raises `ValueError` instead of fitting an underdetermined system. |
 | `batch_size` | `None` | Rows per batch during the fit. See below. |
 | `n_bootstrap` | `0` | Row resamples. See below. |
@@ -116,7 +116,7 @@ leave-one-out error. They differ only in the order of the float32 sums.
 
 The streamed path engages when `batch_size` is an integer below `N`, or when the
 estimated resident memory of the single-pass fit (design matrix, QR
-factorization, LOO residuals) exceeds the active memory budget, about 512 MiB by
+factorization, LOO residuals) exceeds the active memory budget, about 2 GiB by
 default. Set that budget with `jaxgsa.config.set_memory_budget`.
 `batch_size >= N` is one full block, which is the single-pass fit.
 
@@ -246,6 +246,10 @@ equal in every row, and when an input is a linear combination of other inputs
 depend on the dtype or on `ridge`. In float32 it also raises when the QR pivot
 share of the design falls below 1e-5. float64 only warns, below 1e-9.
 
+The fit runs in the wider dtype of `X` and `Y`. float32 `X` and `Y` give a
+float32 fit and float32 results, also with x64 on. A float64 `X` or `Y` gives a
+float64 fit.
+
 Near that precision band, float32 can warn about an overfit even when the
 indices are exact. Example: three Gaussian inputs at order 13 give exact
 indices, but `cv_rmse` is about 2 times the standard deviation of `Y`. The
@@ -254,7 +258,7 @@ the indices and re-run in float64 to confirm.
 
 ## Traceable core
 
-`jaxgsa.pce.indices(problem, X, Y, *, order=3, ridge=1e-8, fit_ratio=0.5,
+`jaxgsa.pce.indices(problem, X, Y, *, order=3, ridge=None, fit_ratio=0.5,
 batch_size=None)` returns a `PCEIndices` named tuple `(S1, ST, S2)` of bare arrays with none of the checks,
 so it composes with `jit`, `vmap` and `jacrev`. It has no result object, so it
 reports neither the reduced order nor `cv_rmse`. Use `effective_order` for the
@@ -277,4 +281,4 @@ first.
   [Multivariate sensitivity analysis to measure global contribution of input factors in dynamic models](https://doi.org/10.1016/j.ress.2010.12.002).
   *Reliability Engineering & System Safety*, 96(4), 450–459.
 
-See the [PCE example](/examples/pce) and the [API overview](/api/).
+See the [PCE guide page](/guide/methods/pce) and the [API overview](/api/).

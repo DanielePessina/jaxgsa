@@ -1,199 +1,292 @@
 # Benchmarks
 
-These benchmarks answer two separate questions:
+This page gives measured analysis times for every jaxgsa method. The numbers
+show how time changes with the sample count, the number of time points, the
+number of outputs and the number of inputs. They apply to the machine and
+software below. They are not package limits.
 
-1. How did the performance branch change jaxgsa itself?
-2. How does jaxgsa analysis time compare with SALib on the same data?
+## What is timed
 
-Both suites time the analysis step, not model evaluation or sampling. The
-results describe the workloads and machine below; they are not package limits.
+Each case times one call to `analyze`. Sampling and model evaluation are not
+in the timed region. The end-to-end table is the only exception: it times
+sampling, model evaluation and analysis separately.
 
-## Results at a glance
-
-Across the 27-case jaxgsa workload matrix, the performance branch reduced the
-sum of warm median analysis times from 0.921 s to 0.430 s, a 53% reduction.
-The geometric mean fell from 6.98 ms to 5.14 ms. The largest isolated gains
-were in HSIC and VKOGA; most methods changed little because the branch did not
-rewrite their main estimator.
-
-Against SALib, scalar work remains the least favourable case for JAX. The
-advantage grows when one call analyzes many output slices or bootstrap
-replicates, because jaxgsa keeps that work inside compiled array programs.
-
-## Environment
-
-All results on this page were measured on 15 September 2026 with:
+The warm time is the median of five calls after the first call. The first
+call includes tracing and compilation, so it is reported separately. Each call
+waits until all its result arrays are ready before the clock stops.
 
 | Component | Value |
 | --- | --- |
-| Machine | MacBook Pro with Apple M1 Pro, 8 CPU cores, 16 GB memory |
+| Date | 25 October 2026 |
+| Machine | MacBook Pro, Apple M1 Pro, 8 CPU cores, 16 GiB memory, on mains power |
 | Operating system | macOS 15.6.1, arm64 |
 | Python | 3.12.13 |
-| jaxgsa | 0.9.0 development tree |
-| JAX / jaxlib | 0.10.2 / 0.10.2 |
-| NumPy | 2.4.2 |
-| SALib | 1.5.2 |
-| Backend | JAX CPU, float32 |
+| jaxgsa | 1.3.1 development tree, commit `0750177` |
+| JAX | 0.11.2, CPU backend |
+| NumPy | 2.5.3 |
+| Precision | float32 and float64, each in a separate run |
+| Memory budget | 2048 MiB, the default of `jaxgsa.config.set_memory_budget` |
+| Isolation | One fresh subprocess per case, killed above 3 GiB resident memory or after 600 s |
 
-No GPU or TPU result is inferred from these CPU measurements.
+No GPU or TPU result follows from these CPU measurements.
 
-## Performance branch against master
+## Results at a glance
 
-The all-method harness runs every case in a fresh subprocess. It records the
-first call separately, then reports the median of nine warm calls. Each call
-blocks until its JAX arrays are ready. Expected jaxgsa warnings and verbose
-reports are disabled inside the timed region.
+All figures are warm float32 times unless the text says otherwise.
 
-The baseline is commit `94a4043` on `master`. The candidate is performance PR
-#80 at commit `4215d19` plus the benchmark-only suppression of reports and
-expected warnings. Both use the same harness, environment, seed, inputs, and
-process-isolation policy.
+- Sobol analysis at $D=8$ and base $N=4096$ (40,960 runs, scalar output)
+  takes 0.7 ms.
+- Sobol analysis of 1000 time points at the same size takes 78 ms in float32
+  and 163 ms in float64.
+- A full Sobol study of 81,920 runs with 1000 outputs per run takes 0.26 s in
+  float32 and 0.44 s in float64. This time includes sampling, model evaluation
+  and analysis. The first run, with compilation, takes 0.44 s and 0.61 s.
+- With 5000 output slices per run ($N=4096$, $T=100$, $K=50$), the warm
+  analysis times are:
 
-### Representative warm results
+| Method | Time for 5000 slices |
+| --- | ---: |
+| morris | 21 ms |
+| rank | 97 ms |
+| pce, shapley | 135 ms |
+| dgsm | 0.65 s |
+| efast | 0.74 s |
+| sobol | 1.03 s |
+| kucherenko | 1.10 s |
+| optimal_transport | 1.30 s |
+| pawn | 2.13 s |
+| borgonovo | 7.21 s |
+| vkoga | 42.5 s |
+| hdmr | killed above the 3 GiB cap |
+| hsic | timed out after 600 s |
 
-| Workload | Shape | `master` | PR | Ratio | Peak RSS: master → PR |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Sobol, small | $D=3$, $N=1024$, scalar | 0.86 ms | 0.52 ms | 1.7x | 72 → 55 MiB |
-| Sobol, high sample count | $D=3$, $N=65536$, scalar | 1.96 ms | 1.01 ms | 1.9x | 60 → 33 MiB |
-| Sobol, high dimension with $S_2$ | $D=30$, base $N=8192$, scalar | 7.37 ms | 3.45 ms | 2.1x | 108 → 66 MiB |
-| Sobol, time series | $D=3$, $N=8192$, 300 slices | 17.21 ms | 9.00 ms | 1.9x | 202 → 96 MiB |
-| Sobol, bootstrap | $D=3$, $N=4096$, 32 slices, 100 resamples | 74.88 ms | 48.85 ms | 1.5x | 333 → 173 MiB |
-| Kucherenko | $D=10$, $N=8192$, 32 slices | 22.21 ms | 17.83 ms | 1.2x | 110 → 107 MiB |
-| HSIC | $D=3$, $N=512$, scalar, 10 permutations | 152.95 ms | 23.10 ms | 6.6x | 344 → 318 MiB |
-| VKOGA | $D=3$, $N=512$, scalar | 348.29 ms | 27.15 ms | 12.8x | 328 → 202 MiB |
+- The first call of a new shape takes between 0.06 s (kucherenko) and 3.8 s
+  (vkoga) at $N=4096$. Later calls with the same shapes reuse the compiled
+  code.
 
-The 27 cases deliberately include small problems, high $N$, high $D$,
-multi-output/time-series arrays, and bootstrap workloads across all fourteen
-methods. The complete machine-readable results are available for the
-[baseline](/benchmarks/master-94a4043.json) and
-[performance branch](/benchmarks/performance-pr-80.json).
+## The model
 
-### Aggregate results
+All cases use the Sobol G-function from `jaxgsa.benchmarks.sobol_g` with $D$
+inputs, each uniform on $[0, 1]$. The coefficients are
+$a = (0, 1, 4.5, 9, 99, 99, \ldots)$, so four inputs are important and the
+other inputs are almost inert.
 
-| Metric across 27 isolated cases | `master` | PR | Change |
-| --- | ---: | ---: | ---: |
-| Sum of warm medians | 0.921 s | 0.430 s | −53% |
-| Geometric mean of warm medians | 6.98 ms | 5.14 ms | −26% |
-| Sum of per-case peak RSS deltas | 3968 MiB | 3304 MiB | −17% |
-| Largest per-case peak RSS delta | 344 MiB | 318 MiB | −7% |
+A wrapper adds $T$ time points and $K$ outputs per run:
 
-The memory sum is an aggregate comparison, not simultaneous memory use: each
-case runs in a separate process. RSS is a process high-water mark, so small
-differences near the existing high-water mark are noisy.
+$$
+y(x, t, k) = g(x)\, e^{-t\,(0.2 + x_2)}\,(1 + 0.25\,k) + x_3 \sin(t + 0.5\,k)
+$$
 
-The branch is not faster in every case. Several sub-millisecond cases sit near
-the dispatch and timer floor, and the 512-slice Sobol and PAWN cases varied by
-a few percent between runs. The large HSIC, VKOGA, and Sobol changes are well
-above that noise.
+Here $t$ takes $T$ equally spaced values on $[0, 10]$ ($t = 1$ when $T = 1$),
+and $k = 0, 1, \ldots, K-1$. Each slice has its own indices, so no slice is a
+copy of another. The output has shape $(N,)$ for one slice, $(N, T)$ for
+$K = 1$, and $(N, T, K)$ otherwise.
 
-## Comparison with SALib
+## Method settings
 
-The competitor benchmark runs jaxgsa and SALib on identical arrays. It reports
-the best of repeated warm calls, so these numbers answer a narrower question
-than the median-based branch comparison above.
+$N$ has a different meaning for each family of methods:
 
-The Sobol and HDMR benchmark first checks both libraries on the Ishigami model.
-All gated Sobol comparisons passed against SALib and the analytical indices.
-HDMR-to-analytical rows remain informational because a low-order surrogate is
-not exact for Ishigami.
+- **sobol, kucherenko:** $N$ is the base sample size. The design has
+  $N(D+2)$ runs. Sobol does not compute second-order indices.
+- **efast:** $N$ is the number of points per curve.
+- **morris:** the design has $N/16$ trajectories.
+- **Given-data methods:** $N$ is the number of Monte Carlo rows.
 
-### Sobol without bootstrap
+Other settings are the defaults, except these:
 
-`D=5`, base $N=1024$. The second-order design contains 12,288 model outputs;
-the first/total-only design contains 7,168.
+- hsic: 50 permutations.
+- pce: order 3.
+- hdmr: order 2.
+- shapley: PCE backend, order 3.
+- dgsm: the call receives the model function. The time includes the
+  derivatives that JAX computes from it.
 
-| Output shape | jaxgsa, no $S_2$ | SALib, no $S_2$ | Ratio | jaxgsa with $S_2$ | SALib with $S_2$ | Ratio |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 × 1 | 0.6 ms | 0.2 ms | 0.4x | 0.8 ms | 0.8 ms | 1.0x |
-| 1 × 6 | 0.6 ms | 1.3 ms | 2.1x | 0.9 ms | 5.1 ms | 5.4x |
-| 50 × 1 | 1.1 ms | 11.8 ms | 10.6x | 1.7 ms | 43.6 ms | 25.9x |
-| 50 × 6 | 4.4 ms | 71.6 ms | 16.1x | 7.4 ms | 262.8 ms | 35.4x |
+## Results
 
-### Sobol with 300 bootstrap resamples
+All values are warm median analysis times. Values are in milliseconds unless
+they show a unit. The last column gives the float64 time at the largest size.
 
-| Output shape | jaxgsa, no $S_2$ | SALib, no $S_2$ | Ratio | jaxgsa with $S_2$ | SALib with $S_2$ | Ratio |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 × 1 | 4.1 ms | 23.2 ms | 5.6x | 6.7 ms | 69.7 ms | 10.4x |
-| 1 × 6 | 15.7 ms | 121.7 ms | 7.8x | 42.1 ms | 397.9 ms | 9.4x |
-| 50 × 1 | 263.6 ms | 1119.6 ms | 4.2x | 434.2 ms | 3393.5 ms | 7.8x |
-| 50 × 6 | 1363.3 ms | 7422.8 ms | 5.4x | 2754.9 ms | 22841.6 ms | 8.3x |
+These words mark cells that did not give a time:
 
-### HDMR
+- **skipped:** the case did not start. HSIC and VKOGA build $N \times N$
+  matrices, so the sweep skips them above $N = 8192$. Other skipped cases
+  had input and output arrays too large for the 3 GiB cap.
+- **timed out:** the case ran for more than 600 s. Each HSIC slice is a full
+  kernel analysis, so HSIC with many slices does not finish in this limit.
+- **over cap:** the case used more than 3 GiB of resident memory and was
+  stopped.
 
-`order=2`, `n_intervals=2`, 1,024 random samples, no bootstrap.
+### Sample count
 
-| Output shape | jaxgsa | SALib | Ratio |
-| --- | ---: | ---: | ---: |
-| 1 × 1 | 7.0 ms | 81.8 ms | 11.6x |
-| 1 × 6 | 6.4 ms | 479.0 ms | 74.3x |
-| 50 × 1 | 10.3 ms | 3629.6 ms | 352.1x |
-| 50 × 6 | 23.8 ms | 25973.1 ms | 1089.7x |
+$D=8$, scalar output.
 
-The largest ratios measure architecture as much as arithmetic. SALib runs one
-HDMR analysis per output slice in Python, while jaxgsa fits all slices in one
-compiled call. Quote the workload with the ratio; `1089.7x` is specifically a
-300-slice comparison against single-process SALib.
+| Method | $N=1024$ | $N=4096$ | $N=16384$ | $N=65536$ | float64, $N=65536$ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| sobol | 0.6 | 0.7 | 1.4 | 3.4 | 4.6 |
+| kucherenko | 0.6 | 0.8 | 2.0 | 6.2 | 6.1 |
+| efast | 0.5 | 0.6 | 1.4 | 4.2 | 5.3 |
+| morris | 0.6 | 0.5 | 0.6 | 0.6 | 0.7 |
+| dgsm | 1.4 | 1.4 | 1.9 | 3.4 | 4.8 |
+| borgonovo | 2.0 | 5.2 | 9.0 | 38.7 | 58.5 |
+| pawn | 1.8 | 3.0 | 7.0 | 27.1 | 27.1 |
+| hsic | 166.1 | 1.32 s | skipped | skipped | skipped |
+| optimal_transport | 1.5 | 5.3 | 8.1 | 28.9 | 30.1 |
+| rank | 0.9 | 3.7 | 5.0 | 16.1 | 16.7 |
+| pce | 3.7 | 9.1 | 27.8 | 108.1 | 229.7 |
+| hdmr | 22.1 | 43.6 | 198.0 | 801.7 | 937.2 |
+| shapley | 3.8 | 9.3 | 27.8 | 109.0 | 239.0 |
+| vkoga | 819.4 | 1.54 s | skipped | skipped | skipped |
 
-### Four-method comparison
+At $N=4096$ in float64, hsic takes 2.25 s and vkoga takes 4.30 s.
 
-The supplemental benchmark covers Sobol, eFAST, DGSM, and HDMR on Ishigami
-($D=3$) and Oakley--O'Hagan ($D=15$). These are analysis timings, not accuracy
-results. DGSM also differs in what is timed: jaxgsa receives a precomputed
-Jacobian, while SALib computes finite differences inside its analysis call.
+### Time points
 
-| Problem and output | Sobol | eFAST | DGSM | HDMR |
+$D=8$, $N=4096$, $K=1$.
+
+| Method | $T=1$ | $T=10$ | $T=100$ | $T=1000$ | float64, $T=1000$ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| sobol | 0.8 | 1.3 | 6.7 | 78.3 | 163.0 |
+| kucherenko | 0.8 | 2.5 | 17.9 | 171.2 | 121.1 |
+| efast | 0.6 | 1.5 | 7.4 | 94.7 | 162.5 |
+| morris | 0.4 | 0.5 | 1.0 | 4.4 | 7.3 |
+| dgsm | 1.5 | 2.3 | 7.0 | 54.7 | 133.6 |
+| borgonovo | 5.2 | 17.9 | 117.2 | 1.29 s | 2.56 s |
+| pawn | 3.0 | 9.4 | 55.8 | 674.6 | 648.4 |
+| hsic | 1.32 s | 7.68 s | 71.3 s | timed out | timed out |
+| optimal_transport | 5.3 | 9.3 | 27.0 | 234.6 | 258.8 |
+| rank | 3.7 | 4.0 | 5.5 | 20.9 | 35.7 |
+| pce | 9.3 | 10.2 | 19.0 | 35.8 | 81.3 |
+| hdmr | 41.3 | 119.7 | 403.6 | 2.50 s | 496.5 |
+| shapley | 9.1 | 9.8 | 19.5 | 36.6 | 83.0 |
+| vkoga | 1.52 s | 1.62 s | 2.05 s | 7.34 s | 12.38 s |
+
+PCE, Shapley and VKOGA fit one surrogate for all slices, so their time grows
+slowly with $T$. In float64, HSIC also timed out at $T=100$.
+
+### Outputs per time point
+
+$D=8$, $N=4096$, $T=100$. $K=50$ gives 5000 slices per run.
+
+| Method | $K=1$ | $K=10$ | $K=50$ | float64, $K=50$ |
 | --- | ---: | ---: | ---: | ---: |
-| Ishigami, 1 × 1 | 0.2x | 0.8x | 0.3x | 6.0x |
-| Ishigami, 50 × 6 | 5.7x | 7.2x | 17.0x | 609.7x |
-| O'Hagan, 1 × 1 | 0.6x | 2.4x | 1.5x | 45.4x |
-| O'Hagan, 50 × 1 | 10.4x | 13.3x | 22.8x | 1968.1x |
+| sobol | 6.4 | 103.4 | 1.03 s | skipped |
+| kucherenko | 17.0 | 190.3 | 1.10 s | skipped |
+| efast | 7.5 | 101.3 | 738.2 | skipped |
+| morris | 0.9 | 5.1 | 21.1 | 31.8 |
+| dgsm | 7.2 | 89.5 | 647.2 | 934.1 |
+| borgonovo | 114.0 | 1.29 s | 7.21 s | 13.30 s |
+| pawn | 53.6 | 663.5 | 2.13 s | 2.61 s |
+| hsic | 70.9 s | timed out | timed out | timed out |
+| optimal_transport | 27.1 | 243.6 | 1.30 s | 1.36 s |
+| rank | 5.4 | 22.0 | 97.0 | 180.4 |
+| pce | 19.8 | 38.8 | 134.6 | 293.1 |
+| hdmr | 399.7 | 2.52 s | over cap | over cap |
+| shapley | 19.6 | 38.6 | 135.4 | 282.8 |
+| vkoga | 2.05 s | 7.25 s | 42.5 s | 53.5 s |
 
-Ratios above 1 mean jaxgsa was faster. The generated figures retain every
-scenario:
+In float64 at $K=50$, the estimated design, output and temporary arrays need
+about 4.6 GiB for Sobol and Kucherenko and 3.7 GiB for eFAST. These cases did
+not start. In float64 at $K=10$, sobol takes
+189.1 ms and hdmr takes 517.0 ms.
 
-![Speedup by method and scenario](../examples/figures/benchmark_all_ishigami-d-3.png)
+### Number of inputs
 
-![Speedup versus output dimensionality](../examples/figures/benchmark_all_ishigami.png)
+$N=4096$, scalar output. At $D=128$, a Sobol design has 532,480 runs.
 
-![Sobol bootstrap timing and interval width](../examples/figures/benchmark_all_sobol-analysis-time-ishigami-1x1.png)
+| Method | $D=4$ | $D=8$ | $D=16$ | $D=32$ | $D=64$ | $D=128$ | float64, $D=128$ |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| sobol | 0.6 | 0.8 | 1.0 | 1.2 | 1.7 | 2.9 | 3.6 |
+| kucherenko | 0.6 | 0.8 | 1.3 | 2.1 | 3.9 | 6.0 | over cap |
+| efast | 0.5 | 0.6 | 1.0 | 1.2 | 2.0 | 9.6 | 10.9 |
+| morris | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.7 | 0.8 |
+| dgsm | 1.4 | 1.4 | 1.7 | 1.9 | 2.7 | 3.6 | 4.7 |
+| borgonovo | 3.4 | 5.3 | 6.1 | 9.9 | 16.2 | 27.6 | 41.1 |
+| pawn | 2.2 | 3.1 | 4.8 | 5.3 | 9.0 | 15.9 | 20.0 |
+| hsic | 897.5 | 1.31 s | 2.45 s | 7.68 s | 12.00 s | 21.43 s | 45.49 s |
+| optimal_transport | 3.1 | 5.2 | 5.5 | 6.1 | 8.3 | 15.2 | 15.3 |
+| rank | 2.0 | 3.7 | 3.9 | 4.3 | 6.7 | 12.6 | 12.4 |
+| pce | 3.1 | 9.0 | 119.7 | 48.0 | 10.4 | 20.9 | 27.0 |
+| hdmr | 14.7 | 42.1 | 214.1 | 1.15 s | 16.74 s | 93.26 s | over cap |
+| shapley | 3.5 | 9.2 | 120.1 | 48.1 | 10.7 | 21.5 | 26.9 |
+| vkoga | 945.5 | 1.55 s | 2.61 s | 6.11 s | 19.66 s | 62.57 s | 69.07 s |
+
+Read the PCE, Shapley and HDMR rows with these points:
+
+- PCE and Shapley lower the polynomial order when the term count is too
+  large for $N$. The order falls from 3 to 2 at $D=32$ and to 1 at $D=64$.
+  This is why $D=16$ is the slowest case. At $D \geq 64$ both methods warn
+  that the fit explains less than half of the output variance.
+- HDMR of order 2 has more coefficients than samples at $D \geq 32$, and it
+  warns about this. The times at large $D$ measure a fit that $N=4096$
+  cannot support.
+- VKOGA warns at $D \geq 32$ that its surrogate misses most of the output
+  variation.
+
+### First call
+
+$D=8$, $N=4096$, scalar output. The first call includes tracing,
+compilation and one analysis.
+
+| Method | float32 | float64 |
+| --- | ---: | ---: |
+| sobol | 167 ms | 143 ms |
+| kucherenko | 58 ms | 56 ms |
+| efast | 127 ms | 134 ms |
+| morris | 191 ms | 168 ms |
+| dgsm | 445 ms | 471 ms |
+| borgonovo | 324 ms | 316 ms |
+| pawn | 373 ms | 376 ms |
+| hsic | 2.08 s | 3.12 s |
+| optimal_transport | 275 ms | 263 ms |
+| rank | 214 ms | 117 ms |
+| pce | 946 ms | 1.01 s |
+| hdmr | 2.13 s | 2.02 s |
+| shapley | 1.02 s | 1.09 s |
+| vkoga | 3.78 s | 6.52 s |
+
+For most methods, the compilation part of the first call changes little
+across the sizes in this sweep. When the analysis itself is slow, the first
+call is approximately the warm time plus the compilation time.
+
+### End to end
+
+Sobol, $D=8$, base $N=8192$ (81,920 runs), $T=1000$. The output has shape
+$(81920, 1000)$. The model is a jitted JAX function.
+
+| Precision | Sample | Evaluate | Analyze | Total | First run total |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| float32 | 13.5 ms | 39.8 ms | 205.0 ms | 258.4 ms | 436.3 ms |
+| float64 | 13.8 ms | 91.2 ms | 330.4 ms | 436.0 ms | 614.4 ms |
+
+### Memory
+
+The memory budget controls how jaxgsa splits work into chunks. It is not a
+hard limit on process memory. Some HDMR, VKOGA and HSIC cases used more
+resident memory than the 2 GiB budget plus the input data, up to 2.9 GiB.
+The cases marked "over cap" used more than 3 GiB.
 
 ## What the benchmarks do not show
 
 - Model evaluation and sampling are excluded. For an expensive simulator,
   estimator speed may have little effect on total study time.
-- The SALib baseline is single-process CPU execution. No claim is made against
-  a user-written parallel wrapper.
 - First calls include tracing and compilation. The warm figures apply after
   compiled programs are reusable for the same shapes.
-- The branch matrix uses method-specific benchmark settings; it does not rank
-  the scientific value or accuracy of different sensitivity measures.
+- The sweep uses one model and fixed method settings. It does not rank the
+  scientific value or accuracy of different sensitivity measures.
 - Surrogate timings do not establish surrogate quality. Check the fit before
   interpreting PCE, HDMR, Shapley, or VKOGA indices.
 - Results on other hardware and software versions will differ.
 
 ## Reproduce the results
 
-Run the all-method branch matrix:
-
-```bash
-uv run .auto/bench_gsa.py --repeats 9 --out benchmark.json
-```
-
-Run the correctness-checked Sobol and HDMR comparison:
-
-```bash
-uv run --extra dev scripts/benchmark_salib.py
-```
-
-Regenerate the four-method cache and figures:
-
-```bash
-uv run --extra dev examples/benchmark_all.py --refresh
-```
-
-Use an otherwise idle machine. Record the exact commit, hardware, dependency
-versions, backend, dtype, sample dimensions, and whether the figures are cold
-or warm whenever you publish new numbers.
+The sweep script is not part of the package. To repeat the measurement, use
+the model and method settings above. Sweep one size at a time from the base
+case $D=8$, $N=4096$, $T=1$, $K=1$. Run each case in a new Python process,
+so that the first call includes compilation and memory belongs to one case
+only. Time one call to `analyze`, then the median of five more calls, and
+block on every result array before you stop the clock. Use an idle machine on
+mains power. Record the commit, hardware, dependency versions, backend,
+precision and memory budget with the results.
 
 ## Analytical benchmark functions
 

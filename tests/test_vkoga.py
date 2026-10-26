@@ -218,7 +218,7 @@ def test_asymmetric_correlation_structure(asym_result):
     assert list(np.argsort(S_TC)) == list(np.argsort(S_TC_true))
     assert list(np.argsort(S_TU)) == list(np.argsort(S_TU_true))
     # The surrogate under-resolves the Gaussian tails, so the variance comes
-    # out low. Documented in docs/examples/vkoga.md; do not loosen this.
+    # out low. Documented in docs/guide/methods/vkoga.md; do not loosen this.
     np.testing.assert_allclose(float(np.asarray(asym_result.variance)), var_y, rtol=5e-2)
 
 
@@ -464,9 +464,10 @@ def test_predict_new_points_and_batching(uniform_fits):
     assert pred.shape == (128,)
     truth = _uniform_scalar(X_new)
     assert np.sqrt(np.mean((pred - truth) ** 2)) < 0.2 * np.std(truth)
-    # Batching only reassociates floating point; same precision, so tight.
+    # Batching only reassociates floating point. In float32 the kernel sum
+    # cancels, so a changed BLAS tiling moves values by ~5e-5 (Linux CI).
     pred_batched = np.asarray(result.predict(X_new, batch_size=37))
-    np.testing.assert_allclose(pred_batched, pred, rtol=2e-5, atol=1e-6)
+    np.testing.assert_allclose(pred_batched, pred, rtol=2e-4, atol=1e-5)
 
 
 def test_batch_size_bounds_the_index_estimator_too(monkeypatch):
@@ -585,7 +586,7 @@ def test_scalar_argument_validation_raises_early():
         ({"n_inner": 1}, "n_inner must be >= 2"),
         ({"n_variance": 1}, "n_variance must be >= 2"),
         ({"max_centers": 0}, "max_centers must be >= 1"),
-        ({"batch_size": 0}, "batch_size must be >= 1"),
+        ({"batch_size": 0}, "batch_size must be an integer >= 1"),
         ({"key": None}, "key is required"),
         ({"gamma": -1.0}, "gamma must be a finite positive number"),
         ({"gamma": 0.0}, "gamma must be a finite positive number"),

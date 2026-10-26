@@ -15,7 +15,8 @@ Array shape conventions used throughout:
 """
 
 import warnings
-from functools import lru_cache
+from collections.abc import Callable
+from functools import lru_cache, partial
 from typing import Literal, NamedTuple, cast
 
 import jax
@@ -26,7 +27,13 @@ from jax import Array
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints, draw_row_matrix
-from jaxgsa._core.entry import at_least, bootstrap_checks, prepare
+from jaxgsa._core.column_chunks import map_column_chunks
+from jaxgsa._core.entry import (
+    bootstrap_checks,
+    check_scalars,
+    positive_int,
+    prepare,
+)
 from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -58,6 +65,7 @@ _IRREGULAR_KWARGS = (
     "ci_method",
     "key",
     "resample_chunk_size",
+    "slice_chunk_size",
     "on_invalid",
     "keep_replicates",
 )
@@ -113,8 +121,10 @@ def _elementary_effects(Y: Array, idx_after: Array, idx_before: Array, delta: Ar
         Elementary effects, shape ``(r, D, T, K)``.
     """
     # Fancy indexing with (r, D) index arrays gathers (r, D, T, K) blocks, and
-    # the signed delta broadcasts over the trailing output dimensions.
-    return (Y[idx_after] - Y[idx_before]) / delta[:, :, None, None]
+    # the signed delta broadcasts over the trailing output dimensions. The
+    # design stores delta in float64; casting it to Y's dtype keeps float32
+    # outputs in float32 when x64 is enabled.
+    return (Y[idx_after] - Y[idx_before]) / delta.astype(Y.dtype)[:, :, None, None]
 
 
 def _measures(
@@ -235,6 +245,226 @@ def _resample_temp_bytes(ee_shape: tuple[int, ...], itemsize: int, chunk: int) -
     return (n_ee + 3 * chunk * n_out) * itemsize
 
 
+# Live (n_expanded,)-sized arrays per output slice while one slice chunk is
+# turned into screening measures: the standardized column, the two gathered
+# rows, the effects, and the |ee| or centred copy the reduction reads. The
+# bootstrap adds one gathered copy of the effects and its |ee| or centred twin.
+_MORRIS_LIVE_ARRAYS = 5
+_MORRIS_BOOT_ARRAYS = 2
+
+
+def _slice_width(
+    n_expanded: int,
+    n_slices: int,
+    dtype: jnp.dtype,
+    slice_chunk_size: int | None,
+    *,
+    bootstrap: bool = False,
+) -> int:
+    """Resolve the number of output slices turned into measures per chunk.
+
+    Args:
+        n_expanded: Rows of the expanded design, ``r * (D + 1)``.
+        n_slices: Flattened output slices, ``T * K``.
+        dtype: Dtype of the expanded outputs.
+        slice_chunk_size: The caller's value, or ``None`` to derive one from
+            the active memory budget.
+        bootstrap: Whether the bootstrap runs on each chunk, which keeps more
+            arrays live per slice.
+
+    Returns:
+        Slices per chunk, in ``[1, n_slices]``.
+    """
+    live = _MORRIS_LIVE_ARRAYS + (_MORRIS_BOOT_ARRAYS if bootstrap else 0)
+    per_slice = live * n_expanded * jnp.dtype(dtype).itemsize
+    return resolve_batch_size(per_slice, n_slices, slice_chunk_size)
+
+
+@partial(jax.jit, static_argnames=("width",))
+def _slice_chunk(Y3: Array, start: Array | int, width: int) -> Array:
+    """Gather ``width`` flattened output slices of ``Y3`` from ``start`` on.
+
+    ``lax.dynamic_slice`` clamps ``start`` to ``T * K - width``, so the last
+    chunk has the same shape as the others and the gather compiles once. Its
+    real slices are then the trailing ones, which :func:`_chunked_measures`
+    selects.
+
+    Args:
+        Y3: Expanded outputs, shape ``(n_expanded, T, K)``.
+        start: First flattened slice of the chunk.
+        width: Slices per chunk (static).
+
+    Returns:
+        The chunk as ``(n_expanded, width, 1)``: each slice becomes one time
+        step of a one-output layout.
+    """
+    flat = Y3.reshape(Y3.shape[0], -1)
+    return jax.lax.dynamic_slice_in_dim(flat, start, width, axis=1)[:, :, None]
+
+
+def _chunked_measures(
+    Y3: Array,
+    idx_after: Array,
+    idx_before: Array,
+    delta: Array,
+    standardize_outputs: bool,
+    width: int,
+    on_chunk: Callable[[Array], None] | None = None,
+) -> tuple[Array, Array, Array]:
+    """Compute the screening measures ``width`` output slices at a time.
+
+    Standardization, the elementary effects and their reduction all act on
+    each output slice alone, so a chunk of slices gives the same numbers as
+    the whole array. :func:`analyze` runs this eagerly, one set of device
+    calls per chunk, so only one chunk of the ``(r, D, T, K)`` effects exists
+    at a time. :func:`indices` may be traced and uses
+    :func:`_mapped_measures` instead.
+
+    Args:
+        Y3: Expanded outputs, shape ``(n_expanded, T, K)``.
+        idx_after: Expanded-row indices of the perturbed points, ``(r, D)``.
+        idx_before: Expanded-row indices of the reference points, ``(r, D)``.
+        delta: Signed unit-cube steps, ``(r, D)``.
+        standardize_outputs: As in :func:`analyze`.
+        width: Slices per chunk.
+        on_chunk: Called with the effects of each chunk's real slices,
+            shape ``(r, D, actual, 1)``, in slice order. The bootstrap uses
+            it to resample one chunk at a time.
+
+    Returns:
+        ``(mu, mu_star, sigma)``, each shape ``(T, K, D)``.
+    """
+    _, T, K = Y3.shape
+    total = T * K
+    mu_parts: list[Array] = []
+    mu_star_parts: list[Array] = []
+    sigma_parts: list[Array] = []
+    for start in range(0, total, width):
+        actual = min(width, total - start)
+        # Where the clamped gather put this chunk's first real slice.
+        offset = start - min(start, total - width)
+        real = slice(offset, offset + actual)
+        Yc = _slice_chunk(Y3, start, width)
+        ee, mu, mu_star, sigma = _measures(Yc, idx_after, idx_before, delta, standardize_outputs)
+        if on_chunk is not None:
+            on_chunk(ee[:, :, real])
+        mu_parts.append(mu[real])  # (actual, 1, D)
+        mu_star_parts.append(mu_star[real])
+        sigma_parts.append(sigma[real])
+    return (
+        jnp.concatenate(mu_parts).reshape(T, K, -1),
+        jnp.concatenate(mu_star_parts).reshape(T, K, -1),
+        jnp.concatenate(sigma_parts).reshape(T, K, -1),
+    )
+
+
+@partial(jax.jit, static_argnames=("standardize_outputs", "width"))
+def _mapped_measures(
+    Y3: Array,
+    idx_after: Array,
+    idx_before: Array,
+    delta: Array,
+    *,
+    standardize_outputs: bool,
+    width: int,
+) -> tuple[Array, Array, Array]:
+    """Compute the screening measures ``width`` slices at a time, in one program.
+
+    The traceable twin of :func:`_chunked_measures`, for :func:`indices`.
+    Under an outer ``jit`` a Python loop over chunks is traced into one
+    program that keeps every chunk live, so the chunks run in a
+    ``lax.map`` instead (:func:`jaxgsa._core.column_chunks.map_column_chunks`).
+
+    Args:
+        Y3: Expanded outputs, shape ``(n_expanded, T, K)``.
+        idx_after: Expanded-row indices of the perturbed points, ``(r, D)``.
+        idx_before: Expanded-row indices of the reference points, ``(r, D)``.
+        delta: Signed unit-cube steps, ``(r, D)``.
+        standardize_outputs: As in :func:`analyze` (static).
+        width: Slices per chunk (static).
+
+    Returns:
+        ``(mu, mu_star, sigma)``, each shape ``(T, K, D)``.
+    """
+    n_expanded, T, K = Y3.shape
+
+    def one_chunk(cols: Array) -> tuple[Array, Array, Array]:
+        _, mu, mu_star, sigma = _measures(
+            cols[:, :, None], idx_after, idx_before, delta, standardize_outputs
+        )
+        return mu[:, 0], mu_star[:, 0], sigma[:, 0]  # each (width, D)
+
+    out = map_column_chunks(one_chunk, Y3.reshape(n_expanded, T * K), width, axis=0)
+    mu, mu_star, sigma = (leaf.reshape(T, K, -1) for leaf in out)
+    return mu, mu_star, sigma
+
+
+def _resample_width(
+    ee_shape: tuple[int, ...], itemsize: int, n_bootstrap: int, resample_chunk_size: int | None
+) -> int:
+    """Resolve the bootstrap resamples processed per call.
+
+    One chunk holds a single gathered copy of the ``(r, D, T, K)`` effects
+    tensor (the resamples run in sequence) plus three ``(T, K, D)`` results
+    per resample. The copy is a fixed cost, so the budget left after it sets
+    how many resamples fit in a chunk.
+
+    Args:
+        ee_shape: Shape ``(r, D, T, K)`` of the effects one call sees.
+        itemsize: Bytes per element of the effects.
+        n_bootstrap: Bootstrap replicates in total.
+        resample_chunk_size: The caller's resamples per call, or ``None`` to
+            derive one from the memory budget.
+
+    Returns:
+        The resamples per call, between 1 and ``n_bootstrap``.
+    """
+    fixed = _resample_temp_bytes(ee_shape, itemsize, 0)
+    per_resample = _resample_temp_bytes(ee_shape, itemsize, 1) - fixed
+    if resample_chunk_size is None:
+        return max(1, min(n_bootstrap, (get_memory_budget() - fixed) // per_resample))
+    return resolve_batch_size(per_resample, n_bootstrap, resample_chunk_size)
+
+
+def _bootstrap_draws(
+    ee: Array, resample_idx: Array, resample_chunk_size: int | None
+) -> tuple[Array, Array, Array]:
+    """Bootstrap the screening measures over trajectories.
+
+    Args:
+        ee: Elementary effects, shape ``(r, D, T, K)``.
+        resample_idx: Trajectory index sets, shape ``(R, r)``.
+        resample_chunk_size: The caller's resamples per call, or ``None`` to
+            derive one from the memory budget.
+
+    Returns:
+        ``(mu, mu_star, sigma)`` draws, each shape ``(R, T, K, D)``.
+    """
+    n_bootstrap = resample_idx.shape[0]
+    cs = _resample_width(ee.shape, ee.dtype.itemsize, n_bootstrap, resample_chunk_size)
+    mu_parts: list[Array] = []
+    mu_star_parts: list[Array] = []
+    sigma_parts: list[Array] = []
+    for start in range(0, n_bootstrap, cs):
+        end = min(start + cs, n_bootstrap)
+        n_real = end - start
+        idx_chunk = resample_idx[start:end]
+        if n_real < cs:
+            # Pad the final ragged chunk back up to cs so _resample_stats
+            # compiles one shape only. The padding rows are sliced off.
+            pad = jnp.broadcast_to(idx_chunk[:1], (cs - n_real, idx_chunk.shape[1]))
+            idx_chunk = jnp.concatenate([idx_chunk, pad], axis=0)
+        m, ms, sd = _resample_stats(idx_chunk, ee)
+        mu_parts.append(m[:n_real])
+        mu_star_parts.append(ms[:n_real])
+        sigma_parts.append(sd[:n_real])
+    return (
+        jnp.concatenate(mu_parts),
+        jnp.concatenate(mu_star_parts),
+        jnp.concatenate(sigma_parts),
+    )
+
+
 class MorrisIndices(NamedTuple):
     """The arrays :func:`indices` returns, named like the :class:`MorrisResult` fields.
 
@@ -254,6 +484,7 @@ def indices(
     Y: Array,
     *,
     standardize_outputs: bool = False,
+    slice_chunk_size: int | None = None,
 ) -> MorrisIndices:
     """Compute the Morris screening measures as plain arrays, with no diagnostics.
 
@@ -301,6 +532,8 @@ def indices(
             sample axis, which this function builds and the caller never
             holds, so a pre-pass on the unique rows would use different means
             and a different scale whenever the design deduplicated a row.
+        slice_chunk_size: As in :func:`analyze`. The value changes only the
+            peak memory, never a measure.
 
     Returns:
         A :class:`MorrisIndices` ``(mu, mu_star, sigma)``, shaped ``(D,)``, ``(K, D)`` or
@@ -308,10 +541,14 @@ def indices(
         reports them.
 
     Raises:
-        ValueError: If ``Y`` is not 1-D, 2-D, or 3-D, or its first axis does
-            not match ``samples.n_runs``.
+        ValueError: If ``Y`` is not 1-D, 2-D, or 3-D, its first axis does
+            not match ``samples.n_runs``, or ``slice_chunk_size`` is given and
+            is not an integer of at least 1.
     """
     require_design(samples, MorrisSamples, "jaxgsa.morris.indices", "jaxgsa.morris.sample")
+    check_scalars(
+        (positive_int("slice_chunk_size", slice_chunk_size),), method="jaxgsa.morris.indices"
+    )
     _validate_output(Y, None, None)
     Y3, layout = _prepare_Y(samples.expand_outputs(Y))
     # Design facts, not facts about Y: moving them to the device under trace
@@ -319,7 +556,14 @@ def indices(
     idx_after = jnp.asarray(samples.ee_idx_after)
     idx_before = jnp.asarray(samples.ee_idx_before)
     delta = jnp.asarray(samples.ee_delta)
-    _, mu, mu_star, sigma = _measures(Y3, idx_after, idx_before, delta, standardize_outputs)
+    n_expanded, T, K = Y3.shape
+    width = _slice_width(n_expanded, T * K, Y3.dtype, slice_chunk_size)
+    if width >= T * K:
+        _, mu, mu_star, sigma = _measures(Y3, idx_after, idx_before, delta, standardize_outputs)
+    else:
+        mu, mu_star, sigma = _mapped_measures(
+            Y3, idx_after, idx_before, delta, standardize_outputs=standardize_outputs, width=width
+        )
     return MorrisIndices(layout.squeeze(mu), layout.squeeze(mu_star), layout.squeeze(sigma))
 
 
@@ -373,6 +617,7 @@ def analyze(
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | int | None = None,
     resample_chunk_size: int | None = None,
+    slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
@@ -435,6 +680,14 @@ def analyze(
             memory budget (:func:`jaxgsa.config.get_memory_budget`) allows.
             An explicit value is honoured as given, capped only at
             ``n_bootstrap``; the budget never overrides it.
+        slice_chunk_size: Maximum number of flattened ``T*K`` output slices
+            turned into elementary effects at once. It caps the peak memory
+            of the ``(r, D, T, K)`` effects, and of the bootstrap, for a
+            large ``T * K``. Every measure is computed per slice, so the
+            value never changes a result. ``None`` (default) derives one from
+            the active memory budget (:func:`jaxgsa.config.set_memory_budget`).
+            An explicit value wins over the budget, is clamped to ``T * K``,
+            and must be an integer of at least 1.
         on_invalid: What to do about non-finite model outputs. The unit here
             is one trajectory, so a single bad value removes the whole block
             of ``D + 1`` rows: the elementary effects are differences between
@@ -470,7 +723,8 @@ def analyze(
             than 2 trajectories survive; if ``ci_method`` is invalid; if
             ``n_bootstrap`` is negative; if ``conf_level`` is not in
             ``(0, 1)``; if ``n_bootstrap > 0`` but ``key`` is ``None``; or
-            if ``resample_chunk_size`` is given and below 1.
+            if ``resample_chunk_size`` is given and below 1; or if
+            ``slice_chunk_size`` is given and is not an integer of at least 1.
 
     Warns:
         JaxgsaWarning: If a derived design already lost blocks with no
@@ -509,7 +763,8 @@ def analyze(
         on_invalid=on_invalid,
         checks=(
             *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
-            at_least("resample_chunk_size", resample_chunk_size, 1),
+            positive_int("resample_chunk_size", resample_chunk_size),
+            positive_int("slice_chunk_size", slice_chunk_size),
         ),
         n_expected=int(samples.samples.shape[0]),
         expand=samples.expand_outputs,
@@ -563,87 +818,100 @@ def analyze(
         raise ValueError("Fewer than 2 trajectories remain after cleaning")
 
     t0 = _verbose.tic()
-    if (
-        ctx.deferred_expand is not None
-        and n_bootstrap == 0
-        and keep.all()
-        and ctx.layout is YLayout.SCALAR
-    ):
-        # on_invalid='skip' held the expansion back (see
-        # Context.deferred_expand). The scalar no-bootstrap path fuses the
-        # gather into the estimator -- one executable, measured ~1.3x
-        # faster than the eager expansion on a half-million-row design.
-        # Wide layouts run slower fused, and the bootstrap resamples from
-        # the expanded rows, so both expand eagerly below.
-        ee, mu, mu_star, sigma = _get_morris_fused_measures(samples.n_params, standardize_outputs)(
-            ctx.Y,
-            samples._expanded_to_unique_jax,
-            idx_after,
-            idx_before,
-            delta,
-        )
-    else:
+    _, T, K = ctx.Y3.shape
+    # Sized on the expanded design whichever path runs below, so the width
+    # does not depend on whether the expansion was deferred.
+    width = _slice_width(
+        len(idx_after) * rows_per_traj,
+        T * K,
+        ctx.Y3.dtype,
+        slice_chunk_size,
+        bootstrap=n_bootstrap > 0,
+    )
+    resample_idx = None
+    if n_bootstrap > 0:
+        assert key is not None  # a missing key was refused right after prepare
+        # Pre-generate all R bootstrap index sets, sampling with replacement.
+        # Named resample_idx, not indices: `indices` is this module's public
+        # transformable entry point. The same sets serve every slice chunk.
+        resample_idx = draw_row_matrix(key, n_bootstrap, len(idx_after))
+
+    draws: tuple[Array, Array, Array] | None = None
+    if width < T * K:
+        # More slices than one chunk holds: never form all of the
+        # (r, D, T, K) effects. The bootstrap runs on each chunk's effects
+        # with the same resample sets, so its draws equal the unchunked ones.
         if ctx.deferred_expand is not None:
-            # Deferral only happens under on_invalid='skip', where keep is
-            # all-True, so the compaction above never ran and Y is still
-            # the raw promoted rows; expanding here is exactly what prepare
-            # would have done under any other policy.
             Y = ctx.deferred_expand(Y)
-        ee, mu, mu_star, sigma = _measures(Y, idx_after, idx_before, delta, standardize_outputs)
+        boot_parts: list[tuple[Array, Array, Array]] = []
+
+        def _boot_chunk(ee_chunk: Array) -> None:
+            if resample_idx is not None:
+                boot_parts.append(_bootstrap_draws(ee_chunk, resample_idx, resample_chunk_size))
+
+        mu, mu_star, sigma = _chunked_measures(
+            Y, idx_after, idx_before, delta, standardize_outputs, width, _boot_chunk
+        )
+        if boot_parts:
+            # Each part is (R, actual, 1, D); join the slices, then restore (T, K).
+            draws = (
+                jnp.concatenate([p[0] for p in boot_parts], axis=1).reshape(n_bootstrap, T, K, -1),
+                jnp.concatenate([p[1] for p in boot_parts], axis=1).reshape(n_bootstrap, T, K, -1),
+                jnp.concatenate([p[2] for p in boot_parts], axis=1).reshape(n_bootstrap, T, K, -1),
+            )
+    else:
+        if (
+            ctx.deferred_expand is not None
+            and n_bootstrap == 0
+            and keep.all()
+            and ctx.layout is YLayout.SCALAR
+        ):
+            # on_invalid='skip' held the expansion back (see
+            # Context.deferred_expand). The scalar no-bootstrap path fuses the
+            # gather into the estimator -- one executable, measured ~1.3x
+            # faster than the eager expansion on a half-million-row design.
+            # Wide layouts run slower fused, and the bootstrap resamples from
+            # the expanded rows, so both expand eagerly below.
+            fused = _get_morris_fused_measures(samples.n_params, standardize_outputs)
+            ee, mu, mu_star, sigma = fused(
+                ctx.Y,
+                samples._expanded_to_unique_jax,
+                idx_after,
+                idx_before,
+                delta,
+            )
+        else:
+            if ctx.deferred_expand is not None:
+                # Deferral only happens under on_invalid='skip', where keep
+                # is all-True, so the compaction above never ran and Y is
+                # still the raw promoted rows; expanding here is exactly what
+                # prepare would have done under any other policy.
+                Y = ctx.deferred_expand(Y)
+            ee, mu, mu_star, sigma = _measures(
+                Y, idx_after, idx_before, delta, standardize_outputs
+            )
+        if resample_idx is not None:
+            draws = _bootstrap_draws(ee, resample_idx, resample_chunk_size)
 
     # One value for all three intervals: they are produced together or not at
     # all, so a single name keeps that fact checkable instead of implied.
     conf_triple: tuple[Array, Array, Array] | None = None
     replicates: dict[str, Array] | None = {} if keep_replicates else None
-    if n_bootstrap > 0:
-        assert key is not None  # a missing key was refused right after prepare
-        r = ee.shape[0]
-        # Pre-generate all R bootstrap index sets, sampling with replacement.
-        # Named resample_idx, not indices: `indices` is this module's public
-        # transformable entry point.
-        resample_idx = draw_row_matrix(key, n_bootstrap, r)
-
-        # One chunk holds a single gathered copy of the (r, D, T, K) effects
-        # tensor (the resamples run in sequence) plus three (T, K, D) results
-        # per resample. The copy is a fixed cost, so the budget left after it
-        # sets how many resamples fit in a chunk.
-        itemsize = ee.dtype.itemsize
-        fixed = _resample_temp_bytes(ee.shape, itemsize, 0)
-        per_resample = _resample_temp_bytes(ee.shape, itemsize, 1) - fixed
-        if resample_chunk_size is None:
-            cs = max(1, min(n_bootstrap, (get_memory_budget() - fixed) // per_resample))
-        else:
-            cs = resolve_batch_size(per_resample, n_bootstrap, resample_chunk_size)
-        mu_parts, mu_star_parts, sigma_parts = [], [], []
-        for start in range(0, n_bootstrap, cs):
-            end = min(start + cs, n_bootstrap)
-            n_real = end - start
-            idx_chunk = resample_idx[start:end]
-            if n_real < cs:
-                # Pad the final ragged chunk back up to cs so _resample_stats
-                # compiles one shape only. The padding rows are sliced off.
-                pad = jnp.broadcast_to(idx_chunk[:1], (cs - n_real, idx_chunk.shape[1]))
-                idx_chunk = jnp.concatenate([idx_chunk, pad], axis=0)
-            m, ms, sd = _resample_stats(idx_chunk, ee)
-            mu_parts.append(m[:n_real])
-            mu_star_parts.append(ms[:n_real])
-            sigma_parts.append(sd[:n_real])
-
+    if draws is not None:
         conf_pairs = []
-        for name, estimate, parts in [
-            ("mu", mu, mu_parts),
-            ("mu_star", mu_star, mu_star_parts),
-            ("sigma", sigma, sigma_parts),
+        for name, estimate, name_draws in [
+            ("mu", mu, draws[0]),
+            ("mu_star", mu_star, draws[1]),
+            ("sigma", sigma, draws[2]),
         ]:
-            draws = jnp.concatenate(parts)  # (R, T, K, D)
             lower, upper = _bootstrap_ci_endpoints(
-                estimate, draws, conf_level=conf_level, ci_method=ci_method
+                estimate, name_draws, conf_level=conf_level, ci_method=ci_method
             )
             conf_pairs.append(jnp.stack([lower, upper]))
             if replicates is not None:
                 # The leading resample axis survives the squeeze, which
                 # addresses the inserted T/K axes from the end.
-                replicates[name] = ctx.squeeze(draws)
+                replicates[name] = ctx.squeeze(name_draws)
         conf_triple = (conf_pairs[0], conf_pairs[1], conf_pairs[2])
 
     mu = ctx.squeeze(mu)
@@ -680,16 +948,24 @@ def analyze(
 
     if verbose:
         elapsed = _verbose.stop(t0, result.mu, result.mu_star, result.sigma)
-        _, T, K = ctx.Y3.shape
+        origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
+        notes = [f"slice_chunk_size: {width} ({origin})"]
         # The resample width only exists when bootstrapping ran.
         if n_bootstrap > 0:
-            notes = [
-                f"resample_chunk_size: {resample_chunk_size} (user-set)"
+            # The effects one bootstrap call sees: one slice chunk of
+            # (r, D, width, 1) when chunked, else the whole (r, D, T, K).
+            ee_shape = (
+                (len(idx_after), samples.n_params, width, 1)
+                if width < T * K
+                else (len(idx_after), samples.n_params, T, K)
+            )
+            rs = _resample_width(ee_shape, ctx.Y3.dtype.itemsize, n_bootstrap, resample_chunk_size)
+            rs_origin = (
+                "user-set"
                 if resample_chunk_size is not None
-                else "resample_chunk_size: auto (resolved from the memory budget)"
-            ]
-        else:
-            notes = []
+                else "resolved from the memory budget"
+            )
+            notes.append(f"resample_chunk_size: {rs} ({rs_origin})")
         _verbose.analysis_summary(
             method="jaxgsa.morris.analyze",
             problem=samples.problem,

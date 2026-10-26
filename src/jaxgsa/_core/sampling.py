@@ -241,10 +241,25 @@ def _transform_categorical(unit_values: np.ndarray, probs: tuple[float, ...]) ->
     return np.minimum(codes, len(cum) - 1).astype(np.float64)
 
 
-def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray:
-    """Transform unit-cube samples into the problem's declared marginals."""
-    # Pre-allocate output; each column is filled independently by its marginal's inverse CDF
-    transformed = np.empty_like(samples_unit, dtype=np.float64)
+def _transform_samples(
+    problem: Problem, samples_unit: np.ndarray, *, out: np.ndarray | None = None
+) -> np.ndarray:
+    """Transform unit-cube samples into the problem's declared marginals.
+
+    Args:
+        problem: Problem supplying one marginal per column.
+        samples_unit: ``(N, D)`` points on the unit cube.
+        out: Optional ``(N, D)`` float64 array to write the result into. It
+            may be ``samples_unit`` itself: every column is computed from its
+            own unit column in full before it is written back, so the
+            in-place transform gives the same values and saves a full copy of
+            the design. ``None`` allocates a new array.
+
+    Returns:
+        ``(N, D)`` float64 samples in physical units (``out`` when given).
+    """
+    # Each column is filled independently by its marginal's inverse CDF.
+    transformed = np.empty_like(samples_unit, dtype=np.float64) if out is None else out
 
     for idx, spec in enumerate(problem.input_specs):
         if isinstance(spec, UniformSpec):
@@ -660,8 +675,109 @@ def _inverse_transform_samples(problem: Problem, samples_physical: np.ndarray) -
     return unit
 
 
+# Multipliers of the row fingerprint in _row_fingerprints. Any odd 64-bit
+# constants work: the fingerprint only has to spread distinct rows apart, and
+# every group it forms is verified bit for bit before it is trusted.
+_FP_MUL = np.uint64(0x9E3779B97F4A7C15)
+_FP_MIX = np.uint64(0xBF58476D1CE4E5B9)
+# Rows fingerprinted per block: a block of row words stays in cache across
+# the column loop, and the per-block temporaries stay a few MB.
+_FP_BLOCK_ROWS = 16384
+
+
+def _row_fingerprints(words: np.ndarray) -> np.ndarray:
+    """Hash each row of a ``(N, W)`` uint64 array to one uint64.
+
+    Equal rows always get equal fingerprints; distinct rows almost always get
+    distinct ones. The caller verifies every collision exactly, so the hash
+    quality affects only speed, never the result.
+
+    Args:
+        words: ``(N, W)`` C-contiguous uint64 view of the rows.
+
+    Returns:
+        ``(N,)`` uint64 fingerprints.
+    """
+    n_rows, n_words = words.shape
+    out = np.empty(n_rows, dtype=np.uint64)
+    shift = np.uint64(31)
+    with np.errstate(over="ignore"):
+        for start in range(0, n_rows, _FP_BLOCK_ROWS):
+            block = words[start : start + _FP_BLOCK_ROWS]
+            h = np.full(block.shape[0], n_words, dtype=np.uint64)
+            for j in range(n_words):
+                h ^= block[:, j]
+                h *= _FP_MUL
+                h ^= h >> shift
+            h *= _FP_MIX
+            h ^= h >> shift
+            out[start : start + block.shape[0]] = h
+    return out
+
+
+def _unique_rows_by_fingerprint(
+    samples: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Label rows by first occurrence, grouping them by a verified fingerprint.
+
+    Rows are grouped by :func:`_row_fingerprints`, and every row is then
+    compared word for word with the first row of its group. Equal rows always
+    share a fingerprint, so when every comparison holds the grouping is
+    exactly the bitwise grouping of :func:`_stable_unique_rows`. The extra
+    memory is a few ``(N,)`` integer arrays, where hashing the rows as Python
+    ``bytes`` keys holds a second full copy of the design.
+
+    Args:
+        samples: ``(N, D)`` C-contiguous array with ``N >= 1``, ``D >= 1``
+            and a row size that is a multiple of 8 bytes.
+
+    Returns:
+        ``(is_first, expanded_to_unique)`` as :func:`_stable_unique_rows`
+        defines them, or ``None`` when two distinct rows share a fingerprint
+        (the caller then falls back to exact keys).
+    """
+    n_rows = samples.shape[0]
+    words = samples.view(np.uint64).reshape(n_rows, -1)
+    fp = _row_fingerprints(words)
+    # A stable sort keeps each fingerprint group in row order, so the first
+    # entry of a group is its first occurrence.
+    order = np.argsort(fp, kind="stable")
+    sorted_fp = fp[order]
+    del fp
+    group_start = np.empty(n_rows, dtype=bool)
+    group_start[0] = True
+    np.not_equal(sorted_fp[1:], sorted_fp[:-1], out=group_start[1:])
+    del sorted_fp
+    # first_of[r]: the first row of r's fingerprint group.
+    group_id = np.cumsum(group_start) - 1
+    first_of = np.empty(n_rows, dtype=np.int64)
+    first_of[order] = order[np.flatnonzero(group_start)][group_id]
+    del order, group_start, group_id
+    # Verify, a block of rows at a time so the comparison never holds a
+    # full-size boolean array.
+    for start in range(0, n_rows, _FP_BLOCK_ROWS):
+        stop = min(start + _FP_BLOCK_ROWS, n_rows)
+        reps = first_of[start:stop]
+        if not np.array_equal(words[start:stop], words[reps]):
+            return None
+    is_first = first_of == np.arange(n_rows)
+    # The label of a first occurrence is the number of first occurrences
+    # before it; every other row takes the label of its group's first row.
+    label_of_first = np.cumsum(is_first) - 1
+    return is_first, label_of_first[first_of]
+
+
 def _stable_unique_rows(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Deduplicate rows while preserving first-occurrence order.
+
+    Two rows merge only when they are bitwise equal, so 0.0 and -0.0 stay
+    distinct and equal NaN patterns merge.
+
+    When no row repeats, the unique rows are the input rows, and the input
+    array is returned as the unique array rather than copied (after
+    ``np.ascontiguousarray``). The callers build the input for this call and
+    never write to it afterwards, so sharing it is safe and saves a full copy
+    of the design.
 
     Args:
         samples: ``(N, D)`` design matrix in physical units.
@@ -671,7 +787,7 @@ def _stable_unique_rows(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         maps each original row position in ``samples`` back to the retained
         unique row index.
     """
-    # Ensure C-contiguous layout so the byte view below is well defined.
+    # Ensure C-contiguous layout so the byte views below are well defined.
     samples = np.ascontiguousarray(samples)
     n_rows, n_cols = samples.shape
 
@@ -684,17 +800,36 @@ def _stable_unique_rows(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         # Every row holds the same (empty) value, so one row survives.
         return samples[:1].copy(), np.zeros(n_rows, dtype=np.int64)
 
+    found = None
+    if (samples.dtype.itemsize * n_cols) % 8 == 0:
+        found = _unique_rows_by_fingerprint(samples)
+    if found is None:
+        found = _unique_rows_by_bytes(samples)
+    is_first, expanded_to_unique = found
+    if is_first.all():
+        return samples, expanded_to_unique
+    return samples[np.flatnonzero(is_first)], expanded_to_unique
+
+
+def _unique_rows_by_bytes(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Label rows by first occurrence, keyed on their raw bytes.
+
+    The exact fallback of :func:`_stable_unique_rows`, for a row size that is
+    not a multiple of 8 bytes or a fingerprint collision. It holds every row
+    as a Python ``bytes`` key, a second full copy of the design.
+
+    Args:
+        samples: ``(N, D)`` C-contiguous array with ``N >= 1`` and ``D >= 1``.
+
+    Returns:
+        ``(is_first, expanded_to_unique)``: which rows are first occurrences,
+        and each row's first-occurrence label.
+    """
+    n_rows, n_cols = samples.shape
     # Compare whole rows as raw bytes. This keeps the exact-match semantics of
     # the old ``row.tobytes()`` key: two rows merge only when they are bitwise
-    # equal, so 0.0 and -0.0 stay distinct and equal NaN patterns still merge.
-    # Exact deduplication is what we want here: if two rows are bitwise equal,
-    # evaluating the model twice is wasteful.
-    #
-    # The void view turns each row into one Python ``bytes`` object, and
-    # ``tolist()`` builds all N of them in one C loop. That is the expensive
-    # part of the old per-row Python loop, which paid for a fresh array view
-    # plus a ``tobytes()`` call on every row. Hashing the keys in a dict then
-    # costs far less than sorting them.
+    # equal. The void view turns each row into one Python ``bytes`` object,
+    # and ``tolist()`` builds all N of them in one C loop.
     #
     # Measured on an M1 Pro at the hot case (N=2**20, D=20, float64): the old
     # per-row loop took 1099 ms, ``np.unique`` over the same void view took
@@ -723,5 +858,4 @@ def _stable_unique_rows(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         np.maximum.accumulate(expanded_to_unique)[:-1],
         out=is_first[1:],
     )
-    unique_samples = samples[np.flatnonzero(is_first)]
-    return unique_samples, expanded_to_unique
+    return is_first, expanded_to_unique

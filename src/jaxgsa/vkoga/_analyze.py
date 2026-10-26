@@ -23,6 +23,7 @@ References:
 
 from __future__ import annotations
 
+import functools
 import warnings
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, cast
@@ -33,7 +34,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.batching import apply_batched, resolve_batch_size
+from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.dependence import Draws, draws_for
 from jaxgsa._core.entry import (
@@ -41,6 +42,7 @@ from jaxgsa._core.entry import (
     _user_stacklevel,
     at_least,
     bootstrap_checks,
+    positive_int,
     prepare,
     require,
 )
@@ -58,11 +60,18 @@ from jaxgsa._core.result import CIInfo
 from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import cdf_to_unit_interval
-from jaxgsa._core.validation import _is_constant_slice, as_key
+from jaxgsa._core.validation import _zero_variance_mask, as_key
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
-from jaxgsa.vkoga._engine import _content_digest, _cross_validate, _fit_vkoga, _predict_vkoga
-from jaxgsa.vkoga._indices import estimate_correlated_indices
+from jaxgsa.vkoga._engine import (
+    GreedyUpdate,
+    _content_digest,
+    _cross_validate,
+    _fit_vkoga,
+    _gaussian_kernel,
+    _predict_vkoga,
+)
+from jaxgsa.vkoga._indices import estimate_correlated_indices, queue_rows
 from jaxgsa.vkoga._result import VKOGAResult
 
 # Keyword-only parameters the irregular engine forwards unchanged to the
@@ -72,6 +81,7 @@ _IRREGULAR_KWARGS = (
     "gamma",
     "ridge",
     "max_centers",
+    "greedy_update",
     "n_folds",
     "n_outer",
     "n_inner",
@@ -90,18 +100,34 @@ _IRREGULAR_KWARGS = (
 # :func:`_make_unit_predictor`). Bounded so frozen fit state cannot accumulate.
 _PREDICTOR_CACHE_MAX = 4
 _PREDICTOR_CACHE: dict[tuple[Any, ...], Callable[[np.ndarray], np.ndarray]] = {}
+# The same memo for the block-mean evaluator S_TC uses (see _make_group_mean).
+_GROUP_MEAN_CACHE: dict[tuple[Any, ...], Callable[[np.ndarray, int], np.ndarray]] = {}
+
+# Centre count granularity of the fitted state handed to the evaluators (see
+# _fit_and_estimate). Up to 31 padding centres with zero coefficients cost
+# little next to one compile per distinct centre count.
+_CENTER_BUCKET = 32
+
+# The surrogate evaluation inside the index estimators sizes its batches
+# against 1 / share of the memory budget; the estimators' queue and draws
+# hold the rest (see vkoga._indices._QUEUE_BUDGET_SHARE).
+_PREDICT_BUDGET_SHARE = 2
 
 # Hyperparameter search grid, following Hilhorst et al. Section 2.4.1: ten
 # log-spaced values each, cross-validated as a 10x10 product.
 _GAMMA_GRID = np.logspace(-2, np.log10(50.0), 10)
-# _engine._JITTER always adds an unconditional 1e-8 * mean(diag(AtA)) to the
-# solved system, on top of whatever ridge asks for. At a typical training
-# size (n ~ 1024) that jitter is about 2.2e-6. A ridge value below that scale
-# changes nothing: the jitter already dominates, so those candidates tie in
-# cross-validation and VKOGAResult.ridge would report a value smaller than
-# the regularisation actually in force. The grid starts at the jitter scale
-# instead, so every candidate is distinguishable.
+# Ridge candidates for a float32 fit: ten log-spaced values from 1e-6.
+# Candidates below 1e-6 were measured on six problems (Ishigami N=600/2048,
+# correlated Ishigami, G-function, linear, a (T, K) model; two seeds) and
+# never helped in float32: the held-out error moved by -3% to +1.6%.
 _RIDGE_GRID = np.logspace(-6, -2, 10)
+# Ridge candidates for a float64 fit: the same spacing continued down four
+# more steps, to about 1.7e-8. On the same twelve float64 fits the held-out
+# error fell on ten (6% to 54%) and never rose. The lowest candidates are at
+# the scale of _engine._JITTER (an extra ridge of about 3e-8 to 2e-7 at
+# n ~ 1024), so VKOGAResult.ridge can undercount the regularisation in force
+# there.
+_RIDGE_GRID_F64 = np.concatenate([10.0 ** (-6 - 4 / 9 * np.arange(4, 0, -1)), _RIDGE_GRID])
 
 # Cap on kernel centres when the caller does not choose one. Greedy selection
 # cost is O(max_centers * n), and the marginal accuracy of further centres
@@ -129,6 +155,7 @@ def analyze(
     gamma: float | None = None,
     ridge: float | None = None,
     max_centers: int | None = None,
+    greedy_update: GreedyUpdate = "exact",
     n_folds: int = 10,
     n_outer: int = 512,
     n_inner: int = 128,
@@ -171,6 +198,12 @@ def analyze(
             cross-validates over a grid.
         max_centers: Maximum kernel centres the greedy may select, at least 1.
             Defaults to 300, capped at ``N``.
+        greedy_update: How the greedy updates the power function after each
+            centre. ``"exact"`` (default) recomputes it from the whole Newton
+            basis. ``"incremental"`` subtracts the new basis column only,
+            which makes the greedy loop faster. Its rounding differs, so it
+            often selects different centres, and the indices move by about
+            their Monte-Carlo error. They are not less accurate.
         n_folds: Folds for hyperparameter cross-validation, at least 2.
         n_outer: Outer (conditioning) sample size per parameter, at least 2.
             Rounded up to the next power of two (Sobol' balance).
@@ -271,7 +304,8 @@ def analyze(
 
     Warns:
         JaxgsaWarning: In any of four cases. An output slice has zero variance.
-            JAX is in single precision, where the kernel solve loses accuracy
+            The surrogate is fitted in single precision (float32 inputs, or
+            JAX without x64), where the greedy centre selection stops early
             for small ``gamma`` (see :mod:`jaxgsa.vkoga`). The cross-validated
             surrogate error is a large fraction of the output standard
             deviation, which makes every index untrustworthy. ``S_U`` had to be
@@ -307,6 +341,10 @@ def analyze(
         checks=(
             at_least("max_centers", max_centers, 1),
             require(
+                greedy_update in ("exact", "incremental"),
+                f'greedy_update must be "exact" or "incremental", got {greedy_update!r}',
+            ),
+            require(
                 n_folds >= 2,
                 f"n_folds must be >= 2 for cross-validation, got {n_folds}",
             ),
@@ -325,7 +363,7 @@ def analyze(
                     ("n_variance", n_variance),
                 )
             ),
-            at_least("batch_size", batch_size, 1),
+            positive_int("batch_size", batch_size),
             *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
             require(
                 D >= 2,
@@ -363,40 +401,87 @@ def analyze(
 
     Y_canonical = ctx.Y3
     n_time, n_out = Y_canonical.shape[1], Y_canonical.shape[2]
-    Y_flat = Y_canonical.reshape(Y_canonical.shape[0], n_time * n_out)
+    # One fit dtype for the inputs and the outputs. Mixed float32/float64
+    # inputs would otherwise meet in the greedy loop's carry and fail there.
+    fit_dtype = jnp.result_type(X.dtype, Y_canonical.dtype)
+    Y_flat = Y_canonical.reshape(Y_canonical.shape[0], n_time * n_out).astype(fit_dtype)
 
-    _warn_single_precision()
+    # The RBF kernel is isotropic, so every column must share a scale; the
+    # marginal CDF map is the same transform HDMR uses for its basis.
+    U = cdf_to_unit_interval(X, problem).astype(fit_dtype)
+    _warn_single_precision(fit_dtype)
     # The input draws are built once and shared by the point estimate and every
     # bootstrap replicate. The dependence comes from the problem alone, so the
     # result's ``dependence`` always equals ``problem.dependence``.
     input_draws = draws_for(problem)
 
-    # The RBF kernel is isotropic, so every column must share a scale; the
-    # marginal CDF map is the same transform HDMR uses for its basis.
-    U = cdf_to_unit_interval(X, problem)
     # VKOGA carries no constant term, so a non-zero output mean would have to
     # be reconstructed by the kernel expansion itself. Centring removes that
     # burden and measurably improves the fit.
     y_mean = Y_flat.mean(axis=0)
     Y_centered = Y_flat - y_mean
 
+    # Non-finite data reaches this point only under on_invalid="propagate"
+    # or "skip". All slices share one fit, so a NaN in one slice would poison
+    # the whole fit. Fit the finite slices on their own and give the others
+    # NaN, which is what those policies promise: the NaN flows into the
+    # indices of the slice it is in. A non-finite input row touches every
+    # slice.
+    fit_slices = np.asarray(jnp.all(jnp.isfinite(Y_flat), axis=0)) & bool(jnp.all(jnp.isfinite(U)))
+    # "skip" promises silence, so the slices are only masked there.
+    if not fit_slices.all() and on_invalid != "skip":
+        _warn_nonfinite_slices(
+            fit_slices,
+            on_invalid,
+            inputs=not bool(jnp.all(jnp.isfinite(U))),
+            stacklevel=_user_stacklevel(),
+        )
+    if not fit_slices.any():
+        return _all_nan_result(
+            problem,
+            ctx,
+            n_time=n_time,
+            n_out=n_out,
+            dtype=fit_dtype,
+            gamma=gamma,
+            ridge=ridge,
+            invalid=invalid,
+            y_mean=y_mean,
+        )
+    fit_cols = np.flatnonzero(fit_slices)
+    n_slices = int(fit_slices.shape[0])
+
+    def _expand(a: Any, axis: int) -> np.ndarray:
+        """Put per-fitted-slice values back on the full slice axis, NaN elsewhere."""
+        a = np.asarray(a)
+        axis = axis % a.ndim
+        shape = list(a.shape)
+        shape[axis] = n_slices
+        full = np.full(shape, np.nan, dtype=a.dtype)
+        index: list[Any] = [slice(None)] * a.ndim
+        index[axis] = fit_cols
+        full[tuple(index)] = a
+        return full
+
     resolved_centers = min(int(max_centers), int(U.shape[0]))
     gamma_value, ridge_value, cv_rmse = _resolve_hyperparameters(
         U,
-        Y_centered,
+        Y_centered[:, fit_cols],
         gamma=gamma,
         ridge=ridge,
         max_centers=resolved_centers,
+        greedy_update=greedy_update,
         n_folds=n_folds,
         seed=seed,
     )
-    _warn_poor_surrogate(cv_rmse, Y_centered)
+    _warn_poor_surrogate(cv_rmse, Y_centered[:, fit_cols])
     state, indices = _fit_and_estimate(
         U,
-        Y_flat,
+        Y_flat[:, fit_cols],
         gamma=gamma_value,
         ridge=ridge_value,
         max_centers=resolved_centers,
+        greedy_update=greedy_update,
         input_draws=input_draws,
         problem=problem,
         n_outer=n_outer,
@@ -408,15 +493,45 @@ def analyze(
     )
 
     _warn_nonfinite_coefficients(state.coefficients, stacklevel=_user_stacklevel())
+    if cv_rmse is not None:
+        cv_rmse = _expand(cv_rmse, -1)
+    if not fit_slices.all():
+        # The skipped slices predict NaN, like their indices.
+        state = state._replace(
+            coefficients=jnp.asarray(_expand(state.coefficients, -1)),
+            rmse=jnp.asarray(_expand(state.rmse, -1)),
+        )
+        indices = indices._replace(
+            **{name: _expand(getattr(indices, name), -2) for name in _INTERVAL_FIELDS},
+            variance=_expand(indices.variance, -1),
+        )
+    # A constant training slice has no variance to decompose. Its surrogate
+    # variance is round-off (about 1e-30 in float64), which divided out would
+    # give small non-zero indices. Use the zero-variance warning's own test,
+    # so the indices are NaN as that warning promises.
+    constant = np.asarray(_zero_variance_mask(Y_flat))
+    if constant.any():
+        indices = indices._replace(
+            **{
+                name: np.where(constant[:, None], np.nan, getattr(indices, name))
+                for name in _INTERVAL_FIELDS
+            },
+            variance=np.where(constant, 0.0, indices.variance),
+        )
+
+    # The index estimators run on the host in float64. Every float field is
+    # returned in the dtype the surrogate was fitted in, so float32 inputs
+    # give float32 results under x64 too.
+    work_dtype = state.centers.dtype
 
     def _shape_index(flat: np.ndarray) -> Array:
         """Reshape an ``(..., S, D)`` index block to the output contract."""
-        arr = jnp.asarray(flat.reshape(*flat.shape[:-2], n_time, n_out, D))
+        arr = jnp.asarray(flat.reshape(*flat.shape[:-2], n_time, n_out, D), dtype=work_dtype)
         return ctx.squeeze(arr, n_trailing=1)
 
     def _shape_slice(flat: np.ndarray) -> Array:
         """Reshape an ``(S,)`` per-slice diagnostic to the output contract."""
-        arr = jnp.asarray(flat.reshape(n_time, n_out))
+        arr = jnp.asarray(flat.reshape(n_time, n_out), dtype=work_dtype)
         return ctx.squeeze(arr, n_trailing=0)
 
     confs: dict[str, Array | None] = dict.fromkeys(_INTERVAL_FIELDS)
@@ -424,10 +539,11 @@ def analyze(
     if n_bootstrap > 0:
         replicates = _bootstrap_replicates(
             U,
-            Y_flat,
+            Y_flat[:, fit_cols],
             gamma=gamma_value,
             ridge=ridge_value,
             max_centers=resolved_centers,
+            greedy_update=greedy_update,
             input_draws=input_draws,
             problem=problem,
             n_outer=n_outer,
@@ -437,12 +553,16 @@ def analyze(
             n_bootstrap=n_bootstrap,
             batch_size=batch_size,
             stacklevel=_user_stacklevel(),
+            nan_by_design=constant[fit_cols],
         )
         # _shape_index already squeezes to the caller's own rank; interval()
         # reads a shape only to broadcast [lower, upper], so it works the
         # same on this squeezed layout as on the raw (T, K, D) one.
         points = {name: _shape_index(getattr(indices, name)) for name in _INTERVAL_FIELDS}
-        draws = {name: _shape_index(replicates[name]) for name in _INTERVAL_FIELDS}
+        draws = {
+            name: _shape_index(np.where(constant[:, None], np.nan, _expand(replicates[name], -2)))
+            for name in _INTERVAL_FIELDS
+        }
         interval_confs, ci = interval(
             points,
             draws,
@@ -457,7 +577,7 @@ def analyze(
     with np.errstate(divide="ignore", invalid="ignore"):
         explained = 1.0 - np.asarray(state.rmse) ** 2 / np.asarray(Y_flat).var(axis=0)
     # A constant slice has no variance to explain; float32 var is ~1e-16, not 0.
-    explained = np.where(np.asarray(_is_constant_slice(Y_flat)), np.nan, explained)
+    explained = np.where(constant, np.nan, explained)
     output_shape = ctx.squeeze(jnp.zeros((n_time, n_out)), n_trailing=0).shape
     result = VKOGAResult(
         S_TC=_shape_index(indices.S_TC),
@@ -489,11 +609,11 @@ def analyze(
         # Host NumPy/SciPy end to end, so there is no compile to mention and
         # stop() has nothing to block on.
         elapsed = _verbose.stop(t0, result.S_TC)
-        batching = (
-            f"batch_size: {batch_size} (user-set)"
-            if batch_size is not None
-            else "batch_size: auto (resolved from the memory budget)"
-        )
+        # The rows per surrogate call the index estimators queued, the
+        # same resolver they ran.
+        rows = queue_rows(problem.n_params, len(fit_cols), batch_size)
+        origin = "user-set" if batch_size is not None else "resolved from the memory budget"
+        batching = f"batch_size: {rows} ({origin})"
         _verbose.analysis_summary(
             method="jaxgsa.vkoga.analyze",
             dependence=problem.dependence,
@@ -523,6 +643,7 @@ def _fit_and_estimate(
     gamma: float,
     ridge: float,
     max_centers: int,
+    greedy_update: GreedyUpdate = "exact",
     input_draws: Draws,
     problem: Problem,
     n_outer: int,
@@ -542,6 +663,8 @@ def _fit_and_estimate(
         Y_flat: Training outputs, shape ``(N, S)``, uncentred.
         gamma: RBF shape parameter to fit with.
         ridge: Kernel regularisation to fit with.
+        greedy_update: ``"exact"`` or ``"incremental"``; see
+            :func:`jaxgsa.vkoga.analyze`.
         max_centers: Maximum kernel centres the greedy may select.
         input_draws: Joint and conditional input draws for the index integration.
         problem: Problem whose declared marginals pick each parameter's
@@ -568,15 +691,24 @@ def _fit_and_estimate(
         Y_flat - y_mean,
         gamma=gamma,
         max_centers=max_centers,
+        greedy_update=greedy_update,
         ridge=ridge,
     )
     # The fitted state is padded to the static max_centers size (rows past
-    # n_centers hold zero coefficients). Slice it down host-side so predict
-    # and the index estimators pay only for the centres the greedy selected.
-    n_selected = int(state.n_centers)
+    # n_centers hold zero coefficients). Slice it down so predict and the
+    # index estimators pay only for about the centres the greedy selected.
+    # The width is rounded up to a multiple of _CENTER_BUCKET: the
+    # evaluators compile per width, and the greedy's stopping count varies
+    # from fit to fit (often in float32), so an exact slice would compile
+    # anew for every dataset and bootstrap replicate. The slice runs on the
+    # host for the same reason: an eager device slice compiles per width.
+    width = min(
+        int(state.centers.shape[0]),
+        -(-int(state.n_centers) // _CENTER_BUCKET) * _CENTER_BUCKET,
+    )
     state = state._replace(
-        centers=state.centers[:n_selected],
-        coefficients=state.coefficients[:n_selected],
+        centers=jnp.asarray(np.asarray(state.centers)[:width]),
+        coefficients=jnp.asarray(np.asarray(state.coefficients)[:width]),
     )
     indices = estimate_correlated_indices(
         problem=problem,
@@ -584,6 +716,7 @@ def _fit_and_estimate(
         predict=_make_unit_predictor(state, y_mean, batch_size),
         n_outer=n_outer,
         n_inner=n_inner,
+        predict_group_mean=_make_group_mean(state, y_mean, batch_size),
         n_variance=n_variance,
         entropy=entropy,
         batch_size=batch_size,
@@ -599,6 +732,7 @@ def _bootstrap_replicates(
     gamma: float,
     ridge: float,
     max_centers: int,
+    greedy_update: GreedyUpdate = "exact",
     input_draws: Draws,
     problem: Problem,
     n_outer: int,
@@ -608,6 +742,7 @@ def _bootstrap_replicates(
     n_bootstrap: int,
     batch_size: int | None,
     stacklevel: int = 2,
+    nan_by_design: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Refit the surrogate on resampled training rows, once per replicate.
 
@@ -630,6 +765,8 @@ def _bootstrap_replicates(
         Y_flat: Training outputs, shape ``(N, S)``, uncentred.
         gamma: RBF shape parameter, held at the cross-validated value.
         ridge: Kernel regularisation, held at the cross-validated value.
+        greedy_update: ``"exact"`` or ``"incremental"``; see
+            :func:`jaxgsa.vkoga.analyze`.
         max_centers: Maximum kernel centres the greedy may select.
         input_draws: Joint and conditional input draws for the index integration.
         problem: Problem whose declared marginals pick each parameter's
@@ -642,6 +779,9 @@ def _bootstrap_replicates(
         batch_size: Sample rows per device call, or ``None`` for the budget.
         stacklevel: ``stacklevel`` for the non-finite replicate warning, from
             :func:`jaxgsa._core.entry._user_stacklevel`.
+        nan_by_design: Boolean mask over the slices, ``True`` for a slice
+            whose indices are NaN anyway (a constant output). Those slices do
+            not count towards the non-finite replicate warning.
 
     Returns:
         Mapping from index name to an ``(n_bootstrap, S, D)`` array.
@@ -651,7 +791,9 @@ def _bootstrap_replicates(
     for replicate in range(n_bootstrap):
         stream = jax.random.fold_in(key, replicate)
         row_key, index_key = jax.random.split(stream)
-        rows = jax.random.randint(row_key, shape=(n_rows,), minval=0, maxval=n_rows)
+        rows = jax.random.randint(
+            row_key, shape=(n_rows,), minval=0, maxval=n_rows, dtype=jnp.int32
+        )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", JaxgsaWarning)
             _, indices = _fit_and_estimate(
@@ -660,6 +802,7 @@ def _bootstrap_replicates(
                 gamma=gamma,
                 ridge=ridge,
                 max_centers=max_centers,
+                greedy_update=greedy_update,
                 input_draws=input_draws,
                 problem=problem,
                 n_outer=n_outer,
@@ -671,19 +814,24 @@ def _bootstrap_replicates(
         for name in _INTERVAL_FIELDS:
             draws[name].append(np.asarray(getattr(indices, name)))
     stacked = {name: np.stack(values) for name, values in draws.items()}
+    keep = np.ones(Y_flat.shape[1], dtype=bool) if nan_by_design is None else ~nan_by_design
     n_bad = int(
         np.sum(
             ~np.all(
-                [np.isfinite(v).all(axis=tuple(range(1, v.ndim))) for v in stacked.values()],
+                [
+                    np.isfinite(v[:, keep]).all(axis=tuple(range(1, v.ndim)))
+                    for v in stacked.values()
+                ],
                 axis=0,
             )
         )
     )
     if n_bad:
+        hint = "a larger ridge" if jnp.finfo(U.dtype).bits == 64 else "float64 or a larger ridge"
         warnings.warn(
             f"{n_bad} of {n_bootstrap} bootstrap replicates have non-finite "
             "indices (a singular kernel fit). The intervals "
-            "skip them. Try float64 or a larger ridge.",
+            f"skip them. Try {hint}.",
             category=JaxgsaWarning,
             stacklevel=stacklevel,
         )
@@ -707,6 +855,94 @@ def _warn_nonfinite_coefficients(coefficients: Array, *, stacklevel: int) -> Non
             category=JaxgsaWarning,
             stacklevel=stacklevel,
         )
+
+
+def _warn_nonfinite_slices(
+    fit_slices: np.ndarray, on_invalid: str, *, inputs: bool, stacklevel: int
+) -> None:
+    """Warn that output slices with non-finite data get NaN indices.
+
+    Args:
+        fit_slices: Boolean mask over the flattened output slices, ``True``
+            where the slice is finite and is fitted.
+        on_invalid: The policy that let the non-finite data through.
+        inputs: ``True`` when the inputs hold the non-finite value, which
+            touches every slice.
+        stacklevel: ``stacklevel`` for the warning, from
+            :func:`jaxgsa._core.entry._user_stacklevel`.
+    """
+    if inputs:
+        message = (
+            f'jaxgsa.vkoga: the inputs X hold non-finite values (on_invalid="{on_invalid}"), '
+            "so nothing can be fitted and every index is NaN."
+        )
+    else:
+        n_bad = int((~fit_slices).sum())
+        message = (
+            f"jaxgsa.vkoga: {n_bad} of {fit_slices.size} output slice(s) hold non-finite values "
+            f'(on_invalid="{on_invalid}"); their indices are NaN. The other slices are fitted '
+            "without them."
+        )
+    warnings.warn(
+        message,
+        category=JaxgsaWarning,
+        stacklevel=stacklevel,
+    )
+
+
+def _all_nan_result(
+    problem: Problem,
+    ctx: Any,
+    *,
+    n_time: int,
+    n_out: int,
+    dtype: Any,
+    gamma: float | None,
+    ridge: float | None,
+    invalid: Any,
+    y_mean: Array,
+) -> VKOGAResult:
+    """Build the result for data where every output slice is non-finite.
+
+    Nothing can be fitted, so every index and diagnostic is NaN and the
+    result carries no surrogate (``predict`` raises).
+
+    Args:
+        problem: Problem of the analysis.
+        ctx: The preamble context, for the output-rank squeeze.
+        n_time: Number of time points ``T``.
+        n_out: Number of outputs ``K``.
+        dtype: Fit dtype of the result fields.
+        gamma: The caller's ``gamma``, or ``None``.
+        ridge: The caller's ``ridge``, or ``None``.
+        invalid: The non-finite report from the preamble.
+        y_mean: Output means, shape ``(S,)``.
+
+    Returns:
+        A :class:`VKOGAResult` of NaN fields.
+    """
+    D = problem.n_params
+    index = ctx.squeeze(jnp.full((n_time, n_out, D), jnp.nan, dtype=dtype), n_trailing=1)
+    per_slice = ctx.squeeze(jnp.full((n_time, n_out), jnp.nan, dtype=dtype), n_trailing=0)
+    return VKOGAResult(
+        S_TC=index,
+        S_TU=index,
+        S_U=index,
+        S_C=index,
+        S_IU=index,
+        problem=problem,
+        variance=per_slice,
+        n_centers=0,
+        gamma=float("nan") if gamma is None else float(gamma),
+        ridge=float("nan") if ridge is None else float(ridge),
+        invalid=invalid,
+        rmse=per_slice,
+        cv_rmse=None if gamma is not None and ridge is not None else per_slice,
+        explained_variance=per_slice,
+        _fit=None,
+        _y_mean=y_mean,
+        _output_shape=per_slice.shape,
+    )
 
 
 def _seed_from_key(key: Array) -> int:
@@ -736,19 +972,32 @@ def _seed_from_key(key: Array) -> int:
     return int(np.bitwise_xor.reduce(words))
 
 
-def _warn_single_precision() -> None:
-    """Warn that float32 limits the kernel solve's accuracy.
+def _warn_single_precision(dtype: Any) -> None:
+    """Warn that a float32 fit limits the surrogate's accuracy.
 
-    The regularised normal equations square the condition number of the cross
-    kernel, which for small ``gamma`` exceeds what float32 can carry. Cross
-    validation partly self-corrects by scoring in the same arithmetic and so
-    avoiding the blown-up corner of the grid, but the ceiling is real.
+    The coefficient solve is stable in float32 (it runs in the Newton basis).
+    Two limits remain, both at small ``gamma``. First, the greedy's power
+    function falls to float32 rounding level after fewer centres than float64
+    would select, and the greedy stops there. Second, prediction sums kernel
+    translates with coefficients ``alpha = L^{-T} beta`` that grow large (up
+    to about 1e6 at ``gamma = 0.1``), so float32 cancellation in that sum
+    costs accuracy. Predicting through the Newton basis instead was measured
+    and did not help (Ishigami, N=2048: test RMSE 1.433 against 1.443 at
+    ``gamma = 0.5``, float64 1.23) at 5-7 times the cost, so the greedy stop
+    is the larger of the two. Cross-validation scores in the same arithmetic,
+    so it steers away from that corner of the grid, but an explicit small
+    ``gamma`` can still land in it.
+
+    Args:
+        dtype: Fit dtype. The fit runs in this dtype whatever the x64 flag
+            says, so float32 inputs under x64 warn too.
     """
-    if not x64_enabled():
+    if jnp.finfo(dtype).bits < 64:
         warnings.warn(
-            "jaxgsa.vkoga: JAX is in single precision; the kernel solve is ill-conditioned for "
-            "small gamma and the surrogate may be inaccurate. Enable float64 with "
-            'jax.config.update("jax_enable_x64", True) before fitting.',
+            "jaxgsa.vkoga: the surrogate is fitted in single precision. For small gamma the "
+            "greedy centre selection stops early and the kernel sum in prediction loses digits "
+            "to cancellation, so the surrogate may be inaccurate. Enable float64 with "
+            'jax.config.update("jax_enable_x64", True) and pass float64 inputs.',
             stacklevel=3,
             category=JaxgsaWarning,
         )
@@ -761,6 +1010,7 @@ def _resolve_hyperparameters(
     gamma: float | None,
     ridge: float | None,
     max_centers: int,
+    greedy_update: GreedyUpdate = "exact",
     n_folds: int,
     seed: int,
 ) -> tuple[float, float, np.ndarray | None]:
@@ -774,6 +1024,8 @@ def _resolve_hyperparameters(
         Y: Centred training outputs, shape ``(N, S)``.
         gamma: Fixed RBF shape parameter, or ``None`` to cross-validate.
         ridge: Fixed kernel regularisation, or ``None`` to cross-validate.
+        greedy_update: ``"exact"`` or ``"incremental"``; see
+            :func:`jaxgsa.vkoga.analyze`.
         max_centers: Maximum kernel centres the greedy may select.
         n_folds: Folds for the cross-validation.
         seed: Seed for the fold assignment.
@@ -795,13 +1047,15 @@ def _resolve_hyperparameters(
         return float(gamma), float(ridge), None
 
     gammas = np.asarray([gamma]) if gamma is not None else _GAMMA_GRID
-    ridges = np.asarray([ridge]) if ridge is not None else _RIDGE_GRID
+    default_ridges = _RIDGE_GRID_F64 if jnp.finfo(U.dtype).bits == 64 else _RIDGE_GRID
+    ridges = np.asarray([ridge]) if ridge is not None else default_ridges
     per_slice_jax, pooled_jax = _cross_validate(
         U,
         Y,
         gammas=gammas,
         ridges=ridges,
         max_centers=max_centers,
+        greedy_update=greedy_update,
         n_folds=n_folds,
         seed=seed,
     )
@@ -810,10 +1064,15 @@ def _resolve_hyperparameters(
     scores = np.asarray(pooled_jax)
     finite = np.isfinite(scores)
     if not finite.any():
+        hint = (
+            "Increase ridge or pass gamma and ridge explicitly."
+            if jnp.finfo(U.dtype).bits == 64
+            else "Enable float64 with jax.config.update('jax_enable_x64', True) and pass "
+            "float64 inputs, increase ridge, or pass gamma and ridge explicitly."
+        )
         raise RuntimeError(
             "Every cross-validation score is non-finite; the kernel solves failed on the whole "
-            "hyperparameter grid. Enable float64 with jax.config.update('jax_enable_x64', True), "
-            "increase ridge, or pass gamma and ridge explicitly."
+            f"hyperparameter grid. {hint}"
         )
     # A fold can return a non-finite score when the solve blows up; treat those
     # as the worst possible rather than letting argmin pick a NaN.
@@ -882,12 +1141,60 @@ def _unit_evaluator(state, y_mean: Array):
     """
     n_centers = int(state.centers.shape[0])
     n_slices = int(state.coefficients.shape[1])
-    itemsize = int(jnp.zeros(()).itemsize)
+    itemsize = int(state.centers.dtype.itemsize)
 
     def kernel(U: Array) -> Array:
         return _predict_vkoga(state, U) + y_mean
 
     return kernel, itemsize * (n_centers + n_slices)
+
+
+@jax.jit
+def _eval_rows(
+    U: Array, centers: Array, coefficients: Array, gamma: Array, y_mean: Array
+) -> Array:
+    """Evaluate the surrogate at ``(n, D)`` unit-cube rows.
+
+    The fitted arrays are arguments, not closure constants, so one compiled
+    program serves every fit of the same shape and dtype: a new dataset or a
+    bootstrap replicate compiles nothing.
+
+    Args:
+        U: Unit-cube rows, shape ``(n, D)``.
+        centers: Kernel centres, shape ``(m, D)``.
+        coefficients: Expansion coefficients, shape ``(m, S)``.
+        gamma: Gaussian shape parameter.
+        y_mean: Training output mean, shape ``(S,)``.
+
+    Returns:
+        Predictions, shape ``(n, S)``.
+    """
+    return _gaussian_kernel(U, centers, gamma) @ coefficients + y_mean
+
+
+@functools.partial(jax.jit, static_argnums=5)
+def _eval_group_means(
+    U: Array, centers: Array, coefficients: Array, gamma: Array, y_mean: Array, group: int
+) -> Array:
+    """Mean surrogate value over consecutive blocks of ``group`` rows.
+
+    The kernel is evaluated in the dtype of ``U`` and ``centers``; the block
+    mean and the product with the coefficients run in the dtype of
+    ``coefficients``, which the caller may widen to float64.
+
+    Args:
+        U: Unit-cube rows, shape ``(n, D)``, ``n`` a multiple of ``group``.
+        centers: Kernel centres, shape ``(m, D)``.
+        coefficients: Expansion coefficients, shape ``(m, S)``.
+        gamma: Gaussian shape parameter.
+        y_mean: Training output mean, shape ``(S,)``.
+        group: Block size.
+
+    Returns:
+        Block means, shape ``(n / group, S)``.
+    """
+    K = _gaussian_kernel(U, centers, gamma).astype(coefficients.dtype)
+    return K.reshape(-1, group, K.shape[1]).mean(axis=1) @ coefficients + y_mean
 
 
 def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
@@ -929,18 +1236,126 @@ def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
     if pred is not None:
         return pred
 
-    kernel, bytes_per_row = _unit_evaluator(state, y_mean)
-    compiled = jax.jit(kernel)
+    _, bytes_per_row = _unit_evaluator(state, y_mean)
+    centers, coefficients, gamma = state.centers, state.coefficients, state.gamma
 
     def predict(U: np.ndarray) -> np.ndarray:
-        U_device = jnp.asarray(U)
-        batch = resolve_batch_size(bytes_per_row, U_device.shape[0], batch_size)
-        return apply_batched(compiled, U_device, batch, to_host=True)
+        n_rows = U.shape[0]
+        # Batches use half the budget: the index estimators' queue and draws
+        # hold the other half (see vkoga._indices._QUEUE_BUDGET_SHARE). The
+        # queue flushes blocks of many sizes, so each batch is padded to a
+        # power of two or to the budgeted width. The kernel then compiles for
+        # a few shapes, not once per block size.
+        batch = resolve_batch_size(
+            _PREDICT_BUDGET_SHARE * bytes_per_row, _next_power_of_2(n_rows), batch_size
+        )
+        # The batch width can change the rounding of the kernel products
+        # (about 3e-8 relative in float32 at a one-row batch), so results
+        # agree across memory budgets to rounding, not bit for bit.
+        # Float64 on the host, which is what the estimators read, so the
+        # queue does not need a second, converted copy.
+        out = np.empty((n_rows, int(state.coefficients.shape[1])), dtype=np.float64)
+        for start in range(0, n_rows, batch):
+            rows = U[start : start + batch]
+            n_valid = rows.shape[0]
+            if n_valid < batch:
+                rows = np.concatenate(
+                    [rows, np.zeros((batch - n_valid, rows.shape[1]), dtype=rows.dtype)]
+                )
+            # The estimators hand over float64 host rows. Evaluate them in the
+            # fit's own dtype: a float32 fit under x64 would otherwise run a
+            # float64 kernel matrix, about 2.5 times slower for no accuracy.
+            batch_rows = jnp.asarray(rows, dtype=state.centers.dtype)
+            pred = _eval_rows(batch_rows, centers, coefficients, gamma, y_mean)
+            out[start : start + n_valid] = np.asarray(pred)[:n_valid]
+        return out
 
     if len(_PREDICTOR_CACHE) >= _PREDICTOR_CACHE_MAX:
         _PREDICTOR_CACHE.pop(next(iter(_PREDICTOR_CACHE)))
     _PREDICTOR_CACHE[key] = predict
     return predict
+
+
+def _make_group_mean(
+    state, y_mean: Array, batch_size: int | None
+) -> Callable[[np.ndarray, int], np.ndarray] | None:
+    """Build the ``(n, D) -> (n / g, S)`` evaluator of inner-block means.
+
+    ``S_TC`` needs only the mean prediction over each inner block. The
+    surrogate is linear in its coefficients, so that mean is the mean kernel
+    row times the coefficients. This replaces ``g`` products with the
+    ``(m, S)`` coefficients by one, which is most of the prediction cost when
+    ``S`` is large. The two orders agree in exact arithmetic.
+
+    In floating point they do not, for a float32 fit. The coefficients of a
+    small-``gamma`` fit are large (up to about 1e6), so a float32 mean kernel
+    row times them rounds once with a large relative error, while the plain
+    path rounds each prediction and averages in float64. Measured on a fixed
+    float32 surrogate against a float64 evaluation of it: a float32 product
+    shifted ``S_TC`` by up to 1e-2 (G-function, ``gamma = 0.066``) and 5e-2
+    (Ishigami, ``gamma = 0.1``). So for a float32 fit the block mean and the
+    product run in float64, which needs x64; without x64 this returns
+    ``None`` and the caller averages the predictions instead. The kernel
+    itself stays in the fit's dtype. Memoised like
+    :func:`_make_unit_predictor`, and the compiled program takes the fitted
+    arrays as arguments, so a new fit of the same shape compiles nothing.
+
+    Args:
+        state: Fitted (sliced) surrogate state.
+        y_mean: Training output mean to restore, shape ``(S,)``.
+        batch_size: Rows per batch, or ``None`` to derive one from the memory
+            budget.
+
+    Returns:
+        A callable ``(U, g)`` mapping ``(n, D)`` unit-cube rows, ``n`` a
+        multiple of ``g``, to the ``(n / g, S)`` float64 block means, or
+        ``None`` for a float32 fit without x64.
+    """
+    single = jnp.finfo(state.centers.dtype).bits < 64
+    if single and not x64_enabled():
+        return None
+    key = (
+        _content_digest(state.centers, state.coefficients, state.gamma, y_mean),
+        batch_size,
+    )
+    cached = _GROUP_MEAN_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    _, bytes_per_row = _unit_evaluator(state, y_mean)
+    centers, gamma = state.centers, state.gamma
+    # Accumulate a float32 fit's block means and product in float64.
+    coefficients = state.coefficients.astype(jnp.float64) if single else state.coefficients
+    shift = jnp.asarray(y_mean, dtype=coefficients.dtype)
+
+    def group_mean(U: np.ndarray, group: int) -> np.ndarray:
+        n_rows = U.shape[0]
+        if n_rows % group:
+            raise ValueError(f"{n_rows} rows do not split into blocks of {group}")
+        batch = resolve_batch_size(
+            _PREDICT_BUDGET_SHARE * bytes_per_row, _next_power_of_2(n_rows), batch_size
+        )
+        # Whole blocks per batch; the last batch is padded with whole blocks.
+        batch = max(group, batch // group * group)
+        out = np.empty((n_rows // group, int(coefficients.shape[1])), dtype=np.float64)
+        for start in range(0, n_rows, batch):
+            rows = U[start : start + batch]
+            n_valid = rows.shape[0]
+            if n_valid < batch:
+                rows = np.concatenate(
+                    [rows, np.zeros((batch - n_valid, rows.shape[1]), dtype=rows.dtype)]
+                )
+            # Evaluate in the fit's dtype, as _make_unit_predictor does.
+            batch_rows = jnp.asarray(rows, dtype=centers.dtype)
+            means = _eval_group_means(batch_rows, centers, coefficients, gamma, shift, group)
+            means = np.asarray(means)[: n_valid // group]
+            out[start // group : (start + n_valid) // group] = means
+        return out
+
+    if len(_GROUP_MEAN_CACHE) >= _PREDICTOR_CACHE_MAX:
+        _GROUP_MEAN_CACHE.pop(next(iter(_GROUP_MEAN_CACHE)))
+    _GROUP_MEAN_CACHE[key] = group_mean
+    return group_mean
 
 
 def _vkoga_predict_plan(result: VKOGAResult, X_new: Array) -> _PredictPlan:
@@ -961,7 +1376,7 @@ def _vkoga_predict_plan(result: VKOGAResult, X_new: Array) -> _PredictPlan:
     if state is None or result._y_mean is None:
         raise ValueError("VKOGAResult does not contain a fitted surrogate")
 
-    U = cdf_to_unit_interval(X_new, result.problem)
+    U = cdf_to_unit_interval(X_new, result.problem).astype(state.centers.dtype)
     unit_kernel, bytes_per_row = _unit_evaluator(state, result._y_mean)
     output_shape = result._output_shape
 

@@ -50,6 +50,7 @@ import jax.numpy as jnp
 from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget, pad_rows, resolve_batch_size
+from jaxgsa._core.validation import _zero_variance_mask
 from jaxgsa.hdmr._engine import _build_B1, _build_B2, _build_B3, term_order_map
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,11 @@ from jaxgsa.hdmr._engine import _build_B1, _build_B2, _build_B3, term_order_map
 # Terms per block in the final statistics pass. Larger blocks mean fewer loop
 # trips; smaller blocks mean smaller (row, lane, block) temporaries.
 _STATS_TERM_BLOCK = 32
+
+
+# Largest (row, lane, term) working set the final stats pass holds whole
+# (see _fit_hdmr). Above it, the blocked step is faster.
+_STATS_WHOLE_MAX_BYTES = 64 * 1024**2
 
 
 def _basis_bytes_per_row(
@@ -208,7 +214,7 @@ def _ridge_eye(gram: Array, ridge: float, m: int) -> Array:
     Returns:
         Array of shape ``(..., m, m)``.
     """
-    return ridge * _ridge_scale(gram)[..., None, None] * jnp.eye(m)
+    return ridge * _ridge_scale(gram)[..., None, None] * jnp.eye(m, dtype=gram.dtype)
 
 
 def _ridge_scale(gram: Array) -> Array:
@@ -223,25 +229,62 @@ def _ridge_scale(gram: Array) -> Array:
     return jnp.mean(jnp.diagonal(gram, axis1=-2, axis2=-1), axis=-1)
 
 
-def _live_pairs(BtB: Array, ridge: float | Array) -> tuple[Array, Array]:
+def _live_pairs(BtB: Array, ridge: float | Array, raw_scale: Array) -> tuple[Array, Array]:
     """Return the per-term ridge and which terms are live.
 
+    The projected Gram ``G22 - G12^T G1^+ G12`` is a difference of two large
+    matrices. The pseudo-inverse keeps eigenvalues down to ``sqrt(eps)`` of the
+    largest, so the difference carries absolute round-off of about
+    ``sqrt(eps)`` times the unprojected block. A pair of an input that does not
+    fill its bounds keeps only a tiny part of its unprojected Gram, and that
+    round-off makes its block indefinite. The ridge of each block is therefore
+    at least ``sqrt(eps) * raw_scale``; a ridge relative to the projected block
+    alone is far below the round-off there.
+
+    Measured in float64 at D = 8, N = 1024, one input on (0.5, 0.501): the
+    projected blocks of that input keep 1e-7 of their unprojected mean
+    diagonal (healthy blocks keep 0.085), their smallest eigenvalue is
+    -3e-5 against a relative ridge of 4e-9, and the exact solve gave a
+    spurious S2 of 0.09. The largest negative eigenvalue on a 44-case grid
+    was 0.13 ``sqrt(eps)`` of the unprojected mean diagonal.
+
+    On a healthy block the floor against the default ridge (1e-6) is about
+    0.18 at ``n_intervals=2``, 0.08 at 3 and 0.04 at 5, so it does not act.
+    At ``n_intervals=1`` a healthy block keeps only about 0.013 of its
+    unprojected diagonal, the floor is 1.1-1.25 times the default ridge and
+    acts on every pair: S and S2 move by up to 2e-4 on uniform inputs. A
+    caller ridge below about 1.2e-6 (``n_intervals=1``), 1.75e-7 (2) or
+    4e-8 (5) is raised by the floor. At ``n_intervals=1`` with one input on
+    (0.5, 0.501), the dual solve without the floor returned NaN for every
+    index; with it the indices are finite.
+
+    The floor is float64 only. In float32 it is 12 times the ridge of every
+    healthy block (``term_ridge`` is already ``sqrt(eps)`` of the projected
+    block, which keeps 0.085 of the unprojected one), so it would change
+    every float32 fit: by up to 0.016 in S on uniform inputs. The float32 pair
+    CG instead stops before it fits the round-off (see
+    :func:`_joint_pair_solve`).
+
     A pair whose projected Gram is near zero (an input with almost no spread)
-    holds nothing beyond the first order. Its ridge is then tiny and the
-    round-off left by the projection makes its block near-singular or
-    indefinite, which turns the coefficients of every lane into huge values or
-    NaN. Every pair solver drops such a pair alike, with zero coefficients.
+    holds nothing beyond the first order. Every pair solver drops such a pair
+    alike, with zero coefficients.
 
     Args:
         BtB: Projected per-term Gram blocks, ``(n2, m2, m2)``.
         ridge: Relative ridge, as in :func:`_ridge_eye`.
+        raw_scale: Mean diagonal of the unprojected blocks, ``(n2,)``.
 
     Returns:
-        The per-term ridge ``ridge * mean(diag)``, shape ``(n2,)``, and a
-        boolean mask of the live terms, shape ``(n2,)``.
+        The per-term ridge ``max(ridge * mean(diag), sqrt(eps) * raw_scale)``
+        (float64) or ``ridge * mean(diag)`` (float32), shape ``(n2,)``, and
+        a boolean mask of the live terms, shape ``(n2,)``.
     """
-    lam = ridge * _ridge_scale(BtB)
-    live = lam > jnp.sqrt(jnp.finfo(lam.dtype).eps) * jnp.max(lam)
+    scale = _ridge_scale(BtB)
+    root_eps = jnp.sqrt(jnp.finfo(scale.dtype).eps)
+    lam = ridge * scale
+    if scale.dtype == jnp.float64:
+        lam = jnp.maximum(lam, root_eps * raw_scale)
+    live = scale > root_eps * jnp.max(scale)
     return lam, live
 
 
@@ -377,7 +420,8 @@ def _first_order_pinv(G1: Array) -> Array:
 def _pair_normal_pass(
     coefs: list[Array],
     A: Array,
-    rows: list[tuple[int, int]],
+    b: int,
+    n_row_batches: int,
     X_p: Array,
     w_full: Array,
     build: Callable[..., list[Array]],
@@ -391,7 +435,8 @@ def _pair_normal_pass(
     Args:
         coefs: Pair coefficients per lane chunk, each ``(cs, n2, m2)``.
         A: Projection of B2 onto the first-order space, ``(P, m2, n2)``.
-        rows: Row batch bounds.
+        b: Rows per batch.
+        n_row_batches: Number of row batches.
         X_p: Padded inputs.
         w_full: Row mask.
         build: Basis builder for orders up to 2.
@@ -402,14 +447,76 @@ def _pair_normal_pass(
 
     Returns:
         ``Bt^T Bt c`` for each lane chunk, without the ridge term.
+
+    The row batches run in a ``fori_loop``, so only one batch of bases is
+    alive at a time. Unrolled in Python inside the CG loop, XLA was free to
+    keep every batch's bases alive at once: at D = 64, N = 4096 the float32
+    fit went above 3 GiB, and 1.2 GiB with the loop.
     """
     vs = [jnp.einsum("pmj,ljm->lp", A, c) for c in coefs]
     accs = [(jnp.zeros_like(v), jnp.zeros_like(c)) for v, c in zip(vs, coefs, strict=True)]
-    for lo, hi in rows:
-        B1_b, B2_b = build(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)[:2]
-        for j in range(len(coefs)):
-            accs[j] = _acc_pair_normal(B1_b, B2_b, coefs[j], vs[j], accs[j])
+
+    def body(i: Array, accs: list[tuple[Array, Array]]) -> list[tuple[Array, Array]]:
+        X_b = jax.lax.dynamic_slice_in_dim(X_p, i * b, b)
+        w_b = jax.lax.dynamic_slice_in_dim(w_full, i * b, b)
+        B1_b, B2_b = build(X_b, w_b, c2_idx, c3_idx, beta2, beta3)[:2]
+        return [
+            _acc_pair_normal(B1_b, B2_b, c, v, acc)
+            for c, v, acc in zip(coefs, vs, accs, strict=True)
+        ]
+
+    accs = jax.lax.fori_loop(0, n_row_batches, body, accs)
     return [g2 - jnp.einsum("pmj,lp->ljm", A, g1) for g1, g2 in accs]
+
+
+def _pair_normal_cached(coefs: list[Array], A: Array, B1: Array, B2: Array) -> list[Array]:
+    """Apply the projected pair normal matrix with the bases of all rows held.
+
+    The arithmetic is that of :func:`_pair_normal_pass` with one row batch,
+    ``B2 c - B1 (A c)``. Holding the projected basis ``B2 - B1 A`` instead
+    was measured to be worse in float32: at D = 8, N = 1024 with one input on
+    (0.5, 0.501) the pair CG stalled at relative residual 0.07 and S2 of the
+    true pair fell from 0.036 to 0.026.
+
+    Args:
+        coefs: Pair coefficients per lane chunk, each ``(cs, n2, m2)``.
+        A: Projection of B2 onto the first-order space, ``(P, m2, n2)``.
+        B1: First-order basis of all padded rows, ``(N_pad, m1, n1)``.
+        B2: Pair basis of all padded rows, ``(N_pad, m2, n2)``.
+
+    Returns:
+        ``Bt^T Bt c`` for each lane chunk, without the ridge term.
+    """
+    out = []
+    for c in coefs:
+        v = jnp.einsum("pmj,ljm->lp", A, c)
+        g1, g2 = _acc_pair_normal(B1, B2, c, v, (jnp.zeros_like(v), jnp.zeros_like(c)))
+        out.append(g2 - jnp.einsum("pmj,lp->ljm", A, g1))
+    return out
+
+
+def _pair_bases(
+    rows: list[tuple[int, int]],
+    X_p: Array,
+    w_full: Array,
+    build: Callable[..., list[Array]],
+    basis_idx: tuple[Array, Array, Array, Array],
+) -> tuple[Array, Array]:
+    """Build the first-order and pair bases of every padded row.
+
+    Args:
+        rows: Row batch bounds.
+        X_p: Padded inputs.
+        w_full: Row mask.
+        build: Basis builder for orders up to 2.
+        basis_idx: ``(c2_idx, c3_idx, beta2, beta3)``.
+
+    Returns:
+        ``B1``, ``(N_pad, m1, n1)``, and ``B2``, ``(N_pad, m2, n2)``, zero on
+        padded rows.
+    """
+    blocks = [build(X_p[lo:hi], w_full[lo:hi], *basis_idx)[:2] for lo, hi in rows]
+    return jnp.concatenate([b[0] for b in blocks]), jnp.concatenate([b[1] for b in blocks])
 
 
 _PAIR_ITER_FACTOR = 10
@@ -433,6 +540,7 @@ def _joint_pair_solve(
     rhs: list[Array],
     *,
     ridge: float,
+    raw_scale: Array,
     max_iter: int,
     sweep: Callable[[list[Array]], list[Array]],
 ) -> tuple[list[Array], Array, float]:
@@ -442,31 +550,41 @@ def _joint_pair_solve(
     once per pair, so the pairs add up to far more than the residual. The
     joint ridge solution ``(Bt^T Bt + lam) c = Bt^T r`` has no such
     overshoot. It is solved without forming the ``n2 m2`` square matrix: each
-    CG step is one pass over the rows (:func:`_pair_normal_pass`). The
-    per-term solve is the preconditioner and the start.
+    CG step is one pass over the rows (:func:`_pair_normal_pass`) or two
+    products with the cached projected basis. The per-term solve is the
+    preconditioner and the start.
 
     Args:
         BtB: Projected per-term Gram blocks, ``(n2, m2, m2)``.
         rhs: ``Bt^T r`` per lane chunk, each ``(cs, n2, m2)``.
         ridge: Relative ridge, as in :func:`_ridge_eye`.
+        raw_scale: Mean diagonal of the unprojected blocks, ``(n2,)``, for
+            the ridge floor of :func:`_live_pairs`.
         max_iter: Cap on CG steps.
         sweep: Applies the unregularized normal matrix to a list of chunks.
 
     Returns:
-        The pair coefficients per lane chunk, each ``(cs, m2, n2)``, the final
+        The pair coefficients per lane chunk, each ``(cs, m2, n2)``, the
         worst relative residual over all lanes, and the tolerance it was
-        held to.
+        held to. Each lane returns its best iterate, by recurrence residual.
+
+    In float32 this solve relies on stopping early. The projected system holds
+    round-off in near-null directions (an input that does not fill its
+    bounds); a solve that converges further fits them. Measured at D = 8,
+    N = 1024 with one input on (0.5, 0.8): spurious S2 up to 0.0067 with a
+    factored float32 solve, 0.0019 with an SPD-clipped preconditioner, and
+    0.0002 with this CG.
     """
     m_basis = BtB.shape[1]
-    lam = _ridge_eye(BtB, ridge, m_basis)  # (n2, m2, m2)
-    lam_diag = jnp.diagonal(lam, axis1=-2, axis2=-1)  # (n2, m2)
     # A dead pair is dropped as in the direct solves: its preconditioner block
     # is zero, so it starts at zero and its search direction stays zero, and
     # its residual is masked out.
-    _, live = _live_pairs(BtB, ridge)
-    eye = jnp.eye(m_basis)
+    lam_t, live = _live_pairs(BtB, ridge, raw_scale)  # (n2,)
+    eye = jnp.eye(m_basis, dtype=BtB.dtype)
+    lam_diag = jnp.broadcast_to(lam_t[:, None], (lam_t.shape[0], m_basis))  # (n2, m2)
+    M = BtB + lam_t[:, None, None] * eye  # (n2, m2, m2)
     Minv = jnp.where(
-        live[:, None, None], jnp.linalg.inv(jnp.where(live[:, None, None], BtB + lam, eye)), 0.0
+        live[:, None, None], jnp.linalg.inv(jnp.where(live[:, None, None], M, eye)), 0.0
     )
     live_l = live[None, :, None]
 
@@ -480,10 +598,14 @@ def _joint_pair_solve(
     def safe(d: Array) -> Array:
         return jnp.where(d == 0, 1.0, d)
 
-    solver = _get_gram_higher_solver(m_basis, ridge)
     rhs = [jnp.where(live_l, rr, 0.0) for rr in rhs]
     # Start from the independent per-term solution, stored as (cs, n2, m2).
     # A dead block is swapped for the identity, so no near-singular solve runs.
+    # The start keeps the plain relative ridge, without the float64 floor: it
+    # is only a start, and float32 CG (which has no floor) depends on it to
+    # the last bit. Measured: a per-term start with the same ridge but a
+    # different solve order moved float32 S2 by up to 0.003.
+    solver = _get_gram_higher_solver(m_basis, ridge)
     BtB_live = jnp.where(live[:, None, None], BtB, eye)
     x = [solver(BtB_live, r).transpose(0, 2, 1) for r in rhs]
     Mx = sweep(x)
@@ -504,14 +626,17 @@ def _joint_pair_solve(
             jnp.stack([jnp.max(jnp.sqrt(d) / b) for d, b in zip(dot(r, r), bnorm, strict=True)])
         )
 
+    def lane_rel(r: list[Array]) -> list[Array]:
+        return [jnp.sqrt(d) / b for d, b in zip(dot(r, r), bnorm, strict=True)]
+
     def cond(state: tuple) -> Array:
-        _, r, _, _, k, _, k_best = state
+        _, r, _, _, k, _, k_best, _, _ = state
         # Stop at the tolerance, at the step cap, or when the residual has not
         # improved for _PAIR_STALL steps (float32 stalls above the tolerance).
         return (rel_res(r) >= tol) & (k < max_iter) & (k - k_best < stall)
 
     def body(state: tuple) -> tuple:
-        x, r, p, rz, k, best, k_best = state
+        x, r, p, rz, k, best, k_best, x_best, lane_best = state
         Mp = sweep(p)
         Ap = [m + lam_diag[None] * pp for m, pp in zip(Mp, p, strict=True)]
         pAp = dot(p, Ap)
@@ -532,6 +657,15 @@ def _joint_pair_solve(
         p = [zz + be[:, None, None] * pp for zz, be, pp in zip(z, beta, p, strict=True)]
         rel_new = rel_res(r)
         improved = rel_new < 0.99 * best
+        # Keep each lane's best iterate. Float32 CG often stalls and then
+        # drifts, so the last iterate can be worse than an earlier one.
+        lr = lane_rel(r)
+        better = [n < o for n, o in zip(lr, lane_best, strict=True)]
+        x_best = [
+            jnp.where(bt[:, None, None], xx, xb)
+            for bt, xx, xb in zip(better, x, x_best, strict=True)
+        ]
+        lane_best = [jnp.minimum(n, o) for n, o in zip(lr, lane_best, strict=True)]
         return (
             x,
             r,
@@ -540,11 +674,14 @@ def _joint_pair_solve(
             k + 1,
             jnp.where(improved, rel_new, best),
             jnp.where(improved, k + 1, k_best),
+            x_best,
+            lane_best,
         )
 
-    init = (x, r, z, dot(r, z), jnp.array(0), rel_res(r), jnp.array(0))
-    x, r, *_ = jax.lax.while_loop(cond, body, init)
-    return [xx.transpose(0, 2, 1) for xx in x], rel_res(r), tol
+    init = (x, r, z, dot(r, z), jnp.array(0), rel_res(r), jnp.array(0), x, lane_rel(r))
+    *_, x_best, lane_best = jax.lax.while_loop(cond, body, init)
+    worst = jnp.max(jnp.stack([jnp.max(lb) for lb in lane_best]))
+    return [xx.transpose(0, 2, 1) for xx in x_best], worst, tol
 
 
 def pair_solve_warning(rel: Array | None, max_iter: int) -> str | None:
@@ -581,11 +718,11 @@ def _get_pair_solve(m: int, b: int, n_row_batches: int, max_iter: int, ridge: fl
 
     Returns:
         A jitted function ``(X_p, w, c2_idx, c3_idx, beta2, beta3, A, BtB,
-        rhs) -> (C2, rel, tol)`` where ``rhs`` and ``C2`` stack the lane
-        chunks on the leading axis.
+        raw_scale, rhs, bases) -> (C2, rel)`` where ``rhs`` and ``C2`` stack the lane
+        chunks on the leading axis. ``bases`` is ``(B1, B2)`` of every padded
+        row (:func:`_pair_bases`), or ``None`` to rebuild them on every step.
     """
     build = _get_build_bases(m, True, False)
-    rows = [(i * b, i * b + b) for i in range(n_row_batches)]
 
     @jax.jit
     def solve(
@@ -597,16 +734,24 @@ def _get_pair_solve(m: int, b: int, n_row_batches: int, max_iter: int, ridge: fl
         beta3: Array,
         A: Array,
         BtB: Array,
+        raw_scale: Array,
         rhs: Array,
+        bases: tuple[Array, Array] | None,
     ) -> tuple[Array, Array]:
+        if bases is None:
+
+            def sweep(cs_: list[Array]) -> list[Array]:
+                return _pair_normal_pass(
+                    cs_, A, b, n_row_batches, X_p, w_full, build, c2_idx, c3_idx, beta2, beta3
+                )
+
+        else:
+
+            def sweep(cs_: list[Array]) -> list[Array]:
+                return _pair_normal_cached(cs_, A, *bases)
+
         C, rel, _ = _joint_pair_solve(
-            BtB,
-            list(rhs),
-            ridge=ridge,
-            max_iter=max_iter,
-            sweep=lambda cs_: _pair_normal_pass(
-                cs_, A, rows, X_p, w_full, build, c2_idx, c3_idx, beta2, beta3
-            ),
+            BtB, list(rhs), ridge=ridge, raw_scale=raw_scale, max_iter=max_iter, sweep=sweep
         )
         return jnp.stack(C), rel
 
@@ -783,10 +928,13 @@ def _pair_solver(N: int, L: int, n2: int, m2: int, itemsize: int) -> str:
     residual and weights for ``"dual"``. ``"cg"`` is
     the matrix-free fallback.
 
-    Direct solves run only in float64. In float32 an underdetermined pair
-    system (more free coefficients than rows) makes them unstable: measured at
-    D = 15, N = 1024, test NRMSE 1.7 against 0.17 with CG, which stops early
-    and so regularizes.
+    Direct solves run only in float64. In float32 the projected pair system
+    carries round-off (in the projection and the right-hand side) in
+    near-null directions. An exact solve fits them; CG from the per-term
+    start stops before it does. Measured at D = 8, N = 1024 with one input
+    on (0.5, 0.8): spurious S2 up to 0.0067 with a float32 factored solve,
+    0.0002 with CG. At D = 15, N = 1024, test NRMSE was 1.7 with a float32
+    direct solve against 0.17 with CG.
 
     Args:
         N: Number of rows.
@@ -798,10 +946,10 @@ def _pair_solver(N: int, L: int, n2: int, m2: int, itemsize: int) -> str:
     Returns:
         ``"dense"``, ``"dual"`` or ``"cg"``.
     """
-    if itemsize < 8:
-        return "cg"
     K = n2 * m2
     budget = get_memory_budget()
+    if itemsize < 8:
+        return "cg"
     dense_ok = 3 * K * K * itemsize <= budget
     # 10 % margin for the tile work and the tile padding.
     dual_ok = 1.1 * (2 * N * N + 2 * N * L) * itemsize <= budget
@@ -931,6 +1079,7 @@ def _dual_pair_solve(
     n_chunks: int,
     cs: int,
     ridge: float,
+    raw_scale: Array,
 ) -> Array:
     """Solve all pair terms jointly in sample space.
 
@@ -953,6 +1102,7 @@ def _dual_pair_solve(
         n_chunks: Number of lane chunks.
         cs: Lanes per chunk.
         ridge: Relative ridge.
+        raw_scale: Mean diagonal of the unprojected blocks, ``(n2,)``.
 
     Returns:
         The pair coefficients, ``(n_chunks, cs, m2, n2)``.
@@ -973,7 +1123,7 @@ def _dual_pair_solve(
 
     # A dead pair would make 1 / lam huge and the kernel indefinite, so the
     # Cholesky factor of every lane turns NaN. Drop it (see _live_pairs).
-    lam, live = _live_pairs(BtB, ridge)  # (n2,)
+    lam, live = _live_pairs(BtB, ridge, raw_scale)  # (n2,)
     inv = jnp.where(live, 1.0 / jnp.where(live, lam, 1.0), 0.0)
     inv_lam = jnp.zeros((n1, n1), dtype=B1.dtype).at[c2_idx[:, 0], c2_idx[:, 1]].set(inv)
     itemsize = jnp.dtype(B1.dtype).itemsize
@@ -993,7 +1143,7 @@ def _dual_pair_solve(
 
 @jax.jit
 def _dense_pair_solve(
-    G22: Array, G12: Array, A: Array, BtB: Array, rhs: Array, ridge: Array
+    G22: Array, G12: Array, A: Array, BtB: Array, rhs: Array, ridge: Array, raw_scale: Array
 ) -> Array:
     """Solve all pair terms jointly by one direct solve.
 
@@ -1013,6 +1163,7 @@ def _dense_pair_solve(
             scale.
         rhs: Right-hand sides, ``(n_chunks, cs, n2, m2)``.
         ridge: Relative ridge, a scalar.
+        raw_scale: Mean diagonal of the unprojected blocks, ``(n2,)``.
 
     Returns:
         The pair coefficients, ``(n_chunks, cs, m2, n2)``.
@@ -1023,7 +1174,7 @@ def _dense_pair_solve(
     G12_f = G12.transpose(0, 2, 1).reshape(G12.shape[0], K)
     Gt = G22 - G12_f.T @ A_f
     Gt = (Gt + Gt.T) / 2
-    lam, live = _live_pairs(BtB, ridge)  # (n2,)
+    lam, live = _live_pairs(BtB, ridge, raw_scale)  # (n2,)
     # A dead pair keeps an identity block and a zero right-hand side, so its
     # coefficients are zero and it cannot reach the live pairs.
     live_flat = jnp.repeat(live, m2)
@@ -1059,10 +1210,16 @@ def _acc_pair_normal(
     Returns:
         The updated accumulators.
     """
-    B1f = B1_b.reshape(B1_b.shape[0], -1)
-    t = jnp.einsum("rmj,ljm->rl", B2_b, c) - B1f @ v.T
+    b, m2, n2 = B2_b.shape
+    cs = c.shape[0]
+    B1f = B1_b.reshape(b, -1)
+    # Flat matrix products: the same products as 3-D einsums were measured
+    # 3.6x slower (16 ms against 58 ms at N = 4096, K = 12400).
+    B2f = B2_b.reshape(b, m2 * n2)
+    t = B2f @ c.transpose(0, 2, 1).reshape(cs, m2 * n2).T - B1f @ v.T  # (b, cs)
     g1, g2 = acc
-    return g1 + jnp.einsum("rp,rl->lp", B1f, t), g2 + jnp.einsum("rmj,rl->ljm", B2_b, t)
+    g2_new = (t.T @ B2f).reshape(cs, m2, n2).transpose(0, 2, 1)
+    return g1 + t.T @ B1f, g2 + g2_new
 
 
 @jax.jit
@@ -1314,8 +1471,14 @@ def _get_stats_step(blocked: bool):
         # Cov(f_j, Y - f_hat)/Var(Y) that does not cancel under correlated
         # inputs. With independent inputs Sb -> 0 and S -> Sa either way.
         w2 = w * w
-        w2_ = w2[None, :, None]
-        y0_w2 = y0 * w2[:, None]
+        # The block loop works in a (term, lane, row) layout so every sum runs
+        # over the minor axis. Summing ``X * y[None]`` over the middle axis of
+        # a (term, row, lane) array hits a slow float32 XLA CPU fusion:
+        # measured 102 ms in float32 against 7 ms in float64 at
+        # (28, 624, 1000), and 2.5 ms over the minor axis.
+        w2_ = w2[None, None, :]
+        y0_w2_t = (y0 * w2[:, None]).T  # (cs, b)
+        y0_t = y0.T
 
         r0 = ((Y_bc - shift_c[None, :]) - mean_z_c[None, :]) * w[:, None]  # Y - f0
         # F-test for incremental model selection (Li et al., 2002). The null
@@ -1334,7 +1497,7 @@ def _get_stats_step(blocked: bool):
                     lst.append(jnp.zeros((0, cs), dtype=dtype))
                 continue
             tb = min(n_k, _STATS_TERM_BLOCK)
-            r_k = r_null[k][None]
+            r_k = r_null[k].T[None]  # (1, cs, b)
 
             def body(
                 start: Array,
@@ -1350,16 +1513,16 @@ def _get_stats_step(blocked: bool):
                 C_blk = jax.lax.dynamic_slice_in_dim(C, start, tb, axis=2)
                 mf = jax.lax.dynamic_slice_in_dim(mean_f_c, off + start, tb, axis=1)
                 my = jax.lax.dynamic_slice_in_dim(mean_y0m_c, off + start, tb, axis=1)
-                Fk = jnp.einsum("rmj,lmj->jrl", B_blk, C_blk)  # (tb, b, cs)
-                fcn = Fk - mf.T[:, None, :]
-                y0m_c = (y0[None] - Fk) - my.T[:, None, :]
+                Fk = jnp.einsum("rmj,lmj->jlr", B_blk, C_blk)  # (tb, cs, b)
+                fcn = Fk - mf.T[:, :, None]
+                y0m_c = (y0_t[None] - Fk) - my.T[:, :, None]
                 vals = (
-                    jnp.sum(fcn * fcn * w2_, axis=1),
-                    jnp.sum(fcn * y0_w2[None], axis=1),
-                    jnp.sum(fcn * (y0m_c * w2_), axis=1),
+                    jnp.sum(fcn * fcn * w2_, axis=2),
+                    jnp.sum(fcn * y0_w2_t[None], axis=2),
+                    jnp.sum(fcn * (y0m_c * w2_), axis=2),
                     # sum r_null * f_i, each term against its own null residual.
-                    jnp.sum(r_k * Fk, axis=1),
-                    jnp.sum(Fk * Fk, axis=1),
+                    jnp.sum(r_k * Fk, axis=2),
+                    jnp.sum(Fk * Fk, axis=2),
                 )
                 new = []
                 for acc_k, v in zip(carry, vals, strict=True):
@@ -1418,23 +1581,16 @@ def _get_finalize(n: int, n1: int, n2: int, m1: int, m2: int, m3: int, N: int):
         f_crits: Array,
     ) -> tuple[Array, Array, Array, Array, Array, Array]:
         acc_var_f, acc_cov_fy, acc_cov_fy0m, acc_ssr, acc_cross, acc_fsq, acc_res2 = acc
-        # A slice counts as zero-variance when it is numerically constant
-        # (max == min, which survives float32 where var == 0 does not) or when
-        # its variance is negligible against the machine epsilon of the
-        # working dtype relative to the slice's scale (max |Y|); below that
-        # the 1e-30 denominator floor turns the indices into finite garbage.
-        # Emit NaN (matching Sobol and the zero-variance warning) rather than
-        # silent zeros; the safe denominator only avoids the inf.
-        # The extremes must come from the real rows only: padded rows carry
-        # arbitrary values (zero by default, but a padded slot is required to
-        # be unobservable), so the infinities exclude them from both extremes.
-        eps = jnp.finfo(V_Y.dtype).eps
+        # A slice counts as zero-variance by the test the zero-variance
+        # warning makes (_zero_variance_mask: max == min, or a variance that
+        # underflows to 0), so every slice the warning names is NaN here and
+        # no other slice is. Emit NaN (matching Sobol and the warning) rather
+        # than silent zeros; the safe denominator only avoids the inf.
+        # Only the real rows count: padded rows carry arbitrary values, so
+        # they are replaced by the first row, which is always real. That
+        # leaves both extremes, and so the constant test, unchanged.
         keep = w[:, None] == 1
-        const = jnp.max(jnp.where(keep, Y, -jnp.inf), axis=0) == jnp.min(
-            jnp.where(keep, Y, jnp.inf), axis=0
-        )
-        scale = jnp.max(jnp.where(keep, jnp.abs(Y), 0.0), axis=0)
-        zero_var = (const | (V_Y < eps * scale**2))[:, None]
+        zero_var = _zero_variance_mask(jnp.where(keep, Y, Y[0][None, :]))[:, None]
         V_Y_safe = jnp.maximum(V_Y, 1e-30)[:, None]
         Sa = jnp.where(zero_var, jnp.nan, (acc_var_f / N) / V_Y_safe)
         S = jnp.where(zero_var, jnp.nan, (acc_cov_fy / N) / V_Y_safe)
@@ -1450,7 +1606,8 @@ def _get_finalize(n: int, n1: int, n2: int, m1: int, m2: int, m3: int, N: int):
         # R <= p makes the test undefined; guard the denominator.
         R_minus_p = jnp.maximum(N - p1, 1.0)
         F_stat = ((SSR0 - SSR1) / p1) / (SSR1 / R_minus_p)
-        select = (F_stat > f_crit_per_term[None]).astype(jnp.float32)
+        # select is a count fraction; it takes the data dtype like every index.
+        select = (F_stat > f_crit_per_term[None]).astype(Sa.dtype)
 
         mse = acc_res2 / N
         # 1 - in-sample MSE / Var(Y), NaN on a zero-variance slice like the
@@ -1464,6 +1621,52 @@ def _get_finalize(n: int, n1: int, n2: int, m1: int, m2: int, m3: int, N: int):
 # ---------------------------------------------------------------------------
 # Fit driver
 # ---------------------------------------------------------------------------
+
+
+def _resolve_fit_widths(
+    N: int,
+    D: int,
+    L: int,
+    itemsize: int,
+    order: int,
+    n2: int,
+    n3: int,
+    n: int,
+    m1: int,
+    m2: int,
+    m3: int,
+    batch_size: int | None,
+    slice_chunk_size: int | None,
+) -> tuple[int, int]:
+    """Resolve the row batch and the slice chunk :func:`_fit_hdmr` runs with.
+
+    Args:
+        N: Rows of the design.
+        D: Number of inputs.
+        L: Flattened output slices ``T*K``.
+        itemsize: Bytes per element of the fit dtype.
+        order: HDMR expansion order, post-clamping.
+        n2: Number of second-order terms.
+        n3: Number of third-order terms.
+        n: Total number of terms.
+        m1: First-order basis size.
+        m2: Second-order basis size.
+        m3: Third-order basis size.
+        batch_size: The caller's rows per batch, or ``None``.
+        slice_chunk_size: The caller's slices per chunk, or ``None``.
+
+    Returns:
+        ``(batch_size, slice_chunk_size)``, both resolved and clamped.
+    """
+    slice_bytes = _slice_bytes_per_row(n, itemsize)
+    b = resolve_batch_size(
+        _fit_bytes_per_row(D, m1, m2, m3, n2, n3, n, L, itemsize), N, batch_size
+    )
+    # Pair solver state per lane: rhs, x, best x, r, z, p and the
+    # matrix-vector product.
+    lane_fixed = 7 * n2 * m2 * itemsize if order >= 2 and n2 > 0 else 0
+    cs = _resolve_slice_chunk_size(slice_chunk_size, L, b, slice_bytes, lane_fixed)
+    return b, cs
 
 
 class _FitHDMR(NamedTuple):
@@ -1582,15 +1785,11 @@ def _fit_hdmr(
     dtype = jnp.result_type(X_n.dtype, Y_nl.dtype)
     itemsize = jnp.dtype(dtype).itemsize
 
-    slice_bytes = _slice_bytes_per_row(n, itemsize)
-    b = resolve_batch_size(
-        _fit_bytes_per_row(D, m1, m2, m3, n2, n3, n, L, itemsize), N, batch_size
+    b, cs = _resolve_fit_widths(
+        N, D, L, itemsize, order, n2, n3, n, m1, m2, m3, batch_size, slice_chunk_size
     )
     order2 = order >= 2 and n2 > 0
     order3 = order >= 3 and n3 > 0
-    # Pair solver state per lane: rhs, x, r, z, p and the matrix-vector product.
-    lane_fixed = 6 * n2 * m2 * itemsize if order2 else 0
-    cs = _resolve_slice_chunk_size(slice_chunk_size, L, b, slice_bytes, lane_fixed)
 
     # Pad both axes so each jitted step compiles once. A padded row is masked
     # to zero in every accumulator; a padded lane is an independent constant
@@ -1713,6 +1912,8 @@ def _fit_hdmr(
             # Project the pair basis off the first-order space, so a pair term
             # holds only what no sum of 1-D functions can explain.
             A = (_first_order_pinv(G1_flat) @ G12.reshape(P, -1)).reshape(G12.shape)
+            # The projection's round-off scales with the unprojected Gram.
+            raw_scale = _ridge_scale(BtB)
             BtB = BtB - jnp.einsum("pmj,pnj->jmn", A, G12)
             BtB = (BtB + BtB.transpose(0, 2, 1)) / 2
             rhs = []
@@ -1723,11 +1924,18 @@ def _fit_hdmr(
                     C1_chunks[j].reshape(cs, P) @ G1_flat
                 )
                 rhs.append(BtY[j] - jnp.einsum("pmj,lp->ljm", A, r1))
+            C2_stack: Array | None = None
             if dense:
                 C2_stack = _dense_pair_solve(
-                    G22, G12, A, BtB, jnp.stack(rhs), jnp.asarray(term_ridge, dtype=dtype)
+                    G22,
+                    G12,
+                    A,
+                    BtB,
+                    jnp.stack(rhs),
+                    jnp.asarray(term_ridge, dtype=dtype),
+                    raw_scale,
                 )
-                rel = None
+                del G22
             elif kind == "dual":
                 C2_stack = _dual_pair_solve(
                     G1_flat,
@@ -1740,12 +1948,38 @@ def _fit_hdmr(
                     n_chunks,
                     cs,
                     term_ridge,
+                    raw_scale,
                 )
-                rel = None
-            else:
+                del res_rows
+            rel = None
+            if C2_stack is None:
+                # Hold the bases when they fit half the budget: a CG step is
+                # then a few matrix products instead of a basis rebuild.
+                bases = None
+                if 2 * X_p.shape[0] * (n_terms * m_basis + P) * itemsize <= get_memory_budget():
+                    bases = _pair_bases(
+                        rows,
+                        X_p,
+                        w_full,
+                        _get_build_bases(n_intervals, True, False),
+                        (c2_idx, c3_idx, beta2, beta3),
+                    )
                 C2_stack, rel = _get_pair_solve(
                     n_intervals, b, n_row_batches, _PAIR_ITER_FACTOR * max_iter, term_ridge
-                )(X_p, w_full, c2_idx, c3_idx, beta2, beta3, A, BtB, jnp.stack(rhs))
+                )(
+                    X_p,
+                    w_full,
+                    c2_idx,
+                    c3_idx,
+                    beta2,
+                    beta3,
+                    A,
+                    BtB,
+                    raw_scale,
+                    jnp.stack(rhs),
+                    bases,
+                )
+                del bases
             pair_rel = rel
             C2_chunks = list(C2_stack)
             C1_fold = []
@@ -1782,9 +2016,12 @@ def _fit_hdmr(
 
     # ---- Final pass: ANCOVA / F-test / RMSE reductions ---------------------
     build_bases_final = _get_build_bases(n_intervals, order2, order3)
-    # Hold F whole when the (row, lane, term) working set fits half the budget,
-    # since that is the faster path. Read the budget here, outside any jit.
-    blocked = b * cs * 3 * n * itemsize > get_memory_budget() // 2
+    # Hold F whole only when the (row, lane, term) working set is small. It
+    # is faster only while that set stays near the cache: at D=8, N=4096,
+    # float64 it wins by 7% at 56 MB and loses by 43% at 354 MB (100 slices)
+    # and 80% at 2.1 GB. The cap is absolute, not a share of the budget, so
+    # a larger budget never picks the slower path.
+    blocked = b * cs * 3 * n * itemsize > _STATS_WHOLE_MAX_BYTES
     stats_step = _get_stats_step(blocked)
     accs = [
         (

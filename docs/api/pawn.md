@@ -71,7 +71,7 @@ jaxgsa.pawn.analyze
     2. x1  PAWN=0.2484
     3. x3  PAWN=0.08682
 
-[0.24840467 0.40216702 0.08681973]
+[0.24840465 0.40216702 0.08681972]
 [10 10 10]
 ```
 
@@ -178,5 +178,5 @@ functions. `n_valid_classes` is not among them, and neither is the sparse-bin wa
 - Pianosi, F., and Wagener, T. (2015). [A simple and efficient method for global sensitivity analysis based on cumulative distribution functions](https://doi.org/10.1016/j.envsoft.2015.01.004). *Environmental Modelling & Software*, 67, 1–11. Introduces the PAWN index and its KS statistic.
 - Pianosi, F., and Wagener, T. (2018). [Distribution-based sensitivity analysis from a generic input-output sample](https://doi.org/10.1016/j.envsoft.2018.07.019). *Environmental Modelling & Software*, 108, 197–207. Develops the given-data estimator used here.
 
-See the [PAWN example](/examples/pawn), [Methods](/guide/methods), and the
+See the [PAWN guide page](/guide/methods/pawn), [Methods](/guide/methods), and the
 [API overview](/api/).

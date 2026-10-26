@@ -23,7 +23,7 @@ Those moments turn into two numbers that frame the total Sobol index:
   `i`'s marginal is an untruncated Gaussian**, and only then. On a uniform or truncated marginal it
   is an estimate: exact when the response is linear in that input, and able to
   sit above the true `ST_i` when it is strongly curved. The
-  [DGSM example](/examples/dgsm) works through a case where it reads 1.29 for
+  [DGSM guide page](/guide/methods/dgsm) works through a case where it reads 1.29 for
   an input whose `ST` is 1 by definition.
 
 An input whose `upper_bound` is near zero is provably negligible. That is a
@@ -249,6 +249,6 @@ something upstream.
 
 Related docs:
 
-- [DGSM Example](/examples/dgsm)
+- [DGSM guide page](/guide/methods/dgsm)
 - [Methods](/guide/methods)
 - [API reference](/api/)

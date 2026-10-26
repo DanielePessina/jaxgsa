@@ -86,7 +86,7 @@ with CrCL.
 ## Recipe 1: how much each random effect matters
 
 Put the covariates and the random effects into one problem and run
-[Kucherenko](/examples/kucherenko). The total index `ST` of `eta_k` is the
+[Kucherenko](/guide/methods/kucherenko). The total index `ST` of `eta_k` is the
 share of `Var(Y)` that is lost if the IIV on that parameter is removed. Because
 each `eta_k` is independent of everything else, `ST` here has its usual
 meaning, and it works at any number of inputs.

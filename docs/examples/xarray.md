@@ -84,7 +84,7 @@ print(ds_sobol)
 ```
 
 ```text
-<xarray.Dataset> Size: 11kB
+<xarray.Dataset> Size: 12kB
 Dimensions:   (time: 30, output: 2, param: 3, param_i: 3, param_j: 3)
 Coordinates:
   * time      (time) float64 240B 0.1 0.269 0.4379 0.6069 ... 4.662 4.831 5.0
@@ -95,13 +95,14 @@ Coordinates:
 Data variables:
     S1        (time, output, param) float32 720B 0.4297 0.5122 ... -0.04315
     ST        (time, output, param) float32 720B 0.4873 0.5834 ... 1.108 0.3602
-    S2        (time, output, param_i, param_j) float32 2kB nan 0.0475 ... nan
-    S1_lower  (time, output, param) float32 720B 0.3208 0.4023 ... -0.1374
-    S1_upper  (time, output, param) float32 720B 0.5293 0.6488 ... 0.07314
-    ST_lower  (time, output, param) float32 720B 0.4008 0.4996 ... 0.813 0.2895
-    ST_upper  (time, output, param) float32 720B 0.5596 0.7332 ... 1.404 0.4549
-    S2_lower  (time, output, param_i, param_j) float32 2kB nan -0.0889 ... nan
-    S2_upper  (time, output, param_i, param_j) float32 2kB nan 0.226 ... nan
+    S2        (time, output, param_i, param_j) float32 2kB nan 0.05819 ... nan
+    variance  (time, output) float32 240B 0.2201 0.5931 0.7999 ... 0.1605 0.1603
+    S1_lower  (time, output, param) float32 720B 0.3289 0.3827 ... -0.1831
+    S1_upper  (time, output, param) float32 720B 0.5268 0.6491 ... 0.04339
+    ST_lower  (time, output, param) float32 720B 0.3942 0.4985 ... 0.8114 0.2801
+    ST_upper  (time, output, param) float32 720B 0.5878 0.6989 ... 1.311 0.4465
+    S2_lower  (time, output, param_i, param_j) float32 2kB nan -0.07436 ... nan
+    S2_upper  (time, output, param_i, param_j) float32 2kB nan 0.2051 ... nan
 Attributes:
     estimator:  saltelli-jansen
 ```
@@ -126,7 +127,7 @@ print(ds_sobol.S1.sel(param="frequency", output="displacement").isel(time=slice(
 ```
 
 ```text
-[0.5121903  0.8914394  0.89829767 0.84917337 0.90702844]
+[0.5121903  0.8914396  0.89829767 0.8491734  0.9070288 ]
 ```
 
 Frequency owns roughly 90% of displacement variance from the second timepoint
@@ -148,7 +149,7 @@ print(float(s2), "at t =", float(s2.time))
 ```
 
 ```text
-0.08388328552246094 at t = 1.7896551724137932
+0.08591872453689575 at t = 1.7896551724137932
 ```
 
 Exact string labels first, nearest-match float second.
@@ -165,8 +166,8 @@ print((ds_sobol.ST_upper - ds_sobol.ST_lower).mean("time").to_pandas())
 ```text
 param         amplitude  frequency   damping
 output                                      
-displacement   0.055160   0.397972  0.056613
-velocity       0.048141   0.407634  0.053547
+displacement   0.060483   0.386648  0.053384
+velocity       0.052153   0.408886  0.054877
 ```
 
 Frequency's total-order index carries an interval about 0.40 wide, seven times
@@ -227,13 +228,13 @@ print(np.asarray(jnp.std(Y_hdmr, axis=0).mean(axis=0)))
 ```text
 [np.str_('amplitude'), np.str_('frequency'), np.str_('damping'), np.str_('amplitude/frequency'), np.str_('amplitude/damping'), np.str_('frequency/damping')]
 output
-displacement    0.494926
-velocity        0.505360
+displacement    0.493897
+velocity        0.504286
 Name: rmse, dtype: float32
 [0.5756984  0.58360267]
 ```
 
-The surrogate's RMSE is 0.495 against an output standard deviation of 0.576. It
+The surrogate's RMSE is 0.494 against an output standard deviation of 0.576. It
 explains about a quarter of the variance and leaves the rest as residual. This
 surrogate is not usable, and here is what that does to the indices:
 
@@ -249,14 +250,14 @@ frequency    0.969359
 damping      0.126892
 Name: ST, dtype: float32
 param
-amplitude    0.047862
-frequency    0.128679
-damping      0.025192
+amplitude    0.045463
+frequency    0.123723
+damping      0.016853
 Name: ST, dtype: float32
 ```
 
-HDMR puts frequency at 0.13 where Sobol puts it at 0.97, and its three indices
-sum to 0.20 rather than to something near 1. The ranking survives, but nothing
+HDMR puts frequency at 0.12 where Sobol puts it at 0.97, and its three indices
+sum to 0.19 rather than to something near 1. The ranking survives, but nothing
 else does.
 
 Neither number is a bug. A B-spline HDMR expansion at `order=2` cannot
@@ -278,14 +279,14 @@ print(ds_hdmr.select.to_pandas())
 ```
 
 ```text
-0.019177476
+0.022534544
 term
 amplitude               4.0
 frequency              38.0
 damping                 5.0
-amplitude/frequency     9.0
-amplitude/damping       4.0
-frequency/damping       1.0
+amplitude/frequency     7.0
+amplitude/damping       1.0
+frequency/damping       0.0
 Name: select, dtype: float32
 ```
 
@@ -293,7 +294,7 @@ Name: select, dtype: float32
 the matching `Sb` is the correlative part, which goes to zero when the inputs
 are independent. `select` counts how many of the 60 output slices kept each
 term after the backfitting selection. Frequency was kept in 38 and
-`frequency/damping` in only 1, which is another way of seeing that the fit
+`frequency/damping` in none, which is another way of seeing that the fit
 struggled.
 
 ## Practical caveats
@@ -320,7 +321,7 @@ struggled.
   decide which dimensions a dataset gets.
 - [Bootstrap Confidence Intervals](/examples/bootstrap) for the resampling
   behind `S1_lower` and `S1_upper`.
-- [RS-HDMR Example](/examples/hdmr) for making the surrogate fit before you
+- [RS-HDMR guide page](/guide/methods/hdmr) for making the surrogate fit before you
   trust its indices.
 - [Screen first, then quantify](/examples/advanced-workflow) for cutting 20 inputs to 4 with Morris,
   then spending the Sobol budget on the survivors.

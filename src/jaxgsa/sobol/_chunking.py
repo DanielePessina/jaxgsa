@@ -16,7 +16,7 @@ the sliced answer is bit-for-bit the unpadded one. See ``efast/_analyze.py``,
 "derive one from :func:`jaxgsa._core.batching.get_memory_budget`", which needs
 a model of what one slice actually costs. :func:`slice_elements` is that
 model and both paths share it: the gathered A, B and AB (and BA) arrays, plus
-a second live working copy. Second order used to be quadratic in ``D``
+two live working copies. Second order used to be quadratic in ``D``
 because every second-order estimator formed an ``(N, D, D)`` outer product;
 since ``_estimators.second_order_kernel`` writes the cross-moment as an
 explicit matrix product (``BA.T @ AB``), that term no longer materialises and
@@ -34,14 +34,16 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jax import Array
 
-from jaxgsa._core.batching import get_memory_budget
+from jaxgsa._core.batching import balanced_width, get_memory_budget
 
-# The estimator holds roughly one working copy of its inputs alive on top of
-# the inputs themselves (the centred products and the reduction temporaries),
-# so the input term of the per-slice estimate carries a factor of two. The
-# bootstrap model in ``_bootstrap.py`` uses the same factor, one resample per
-# slice apart.
-_POINT_LIVE_COPIES = 2
+# A chunk holds its inputs plus about two working copies of them at its peak:
+# the standardized columns inside the front half, then the centred products
+# and reduction temporaries inside the estimator. So the input term of the
+# per-slice estimate carries a factor of three. With a factor of two the
+# measured transient ran about 1.3-1.4x over the budget (D=8, N=4096, 1000
+# and 5000 slices, float32 and float64, 2026-10-25). The bootstrap model in
+# ``_bootstrap.py`` uses the same factor, one resample per slice apart.
+_POINT_LIVE_COPIES = 3
 
 
 def pad_slice_axis(a: Array, width: int) -> Array:
@@ -121,7 +123,8 @@ def resolve_point_chunk_size(
         return max(1, min(slice_chunk_size, n_slices))
     bytes_per_slice = slice_elements(base_n, D, calc_second_order) * itemsize * n_bootstrap
     budget = max(1, get_memory_budget() // max(bytes_per_slice, 1))
-    return max(1, min(n_slices, budget))
+    # Even chunks: a ragged last chunk is padded back to full width.
+    return balanced_width(n_slices, max(1, min(n_slices, budget)))
 
 
 def resolve_resample_chunk_size(
@@ -168,8 +171,8 @@ def slice_elements(base_n: int, D: int, calc_second_order: bool) -> int:
     """Estimate the live element count of one slice of estimator work.
 
     Both orders are linear in ``D``. The gathered A, B, AB (and BA for second
-    order) are ``base_n * (D + 2)`` or ``base_n * (2D + 2)`` elements, and the
-    estimator holds about one working copy of them alive at a time, hence the
+    order) are ``base_n * (D + 2)`` or ``base_n * (2D + 2)`` elements, and a
+    chunk holds about two working copies of them alive at its peak, hence the
     factor ``_POINT_LIVE_COPIES``.
 
     This used to be quadratic in ``D`` for second order, because the
@@ -182,9 +185,8 @@ def slice_elements(base_n: int, D: int, calc_second_order: bool) -> int:
     output of one slice is at most a ``(D, D)`` matrix, negligible next to
     the inputs.
 
-    The estimate is deliberately conservative: it counts the inputs twice
-    and counts no XLA scheduling slack, so the derived chunk width stays
-    comfortably inside the budget rather than riding its edge.
+    The estimate counts the inputs three times, which matches the measured
+    peak of a chunk. It counts no XLA scheduling slack.
 
     Args:
         base_n: N, the number of base samples.

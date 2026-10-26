@@ -645,7 +645,7 @@ compilation cache at a directory, so a second run skips the compile.
 
 `jaxgsa.config.set_memory_budget(budget, *, unit=None)` and
 `jaxgsa.config.get_memory_budget()` read and write the process-global
-transient-memory budget, default 512 MiB. Every automatic `batch_size`,
+transient-memory budget, default 2 GiB. Every automatic `batch_size`,
 `slice_chunk_size` and `resample_chunk_size` is derived from it, and an
 explicit per-call value always wins.
 

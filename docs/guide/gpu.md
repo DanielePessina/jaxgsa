@@ -52,5 +52,5 @@ print("S1:", result.S1)
 ## Performance
 
 The published [benchmarks](/guide/benchmarks) are CPU only. They ran on an
-Apple M1 Pro in float32. jaxgsa publishes no GPU timings. Measure your own
+Apple M1 Pro in float32 and float64. jaxgsa publishes no GPU timings. Measure your own
 workload before you plan around a speed-up.

@@ -26,7 +26,9 @@ avoids the cancellation in ``mean(Y_j * Y_N(j)) - mean(Y)**2`` in float32.
 
 The kernel is one stable ``argsort`` of ``X`` per column, a gather, a roll and
 two means. It maps over the parameters with ``lax.map``, so the working set
-is ``N * T * K`` elements rather than ``D`` times that.
+is ``N * T * K`` elements rather than ``D`` times that. It also maps over
+chunks of the flattened ``T * K`` output slices (``slice_chunk_size``), so
+the working set is ``N`` times the chunk width.
 
 References:
     Gamboa, Gremaud, Klein & Lagnoux (2022). Global sensitivity analysis: a
@@ -49,10 +51,14 @@ import jax.numpy as jnp
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
+from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import interval
+from jaxgsa._core.column_chunks import map_column_chunks
 from jaxgsa._core.entry import (
     bootstrap_checks,
+    check_scalars,
     gates,
+    positive_int,
     prepare,
     validate_inputs,
 )
@@ -65,7 +71,12 @@ from jaxgsa._core.irregular import (
     analyze_irregular,
 )
 from jaxgsa._core.result import CIInfo
-from jaxgsa._core.validation import _prepare_Y, _validate_output, as_key
+from jaxgsa._core.validation import (
+    _prepare_Y,
+    _validate_output,
+    _zero_variance_mask,
+    as_key,
+)
 from jaxgsa.problem import Problem
 from jaxgsa.rank._result import RankResult
 
@@ -76,6 +87,7 @@ _IRREGULAR_KWARGS = (
     "conf_level",
     "ci_method",
     "key",
+    "slice_chunk_size",
     "on_invalid",
     "keep_replicates",
 )
@@ -88,35 +100,108 @@ _MIN_KEPT = 3
 _SUBSAMPLE_FRACTION = 0.8
 
 
-@jax.jit
-def _rank_core(X: Array, Y_3d: Array) -> Array:
+# Live (N,)-sized arrays per output slice in the forward pass: the gathered
+# column, its centred copy, the sorted copy, its rolled neighbour, and the
+# product the mean reads. The automatic slice chunk is sized against this.
+_RANK_LIVE_ARRAYS = 6
+
+
+def _slice_width(
+    n_rows: int, n_slices: int, dtype: jnp.dtype, slice_chunk_size: int | None
+) -> int:
+    """Resolve the number of output slices the kernel reads per chunk.
+
+    Args:
+        n_rows: Number of samples ``N``.
+        n_slices: Flattened output slices, ``T * K``.
+        dtype: Dtype of the outputs.
+        slice_chunk_size: The caller's value, or ``None`` to derive one from
+            the active memory budget.
+
+    Returns:
+        Slices per chunk, in ``[1, n_slices]``.
+    """
+    itemsize = jnp.dtype(jnp.result_type(dtype, jnp.float32)).itemsize
+    return resolve_batch_size(_RANK_LIVE_ARRAYS * n_rows * itemsize, n_slices, slice_chunk_size)
+
+
+def _rank_columns(X: Array, Y_cols: Array, width: int, rows: Array | None = None) -> Array:
+    """Compute rank-based first-order indices for every output column.
+
+    Every index reads one output column alone, so the columns are taken
+    ``width`` at a time (:func:`jaxgsa._core.column_chunks.map_column_chunks`)
+    and the working set is ``N * width`` elements, not ``N * T * K``.
+
+    Args:
+        X: Input samples, shape ``(N, D)``.
+        Y_cols: Outputs with the slices flattened, shape ``(N, T * K)``.
+        width: Columns per chunk (static at the jit boundary).
+        rows: Rows to keep, shape ``(m,)``, or ``None`` for all. A subsample
+            gathers its rows inside each chunk, so no subsampled copy of the
+            whole of ``Y`` is formed.
+
+    Returns:
+        Indices, shape ``(T * K, D)``. A column with zero variance gives
+        ``NaN``.
+    """
+    if rows is not None:
+        X = X[rows]
+    # Stable sort: tied input values keep their row order. One sort serves
+    # every chunk.
+    order = jnp.argsort(X, axis=0, stable=True)  # (N, D)
+
+    def one_chunk(cols: Array) -> Array:
+        """Indices of one chunk of columns, shape ``(width, D)``."""
+        if rows is not None:
+            cols = cols[rows]
+        centred = cols - jnp.mean(cols, axis=0, keepdims=True)
+        variance = jnp.mean(centred**2, axis=0)  # (width,)
+        # The zero-variance warning's own test. A constant float column's
+        # mean rounds, so ``centred`` holds one repeated round-off value and
+        # the ratio below is that value squared over itself squared: 1.0, or
+        # NaN when the round-off happens to be 0. Double where: divide by a
+        # safe 1 on a flagged column, then put the NaN back, so the gradient
+        # of every other column stays finite.
+        zero = _zero_variance_mask(cols)  # (width,)
+        safe_variance = jnp.where(zero, jnp.ones_like(variance), variance)
+
+        # Rematerialised in reverse mode: lax.map would otherwise save the
+        # gathered and rolled (N, width) copies of every parameter, D of
+        # each, for the backward pass (gradient about 20x Y at D = 8). With
+        # the checkpoint only ``param_rows`` is saved and the gather is
+        # recomputed.
+        @jax.checkpoint
+        def one_param(param_rows: Array) -> Array:
+            """Lag-one autocovariance of the output sorted by one input column."""
+            sorted_y = centred[param_rows]  # (N, width)
+            # Rank j pairs with rank j + 1. The largest rank wraps to rank 1.
+            neighbour_y = jnp.roll(sorted_y, -1, axis=0)
+            ratio = jnp.mean(sorted_y * neighbour_y, axis=0) / safe_variance
+            return jnp.where(zero, jnp.nan, ratio)
+
+        return jax.lax.map(one_param, order.T).T  # (width, D)
+
+    return map_column_chunks(one_chunk, Y_cols, width, axis=0)
+
+
+@partial(jax.jit, static_argnames=("width",))
+def _rank_core(X: Array, Y_3d: Array, width: int) -> Array:
     """Compute rank-based first-order indices for every output slice.
 
     Args:
         X: Input samples, shape ``(N, D)``.
         Y_3d: Output array promoted to shape ``(N, T, K)``.
+        width: Output slices per chunk.
 
     Returns:
         Indices, shape ``(T, K, D)``. A slice with zero variance gives ``NaN``.
     """
-    centred = Y_3d - jnp.mean(Y_3d, axis=0, keepdims=True)
-    variance = jnp.mean(centred**2, axis=0)  # (T, K)
-    # Stable sort: tied input values keep their row order.
-    order = jnp.argsort(X, axis=0, stable=True)  # (N, D)
-
-    def one_param(rows: Array) -> Array:
-        """Lag-one autocovariance of the output sorted by one input column."""
-        sorted_y = centred[rows]  # (N, T, K)
-        # Rank j pairs with rank j + 1. The largest rank wraps to rank 1.
-        neighbour_y = jnp.roll(sorted_y, -1, axis=0)
-        return jnp.mean(sorted_y * neighbour_y, axis=0) / variance
-
-    s1 = jax.lax.map(one_param, order.T)  # (D, T, K)
-    return jnp.moveaxis(s1, 0, -1)
+    n, T, K = Y_3d.shape
+    return _rank_columns(X, Y_3d.reshape(n, T * K), width).reshape(T, K, -1)
 
 
-@partial(jax.jit, static_argnames=("m",))
-def _subsample_estimates(keys: Array, X: Array, Y_3d: Array, m: int) -> Array:
+@partial(jax.jit, static_argnames=("m", "width"))
+def _subsample_estimates(keys: Array, X: Array, Y_3d: Array, m: int, width: int) -> Array:
     """Compute the index on one subsample of ``m`` distinct rows per key.
 
     One compiled program runs every draw. The draws run one after another,
@@ -127,21 +212,23 @@ def _subsample_estimates(keys: Array, X: Array, Y_3d: Array, m: int) -> Array:
         X: Input samples, shape ``(N, D)``.
         Y_3d: Outputs, shape ``(N, T, K)``.
         m: Rows kept in each subsample.
+        width: Output slices per chunk.
 
     Returns:
         Indices per resample, shape ``(n_resamples, T, K, D)``.
     """
-    n = X.shape[0]
+    n, T, K = Y_3d.shape
+    Y_cols = Y_3d.reshape(n, T * K)
 
     def one_draw(subkey: Array) -> Array:
         rows = jax.random.permutation(subkey, n)[:m]
-        return _rank_core(X[rows], Y_3d[rows])
+        return _rank_columns(X, Y_cols, width, rows).reshape(T, K, -1)
 
     return jax.lax.map(one_draw, keys)
 
 
 def _subsample_draws(
-    key: Array, s1_3d: Array, X: Array, Y_3d: Array, n_resamples: int
+    key: Array, s1_3d: Array, X: Array, Y_3d: Array, n_resamples: int, width: int
 ) -> tuple[Array, Array]:
     """Draw resampled indices by subsampling rows without replacement.
 
@@ -181,6 +268,7 @@ def _subsample_draws(
         X: Input samples, shape ``(N, D)``.
         Y_3d: Outputs, shape ``(N, T, K)``.
         n_resamples: Number of resamples.
+        width: Output slices per chunk.
 
     Returns:
         ``(plain, corrected)`` scaled draws, each of shape
@@ -190,7 +278,7 @@ def _subsample_draws(
     n = int(X.shape[0])
     m = min(max(int(_SUBSAMPLE_FRACTION * n), 2), n - 1)
     scale = (m / (n - m)) ** 0.5
-    stacked = _subsample_estimates(jax.random.split(key, n_resamples), X, Y_3d, m)
+    stacked = _subsample_estimates(jax.random.split(key, n_resamples), X, Y_3d, m, width)
     mean = jnp.mean(stacked, axis=0)
     spread = scale * (stacked - mean)
     # The estimator carries a bias of order 1/N. Under that model the
@@ -213,7 +301,9 @@ class RankIndices(NamedTuple):
     S1: Array
 
 
-def indices(problem: Problem, X: Array, Y: Array) -> RankIndices:
+def indices(
+    problem: Problem, X: Array, Y: Array, *, slice_chunk_size: int | None = None
+) -> RankIndices:
     """Compute rank-based first-order indices as plain arrays, with no diagnostics.
 
     This is the transformable core of :func:`analyze`. It runs the same kernel
@@ -235,6 +325,8 @@ def indices(problem: Problem, X: Array, Y: Array) -> RankIndices:
         problem: Problem definition with D parameters.
         X: Input samples, shape ``(N, D)``.
         Y: Model outputs, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
+        slice_chunk_size: As in :func:`analyze`. The value changes only the
+            peak memory, never an index.
 
     Returns:
         A one-field :class:`RankIndices` named tuple ``(S1,)``, shaped ``(D,)``, ``(K, D)`` or
@@ -244,15 +336,22 @@ def indices(problem: Problem, X: Array, Y: Array) -> RankIndices:
     Raises:
         ValueError: If the problem has categorical parameters, if ``X`` is not
             2-D, if its column count does not match the problem, if ``X`` and
-            ``Y`` have differing row counts, or if ``Y`` has an invalid rank.
+            ``Y`` have differing row counts, if ``Y`` has an invalid rank, or
+            if ``slice_chunk_size`` is given and is not an integer of at
+            least 1.
     """
     from jaxgsa.rank import _SPEC
 
     gates(_SPEC, problem, method="jaxgsa.rank.indices")
+    check_scalars(
+        (positive_int("slice_chunk_size", slice_chunk_size),), method="jaxgsa.rank.indices"
+    )
     X_arr = validate_inputs(problem, X)
     Y_arr = _validate_output(Y, int(X_arr.shape[0]), problem)
     Y3, layout = _prepare_Y(Y_arr)
-    return RankIndices(S1=layout.squeeze(_rank_core(X_arr, Y3)))
+    n, T, K = Y3.shape
+    width = _slice_width(n, T * K, Y3.dtype, slice_chunk_size)
+    return RankIndices(S1=layout.squeeze(_rank_core(X_arr, Y3, width)))
 
 
 def analyze(
@@ -264,6 +363,7 @@ def analyze(
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | int | None = None,
+    slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
@@ -323,6 +423,14 @@ def analyze(
         key: A ``jax.random`` key for the resampling. Required when
             ``n_bootstrap > 0``. Pass ``jax.random.key(0)`` if you have an
             integer seed.
+        slice_chunk_size: Maximum number of flattened ``T*K`` output slices
+            the kernel reads at once. It caps the peak memory, and the memory
+            of a gradient, for a large ``T * K``. Every index reads one slice
+            alone, so the value never changes a result. ``None`` (default)
+            derives one from the active memory budget
+            (:func:`jaxgsa.config.set_memory_budget`). An explicit value wins
+            over the budget, is clamped to ``T * K``, and must be an integer
+            of at least 1.
         on_invalid: What to do about a row of ``X`` or ``Y`` that holds a
             non-finite value. ``"raise"`` (default) refuses the sample,
             ``"drop"`` removes those rows and analyzes the rest, and
@@ -349,7 +457,9 @@ def analyze(
             row counts, ``conf_level`` is not in ``(0, 1)``, ``on_invalid`` is
             not one of the policies, ``n_bootstrap < 0``, ``ci_method`` is not
             ``"quantile"`` or ``"gaussian"``, ``n_bootstrap > 0`` and no
-            ``key`` was given, or the non-finite policy refuses the sample.
+            ``key`` was given, ``slice_chunk_size`` is given and is not an
+            integer of at least 1, or the non-finite policy refuses the
+            sample.
 
     Warns:
         JaxgsaWarning: If an output slice has zero variance. The index is then
@@ -377,7 +487,10 @@ def analyze(
         Y,
         X=X,
         on_invalid=on_invalid,
-        checks=bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
+        checks=(
+            *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
+            positive_int("slice_chunk_size", slice_chunk_size),
+        ),
         min_kept=_MIN_KEPT,
     )
 
@@ -386,14 +499,16 @@ def analyze(
     if X.shape[0] < _MIN_KEPT:
         raise ValueError(f"jaxgsa.rank: analyze needs at least {_MIN_KEPT} rows, got {X.shape[0]}")
     Y_3d = ctx.Y3
+    n, T, K = Y_3d.shape
+    width = _slice_width(n, T * K, Y_3d.dtype, slice_chunk_size)
     t0 = _verbose.tic()
-    s1_3d = _rank_core(X, Y_3d)
+    s1_3d = _rank_core(X, Y_3d, width)
 
     s1_conf: Array | None = None
     ci: CIInfo | None = None
     if n_bootstrap > 0:
         assert key is not None  # checked above, before the point estimate ran
-        plain, corrected = _subsample_draws(key, s1_3d, X, Y_3d, n_bootstrap)
+        plain, corrected = _subsample_draws(key, s1_3d, X, Y_3d, n_bootstrap, width)
         confs, ci = interval(
             {"S1": ctx.squeeze(s1_3d)},
             {"S1": ctx.squeeze(plain)},
@@ -429,7 +544,7 @@ def analyze(
 
     if verbose:
         elapsed = _verbose.stop(t0, result.S1)
-        _, T, K = Y_3d.shape
+        origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
         _verbose.analysis_summary(
             method="jaxgsa.rank.analyze",
             problem=problem,
@@ -438,6 +553,7 @@ def analyze(
             K=K,
             invalid=invalid,
             timings=[("estimator (includes compile on the first call)", elapsed)],
+            notes=[f"slice_chunk_size: {width} ({origin})"],
             index_name="S1",
             values=result.S1,
             conf=result.S1_conf,

@@ -46,7 +46,7 @@ jaxgsa.optimal_transport.analyze
     estimator (includes compile on the first call): 0.2385 s
     mode: univariate
     epsilon: 0.03
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 1 (resolved from the memory budget)
   results: top 2 of 2 parameters by ot
     1. x1  ot=0.9348
     2. x2  ot=0.389
@@ -88,7 +88,7 @@ print("ST:", np.round(result.ST, 3))
 ```
 
 ```
-jaxgsa.kucherenko.sample: D=2, base_n=8192, n_blocks=5, n_runs=40960, dependence=copula-conditional, scramble=True
+jaxgsa.kucherenko.sample: D=2, base_n=8192, n_blocks=5, n_runs=40960, dependence=gaussian, scramble=True
 jaxgsa.kucherenko.analyze
   problem: D=2 (x1, x2)
     marginals: gaussian=2
@@ -97,9 +97,10 @@ jaxgsa.kucherenko.analyze
     invalid: none found in 8192 base points (policy 'raise')
   timing:
     compute: 0.01894 s
-    design: copula-conditional (2D+1 = 5 blocks of 8192 base points)
+    slice_chunk_size: 1 (resolved from the memory budget)
+    design: gaussian (2D+1 = 5 blocks of 8192 base points)
   results: top 2 of 2 parameters by ST
-    1. x1  ST=0.36
+    1. x1  ST=0.3601
     2. x2  ST=0
 S1: [1.   0.64]
 ST: [0.36 0.  ]
@@ -346,7 +347,7 @@ against 0.2 for optimal transport. Drop `N` before you reach for it.
 
 ### Correlation-exclusive variance fractions
 
-[Kucherenko](/examples/kucherenko) and [VKOGA](/examples/vkoga) both report
+[Kucherenko](/guide/methods/kucherenko) and [VKOGA](/guide/methods/vkoga) both report
 `S1`/`S_TC` and `ST`/`S_TU`, the two quantities the opening section separated.
 They differ in where the numbers come from. Kucherenko runs your model on a
 conditional-copula design of `base_n * (2D + 1)` points and carries no
@@ -356,7 +357,7 @@ totals further into `S_U`, `S_C` and `S_IU`.
 
 VKOGA training data must cover the analysis distribution accurately. Rows
 drawn from that distribution work, and so does an independent design. See its
-[training-data section](/examples/vkoga#training-data-must-cover-the-analysis-distribution).
+[training-data section](/guide/methods/vkoga#training-data-must-cover-the-analysis-distribution).
 
 ### HDMR: the split per term, not per parameter
 
@@ -457,8 +458,8 @@ surrogate), jaxgsa.kucherenko (variance-based indices from its own
 conditional-copula design), jaxgsa.optimal_transport, jaxgsa.borgonovo,
 jaxgsa.hdmr (whose ANCOVA Sb term quantifies the correlation-induced
 contribution, and whose result supports shapley(include_correlative=True)),
-jaxgsa.hsic, jaxgsa.pawn, or jaxgsa.shapley with backend="hdmr". To analyze the
-independent problem instead, drop the dependence with problem.with_correlation(None).
+jaxgsa.hsic, jaxgsa.pawn, jaxgsa.rank, or jaxgsa.shapley with backend="hdmr". To
+analyze the independent problem instead, drop the dependence with problem.with_correlation(None).
 ```
 
 To run one of these on the independent version of the problem, drop the
@@ -488,11 +489,11 @@ refused in exactly the same way.
 
 - [Non-Uniform Inputs](/examples/non-uniform-inputs) for the marginal specs
   the copula couples.
-- [Kucherenko](/examples/kucherenko) and [VKOGA](/examples/vkoga) for the two
+- [Kucherenko](/guide/methods/kucherenko) and [VKOGA](/guide/methods/vkoga) for the two
   variance fractions under dependence.
-- [RS-HDMR](/examples/hdmr) for the ANCOVA decomposition in depth.
-- [Optimal Transport](/examples/optimal-transport) and
-  [Borgonovo Delta](/examples/borgonovo) for the distribution-based indices.
+- [RS-HDMR](/guide/methods/hdmr) for the ANCOVA decomposition in depth.
+- [Optimal Transport](/guide/methods/optimal-transport) and
+  [Borgonovo Delta](/guide/methods/borgonovo) for the distribution-based indices.
 - [Methods guide](/guide/methods) for which method to pick under correlation.
 
 ## Custom dependence without a copula
@@ -636,7 +637,7 @@ training rows. Here the training rows come from the problem without its
 sampler, so `u`, `v` and `w` are independent and cover the cube. Training on
 the modular draws themselves also works, because the analysis uses conditionals
 of the joint distribution. See
-[VKOGA training data](/examples/vkoga#training-data-must-cover-the-analysis-distribution).
+[VKOGA training data](/guide/methods/vkoga#training-data-must-cover-the-analysis-distribution).
 
 VKOGA's declared marginals must match the sampler's marginals, because its
 coordinate transform and component basis still use `Problem`. All three

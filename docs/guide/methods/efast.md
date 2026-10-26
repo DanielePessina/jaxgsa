@@ -89,14 +89,14 @@ jaxgsa.efast.analyze
     invalid: none found in 3 search curves (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.1799 s
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 1 (resolved from the memory budget)
     omega_0: 511, M: 4
   results: top 3 of 3 parameters by ST
     1. x1  ST=0.5507
     2. x2  ST=0.463
     3. x3  ST=0.2393
-S1: [3.0759001e-01 4.4247049e-01 3.4844247e-10]
-ST: [0.550743   0.46297276 0.23925918]
+S1: [3.0759001e-01 4.4247046e-01 3.4816333e-10]
+ST: [0.550743   0.46297276 0.23925912]
 exact S1: [0.31390519 0.44241114 0.        ]
 exact ST: [0.55758886 0.44241114 0.24368366]
 ```
@@ -114,7 +114,7 @@ much larger means interaction, unattributed. The design cost was 12288 runs:
 `omega_0` and `M` come back on the result so a saved analysis records how it was
 made.
 
-![eFAST first-order and total-order indices on the Ishigami benchmark compared against the analytical values](./figures/efast_gsa_ishigami-efast-vs-analytical-indices.png)
+![eFAST first-order and total-order indices on the Ishigami benchmark compared against the analytical values](../../examples/figures/efast_gsa_ishigami-efast-vs-analytical-indices.png)
 
 ## Choosing n_per_curve
 
@@ -138,6 +138,7 @@ n_per_curve=  257 runs=   771 omega_0=  32 ST=[0.5388 0.4864 0.2356]
 n_per_curve=  513 runs=  1539 omega_0=  64 ST=[0.539  0.4863 0.2358]
 n_per_curve= 1025 runs=  3075 omega_0= 128 ST=[0.5389 0.4862 0.2357]
 n_per_curve= 4096 runs= 12288 omega_0= 511 ST=[0.5507 0.463  0.2393]
+exact ST                                     [0.5576 0.4424 0.2437]
 ```
 
 This is the trap, and it is worth staring at. From 257 to 1025 the indices are
@@ -195,7 +196,7 @@ print("exact       S1=", np.round(ANALYTICAL_S1, 4), "ST=", np.round(ANALYTICAL_
 ```
 
 ```
-M=1  omega_0=2048  S1=[0.3175 0.0854 0.    ]  ST=[0.3758 0.1849 0.    ]
+M=1  omega_0=2048  S1=[0.3175 0.0854 0.    ]  ST=[ 0.3758  0.1849 -0.    ]
 M=2  omega_0=1024  S1=[0.2592 0.0034 0.5562]  ST=[0.4489 0.3828 0.6541]
 M=4  omega_0= 512  S1=[0.3122 0.4408 0.0289]  ST=[0.5389 0.4862 0.2357]
 M=8  omega_0= 256  S1=[0.3134 0.4424 0.0025]  ST=[0.5561 0.4483 0.2444]
@@ -247,7 +248,7 @@ jaxgsa.efast.analyze
     invalid: none found in 8 search curves (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.533 s
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 1 (resolved from the memory budget)
     omega_0: 511, M: 4
   results: top 5 of 8 parameters by ST
     1. x1  ST=0.7874
@@ -264,7 +265,7 @@ the coefficients: `x1` dominates at `ST = 0.787`, `x2` is moderate, `x3` and
 summary shows `x7` at `0.00018`). eFAST found the "safe to fix" tier without
 being told which inputs those were.
 
-![eFAST first-order and total-order indices on the eight-input Sobol G-function against the analytical values](./figures/efast_gsa_sobol-g-function-efast-vs-analytical-indices.png)
+![eFAST first-order and total-order indices on the eight-input Sobol G-function against the analytical values](../../examples/figures/efast_gsa_sobol-g-function-efast-vs-analytical-indices.png)
 
 ## There is no confidence interval, and there is no n_bootstrap
 
@@ -283,6 +284,8 @@ What you can do is draw several designs with different random phase shifts and
 compare.
 
 ```python
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
+
 STs = []
 for seed in range(8):
     s = efast.sample(PROBLEM, n_per_curve=1025, seed=seed, verbose=False)
@@ -350,18 +353,18 @@ jaxgsa.efast.analyze
     invalid: none found in 3 search curves (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.1729 s
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 2 (resolved from the memory budget)
     omega_0: 128, M: 4
   results: top 3 of 3 parameters by ST, mean over 2 output slices
     1. frequency  ST=0.9399
     2. amplitude  ST=0.1488
     3. damping    ST=0.03014
 S1:
- [[9.0630504e-04 8.7189776e-01 1.2745459e-04]
- [9.2660636e-02 7.7746618e-01 1.5859913e-02]]
+ [[9.0630463e-04 8.7189758e-01 1.2745458e-04]
+ [9.2660636e-02 7.7746612e-01 1.5859911e-02]]
 ST:
- [[0.10700202 0.9990047  0.01994336]
- [0.19054425 0.8807914  0.04033279]]
+ [[0.10700202 0.9990047  0.01994342]
+ [0.1905443  0.8807914  0.04033273]]
 ```
 
 Row 0 is `displacement` and row 1 is `velocity`, in `output_names` order. Read
@@ -396,7 +399,7 @@ jaxgsa.efast.analyze
     invalid: none found in 3 search curves (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.6224 s
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 2 (resolved from the memory budget)
     omega_0: 511, M: 4
   results: top 3 of 3 parameters by ST, mean over 2 output slices
     1. x1  ST=0.5507
@@ -410,7 +413,7 @@ same indices — the top-k summary is unchanged from the scalar case. That makes
 the scaled copy a way to check the multi-output path, not a way to learn
 something new about the model.
 
-![Per-output eFAST bar charts for the full Ishigami output and its half-amplitude copy](./figures/efast_gsa_ishigami-full.png)
+![Per-output eFAST bar charts for the full Ishigami output and its half-amplitude copy](../../examples/figures/efast_gsa_ishigami-full.png)
 
 ## Time-series example
 
@@ -454,7 +457,7 @@ jaxgsa.efast.analyze
     invalid: none found in 3 search curves (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.201 s
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 40 (resolved from the memory budget)
     omega_0: 128, M: 4
   results: top 3 of 3 parameters by ST, mean over 40 output slices
     1. damping    ST=0.8998
@@ -526,7 +529,7 @@ jaxgsa.efast.analyze
     invalid: none found in 3 search curves (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.2865 s
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 50 (resolved from the memory budget)
     omega_0: 511, M: 4
   results: top 3 of 3 parameters by ST, mean over 50 output slices
     1. frequency  ST=0.8588
@@ -545,7 +548,7 @@ decides the decay later, as `exp(-gamma * t)` collapses; frequency carries the
 oscillation itself, which is why it holds the largest mean `ST` over the whole
 window (0.859).
 
-![First-order and total-order eFAST indices over time for the damped oscillator](./figures/efast_gsa_first-order-s1-t.png)
+![First-order and total-order eFAST indices over time for the damped oscillator](../../examples/figures/efast_gsa_first-order-s1-t.png)
 
 ## Saving a design
 
@@ -560,7 +563,7 @@ print(reloaded.n_per_curve, reloaded.M, reloaded.samples.shape)
 ```
 
 ```
-1025 4 (3075, 3)
+4096 4 (12288, 3)
 ```
 
 The row order is the contract. Curve `i` is rows
@@ -625,7 +628,7 @@ D is always the last axis.
 
 - [Basic example](/examples/basic) for the Sobol workflow, with `S2` and real
   confidence intervals.
-- [Morris](/examples/morris) for a much cheaper screen when a ranking is all you
+- [Morris](/guide/methods/morris) for a much cheaper screen when a ranking is all you
   need.
 - [Multi-output and time series](/examples/multi-output) for the same shape
   conventions on Sobol and HDMR.

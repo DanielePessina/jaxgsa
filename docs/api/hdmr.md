@@ -65,29 +65,29 @@ jaxgsa.hdmr.analyze
   timing:
     fit + estimator (includes compile on the first call): 1.559 s
     order: 2
-    slice_chunk_size: auto (resolved from the memory budget)
-    batch_size: auto (resolved from the memory budget)
+    slice_chunk_size: 1 (resolved from the memory budget)
+    batch_size: 2000 (resolved from the memory budget)
   results: top 3 of 3 parameters by ST
-    1. x1  ST=0.545
-    2. x2  ST=0.3904
-    3. x3  ST=0.25
+    1. x1  ST=0.5171
+    2. x2  ST=0.3703
+    3. x3  ST=0.2153
 
 terms  ('x1', 'x2', 'x3', 'x1/x2', 'x1/x3', 'x2/x3')
-Sa     [0.3016 0.3772 0.0018 0.0057 0.2304 0.004 ]
-Sb     [-0.0072 -0.0026 -0.0002  0.0033  0.0112  0.0028]
+Sa     [0.3015 0.3771 0.0018 0.0016 0.2153 0.0024]
+Sb     [-0.0076 -0.0086 -0.0002  0.004   0.0022 -0.0063]
 select [1. 1. 0. 0. 1. 0.]
-S.sum  0.9279446005821228
+S.sum  0.8834539651870728
 ```
 
 The per-term layout is what makes this method different from PCE. `x1/x3` carries
-`Sa = 0.230` while `x3` alone carries 0.002, so the fit puts almost all of `x3`'s
+`Sa = 0.215` while `x3` alone carries 0.002, so the fit puts almost all of `x3`'s
 influence in its interaction with `x1`. That is correct for Ishigami. The inputs
 are independent here, so every `Sb` sits near zero, as it should.
 
 `select` is the F-test significance count per term. `x3`, `x1/x2` and `x2/x3`
 scored 0 out of 1 output slice, so the F-test did not keep them.
 
-`S.sum() = 0.928` is the precondition check, not a decoration.
+`S.sum() = 0.883` is the precondition check, not a decoration.
 [Li et al. (2010)](https://doi.org/10.1021/jp9096919), Eq. (24), attach
 their totals to the condition that the per-term `S` values sum to about 1; the
 shortfall is unexplained variance. Read it before ranking anything.
@@ -102,7 +102,7 @@ silent run.
 | `order` | `2` | Largest interaction size modelled, 1 or 2. Order 2 captures pairwise interactions. `order=3` raises `ValueError`: third-order terms were fitted one at a time and double-counted variance. Clamped to `D` with a warning when `D < order`. |
 | `max_iter` | `100` | Backfitting iterations for the first-order terms. It rarely needs raising, because iteration stops early once the coefficients stop moving. |
 | `n_intervals` | `2` | B-spline intervals per dimension, giving a basis of size `n_intervals + 3`. A larger value resolves sharper features in the component functions. It also multiplies the coefficient count, since a per-term basis grows as `(n_intervals+3)^order`, and it needs more samples to avoid overfitting. |
-| `ridge` | `0.01` | Tikhonov regularization strength. Raise it for noisy `Y` or small `N`, which smooths and stabilises the components. Lower it when genuine sharp features are being flattened. |
+| `ridge` | `0.01` | Tikhonov regularization strength. Raise it for noisy `Y` or small `N`, which smooths and stabilises the components. Lower it when genuine sharp features are being flattened. In float32 the pair indices can come out a few hundredths below float64 (Ishigami, `N = 2000`: `ST` up to 0.018 lower), because float32 uses a larger ridge floor. Use float64 as the reference when interaction indices matter. |
 | `slice_chunk_size` | `None` | Maximum `(T, K)` output slices fitted per vmap. It bounds the per-slice statistics transient, about `batch_size * slice_chunk_size * n_terms`. `None` derives it from the memory budget. |
 | `batch_size` | `None` | Rows per batch during the fit. It bounds the B-spline basis tensors, roughly `batch_size * (n_intervals+3)^2 * n2` floats at order 2, where `n2` counts parameter pairs. `None` derives it from the memory budget, which resolves to a single batch whenever the whole fit fits. |
 | `n_bootstrap` | `0` | Row resamples on `Sa`, `Sb`, `S` and `ST`. See below. |
@@ -238,4 +238,4 @@ carries `D`, and there is no `terms` tuple to label them with.
   [Global Sensitivity Analysis for Systems with Independent and/or Correlated Inputs](https://doi.org/10.1021/jp9096919).
   *Journal of Physical Chemistry A*, 114(19), 6022–6032.
 
-See the [HDMR example](/examples/hdmr) and the [API overview](/api/).
+See the [HDMR guide page](/guide/methods/hdmr) and the [API overview](/api/).

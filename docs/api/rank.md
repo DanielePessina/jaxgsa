@@ -7,6 +7,7 @@ jaxgsa.rank.analyze(
     conf_level=0.95,
     ci_method="quantile",
     key=None,
+    slice_chunk_size=None,
     on_invalid="raise",
     verbose=True,
     keep_replicates=False,
@@ -61,6 +62,7 @@ jaxgsa.rank.analyze
     invalid: none found in 4000 rows (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.1746 s
+    slice_chunk_size: 1 (resolved from the memory budget)
   results: top 3 of 3 parameters by S1
     1. x2  S1=0.4646
     2. x1  S1=0.2872
@@ -80,6 +82,7 @@ standard error is about 0.02 for each index.
 | `conf_level` | `0.95` | Confidence level for the intervals. |
 | `ci_method` | `"quantile"` | `"quantile"` reads the endpoints off the empirical resample distribution. `"gaussian"` centres them on the point estimate and takes `+/- z * sd` of the draws. |
 | `key` | `None` | A `jax.random` key for the resampling. Required when `n_bootstrap > 0`. Use `jax.random.key(0)` if you have an integer seed. |
+| `slice_chunk_size` | `None` | Flattened `T*K` output slices the kernel reads at once. It bounds the peak memory, and the memory of a gradient, for a large `T * K`, and changes no index. `None` derives it from the memory budget. An explicit value must be an integer of at least 1. |
 | `on_invalid` | `"raise"` | Policy for non-finite rows. `"drop"` removes the `(X, Y)` pair, `"propagate"` warns and computes anyway. |
 | `verbose` | `True` | Prints the summary block shown above. |
 | `keep_replicates` | `False` | Keeps the per-resample indices on `result.ci.replicates`. These are the rescaled draws that the interval is built from. |
@@ -170,7 +173,7 @@ because it is a ratio to the output variance.
 
 ## Traceable core
 
-`jaxgsa.rank.indices(problem, X, Y)` returns a `RankIndices` named tuple with one field,
+`jaxgsa.rank.indices(problem, X, Y, *, slice_chunk_size=None)` returns a `RankIndices` named tuple with one field,
 `S1`, holding the index array, with none of the diagnostics, so it composes with `jit` and
 `vmap`. It still refuses categorical problems, because that check reads only
 static problem metadata. The estimator reads the ranks of `X`, so the gradient
@@ -190,4 +193,4 @@ $2\times10^{-4}$ after that factor.
 - Gamboa, F., Gremaud, P., Klein, T., and Lagnoux, A. (2022). [Global sensitivity analysis: a novel generation of mighty estimators based on rank statistics](https://doi.org/10.3150/21-BEJ1421). *Bernoulli*, 28(4), 2345–2374. Gives the rank estimator of the first-order Sobol' index.
 - Chatterjee, S. (2021). [A new coefficient of correlation](https://doi.org/10.1080/01621459.2020.1758115). *Journal of the American Statistical Association*, 116(536), 2009–2022. Introduces the rank-pairing statistic that the estimator builds on.
 
-See the [Methods](/guide/methods) and the [API overview](/api/).
+See the [rank guide page](/guide/methods/rank), [Methods](/guide/methods) and the [API overview](/api/).
