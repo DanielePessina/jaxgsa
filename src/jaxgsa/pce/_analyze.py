@@ -449,7 +449,11 @@ def _get_streamed_steps(
         Phi_b = build_design_matrix(X_b, multi_index, input_types, order) * w[:, None]
         # Zero on padded rows: their leverage is 0 and their residual 0.
         loo, residuals = loo_residuals(
-            Phi_b, Y_b, coeffs_flat, R, (coeffs_loo, R_loo, R_double) if loo_floor else None
+            Phi_b,
+            Y_b,
+            coeffs_flat,
+            R,
+            (lambda: (coeffs_loo, R_loo, R_double)) if loo_floor else None,
         )
         sse_loo, sse_fit = sse
         return sse_loo + jnp.sum(loo**2, axis=0), sse_fit + jnp.sum(residuals**2, axis=0)
@@ -911,7 +915,8 @@ def _single_pass_loo(
     # R^T R = Phi^T Phi + ridge*I, so R.T is the Cholesky factor hat_diagonal
     # wants. A zero row has leverage 0 and residual 0, so only the divisor
     # needs the real count.
-    fallback = loo_fit(R, coeffs_flat, lam) if loo_floor else None
+    # A thunk: loo_residuals runs the fallback fit only when a row needs it.
+    fallback = (lambda: loo_fit(R, coeffs_flat, lam)) if loo_floor else None
     loo, residuals = loo_residuals(Phi, Y_flat, coeffs_flat, R, fallback)
     loo_flat = jnp.sqrt(jnp.sum(loo**2, axis=0) / n_rows)
     rmse_flat = jnp.sqrt(jnp.sum(residuals**2, axis=0) / n_rows)

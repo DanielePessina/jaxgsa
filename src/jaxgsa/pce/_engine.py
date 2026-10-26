@@ -9,6 +9,7 @@ Gaussian marginal. The multi-dimensional basis is the tensor product of those
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import lru_cache
 from itertools import combinations
 from math import comb, factorial
@@ -616,6 +617,16 @@ RIDGE_BAND_HIGH = 1e-16
 # brute-force leave-one-out error, 1e-11 gives 89% of it and eps gives 1e-4.
 LOO_RIDGE_REL = 1e-10
 
+# Margin ``1 - h_i`` below which a row may be one the ridge made (see
+# loo_residuals). A made margin is of the order of the relative ridge, at
+# most about 3e-9 for the float64 default, so a fit whose margins all sit
+# above this has no such row and skips the fallback fit.
+LOO_FALLBACK_GATE = 1e-6
+
+# The fallback fit of loo_fit: coefficients, its factor, and the factor
+# with the fitted ridge doubled.
+LOOFallback = tuple[Array, Array, Array]
+
 
 def unridged_share(R: Array) -> Array:
     """Smallest pivot share of a design, read off its QR factor without a ridge.
@@ -844,7 +855,7 @@ def loo_residuals(
     Y: Array,
     coefficients: Array,
     R: Array,
-    fallback: tuple[Array, Array, Array] | None = None,
+    fallback: Callable[[], LOOFallback] | None = None,
 ) -> tuple[Array, Array]:
     """Leave-one-out and in-sample residuals of a fit, row by row.
 
@@ -853,27 +864,39 @@ def loo_residuals(
         Y: Outputs, ``(b, M)``.
         coefficients: Fitted coefficients, ``(n_terms, M)``.
         R: Factor of the fit, ``(n_terms, n_terms)``.
-        fallback: The output of :func:`loo_fit`, or ``None``. When given, a
-            row whose margin ``1 - h_i`` is made by the ridge (at least 1.5
-            times larger with the ridge doubled, or below ``1e3 * eps``)
-            takes its leave-one-out residual from the fallback fit.
+        fallback: A zero-argument callable that returns the output of
+            :func:`loo_fit`, or ``None``. When given, a row whose margin
+            ``1 - h_i`` is made by the ridge (at least 1.5 times larger with
+            the ridge doubled, or below ``1e3 * eps``) takes its
+            leave-one-out residual from the fallback fit. The callable runs
+            only when some margin is below :data:`LOO_FALLBACK_GATE`, so a
+            fit with no such row skips the fallback fit.
 
     Returns:
         ``(loo, residuals)``, each ``(b, M)``.
     """
     residuals = Y - Phi @ coefficients
-    h = hat_diagonal(Phi, R.T)
-    loo = residuals / (1.0 - h)[:, None]
-    if fallback is not None:
-        c2, R2, R_double = fallback
-        margin = 1.0 - _raw_leverage(Phi, R.T)
-        # A margin at round-off (below 1e3 eps; real ones measured down to
-        # 4e-12) counts as made too: there the doubling test is noise, and
-        # the streamed factor misread one interpolated row by it.
-        tiny = 1e3 * jnp.finfo(margin.dtype).eps
+    # One leverage serves the shortcut and the margin test.
+    raw = _raw_leverage(Phi, R.T)
+    _, high = unit_clip_bounds(_LEVERAGE_CLIP, raw.dtype)
+    loo = residuals / (1.0 - jnp.clip(raw, 0.0, high))[:, None]
+    if fallback is None:
+        return loo, residuals
+    margin = 1.0 - raw
+    # A margin at round-off (below 1e3 eps; real ones measured down to
+    # 4e-12) counts as made too: there the doubling test is noise, and the
+    # streamed factor misread one interpolated row by it.
+    tiny = 1e3 * jnp.finfo(margin.dtype).eps
+
+    def with_fallback() -> Array:
+        c2, R2, R_double = fallback()
         made = (margin < tiny) | (margin < (1.0 - _raw_leverage(Phi, R_double.T)) / 1.5)
         loo2 = (Y - Phi @ c2) / (1.0 - hat_diagonal(Phi, R2.T))[:, None]
-        loo = jnp.where(made[:, None], loo2, loo)
+        return jnp.where(made[:, None], loo2, loo)
+
+    # No row can be made by the ridge unless its margin is tiny, so a fit
+    # without such a row skips the fallback fit and its extra passes.
+    loo = jax.lax.cond(jnp.any(margin < LOO_FALLBACK_GATE), with_fallback, lambda: loo)
     return loo, residuals
 
 
@@ -899,11 +922,17 @@ def ridge_sensitivity(R: Array, coefficients: Array, lam: Array, multi_index: np
         ``max |ST(2 lam) - ST(lam)|`` over inputs and output slices, a scalar.
         Constant slices are skipped.
     """
+    active = jnp.asarray(np.asarray(multi_index) > 0, dtype=coefficients.dtype)
+    return _ridge_sensitivity(R, coefficients, lam, active)
+
+
+@jax.jit
+def _ridge_sensitivity(R: Array, coefficients: Array, lam: Array, active: Array) -> Array:
+    """The compiled body of :func:`ridge_sensitivity`, with ``active`` as an array."""
     n_terms = coefficients.shape[-1]
     flat = coefficients.reshape(-1, n_terms).T  # (n_terms, T*K)
     R2, z2 = fold_ridge(R, R @ flat, lam)
     doubled = solve_triangular(R2, z2, lower=False).T.reshape(coefficients.shape)
-    active = jnp.asarray(np.asarray(multi_index) > 0, dtype=coefficients.dtype)
 
     def total_index(c: Array) -> Array:
         # As in sobol_from_coefficients, ST only: S2 is not needed here.
