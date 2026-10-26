@@ -22,7 +22,7 @@ import pytest
 from jax import Array
 
 from jaxgsa import hdmr, pce
-from jaxgsa._core.batching import resolve_batch_size
+from jaxgsa._core.batching import balanced_width, resolve_batch_size
 from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
 from jaxgsa.problem import Problem
 
@@ -132,6 +132,32 @@ def test_resolve_batch_size_bounds():
     assert resolve_batch_size(10**12, 50, None) == 1
     # Auto: cheap rows fall back to single-shot.
     assert resolve_batch_size(8, 50, None) == 50
+
+
+@pytest.mark.parametrize("total", [1, 7, 50, 1000, 4096, 5000])
+def test_balanced_width_keeps_the_chunk_count(total):
+    """An automatic width never exceeds the cap and keeps its chunk count."""
+    for cap in {1, 2, 3, total // 3 or 1, total // 2 or 1, total - 1 or 1, total}:
+        width = balanced_width(total, cap)
+        n_chunks = -(-total // cap)
+        assert 1 <= width <= cap
+        assert -(-total // width) == n_chunks
+        # The padded total stays within one item per chunk of the real one.
+        assert n_chunks * width < total + n_chunks
+
+
+def test_auto_batch_size_is_balanced():
+    """The budget-derived width spreads the rows evenly; an explicit one is kept."""
+    from jaxgsa._core import batching
+
+    saved = batching.get_memory_budget()
+    try:
+        # A budget for 819 rows of 1000 gives two even chunks of 500.
+        batching._set_memory_budget(819)
+        assert resolve_batch_size(1, 1000, None) == 500
+        assert resolve_batch_size(1, 1000, 819) == 819
+    finally:
+        batching._set_memory_budget(saved)
 
 
 class _FakeSurrogate(SurrogateResult):

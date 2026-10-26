@@ -34,7 +34,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jax import Array
 
-from jaxgsa._core.batching import get_memory_budget
+from jaxgsa._core.batching import balanced_width, get_memory_budget
 
 # A chunk holds its inputs plus about two working copies of them at its peak:
 # the standardized columns inside the front half, then the centred products
@@ -123,7 +123,8 @@ def resolve_point_chunk_size(
         return max(1, min(slice_chunk_size, n_slices))
     bytes_per_slice = slice_elements(base_n, D, calc_second_order) * itemsize * n_bootstrap
     budget = max(1, get_memory_budget() // max(bytes_per_slice, 1))
-    return max(1, min(n_slices, budget))
+    # Even chunks: a ragged last chunk is padded back to full width.
+    return balanced_width(n_slices, max(1, min(n_slices, budget)))
 
 
 def resolve_resample_chunk_size(
