@@ -402,6 +402,24 @@ def test_stats_step_blocked_matches_whole():
         np.testing.assert_allclose(np.asarray(c), np.asarray(a), rtol=rtol, atol=rtol * 10)
 
 
+def test_stats_path_choice_keeps_indices(monkeypatch, hdmr_ishigami_xy):
+    """Forcing the whole-F or the blocked stats path leaves every index put.
+
+    The choice reads an absolute byte cap, not the memory budget, so a
+    larger budget cannot pick the slower whole-F path either.
+    """
+    X, Y = hdmr_ishigami_xy
+    fields = ("S1", "ST", "Sa", "Sb", "S")
+    runs = []
+    for cap in (0, 2**62):
+        monkeypatch.setattr(_fit, "_STATS_WHOLE_MAX_BYTES", cap)
+        res = analyze_hdmr(PROBLEM, X, Y, order=2, verbose=False)
+        runs.append({f: np.asarray(getattr(res, f)) for f in fields})
+    rtol = 1e-9 if runs[0]["S1"].dtype == np.float64 else 1e-4
+    for f in fields:
+        np.testing.assert_allclose(runs[1][f], runs[0][f], rtol=rtol, atol=rtol)
+
+
 # ---------------------------------------------------------------------------
 # Bootstrap under a small budget
 # ---------------------------------------------------------------------------

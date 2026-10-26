@@ -62,6 +62,11 @@ from jaxgsa.hdmr._engine import _build_B1, _build_B2, _build_B3, term_order_map
 _STATS_TERM_BLOCK = 32
 
 
+# Largest (row, lane, term) working set the final stats pass holds whole
+# (see _fit_hdmr). Above it, the blocked step is faster.
+_STATS_WHOLE_MAX_BYTES = 64 * 1024**2
+
+
 def _basis_bytes_per_row(
     D: int,
     m1: int,
@@ -2011,9 +2016,12 @@ def _fit_hdmr(
 
     # ---- Final pass: ANCOVA / F-test / RMSE reductions ---------------------
     build_bases_final = _get_build_bases(n_intervals, order2, order3)
-    # Hold F whole when the (row, lane, term) working set fits half the budget,
-    # since that is the faster path. Read the budget here, outside any jit.
-    blocked = b * cs * 3 * n * itemsize > get_memory_budget() // 2
+    # Hold F whole only when the (row, lane, term) working set is small. It
+    # is faster only while that set stays near the cache: at D=8, N=4096,
+    # float64 it wins by 7% at 56 MB and loses by 43% at 354 MB (100 slices)
+    # and 80% at 2.1 GB. The cap is absolute, not a share of the budget, so
+    # a larger budget never picks the slower path.
+    blocked = b * cs * 3 * n * itemsize > _STATS_WHOLE_MAX_BYTES
     stats_step = _get_stats_step(blocked)
     accs = [
         (
