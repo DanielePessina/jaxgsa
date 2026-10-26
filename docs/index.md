@@ -29,6 +29,19 @@ features:
     details: Analyze several outputs or a time series, including channels measured on different time grids.
 ---
 
+## Install
+
+```bash
+uv add jaxgsa        # or: pip install jaxgsa
+```
+
+To let a coding agent (Claude Code, Codex, Cursor and others) set up and read
+analyses with jaxgsa, add its skill:
+
+```bash
+npx skills add DanielePessina/jaxgsa --skill jaxgsa
+```
+
 ## Your first analysis
 
 Suppose a model has three uncertain inputs. You want to know which ones explain
@@ -94,9 +107,9 @@ jaxgsa's Sobol sampling and analysis workflow follows
 
 ## Acknowledgements
 
-jaxgsa is developed and maintained by Daniele Pessina. The
-[Papathanasiou Lab](https://www.papathanlab.com/) (Life Science and Process
-Systems Engineering Lab, Imperial College London) supported and funded its
-development.
+jaxgsa is designed, written and maintained by Daniele Pessina, as part of his
+work in the [Papathanasiou Lab](https://www.papathanlab.com/) (Life Science
+and Process Systems Engineering Lab, Imperial College London). The lab
+supported and funded its development.
 
 <a href="https://www.papathanlab.com/"><img src="/logos/papathanlab.svg" alt="Life Science and Process Systems Engineering Lab" style="height: 48px"></a>

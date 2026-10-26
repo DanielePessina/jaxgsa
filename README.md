@@ -183,10 +183,10 @@ metadata.
 
 ## Acknowledgements
 
-jaxgsa is developed and maintained by Daniele Pessina. The
-[Papathanasiou Lab](https://www.papathanlab.com/) (Life Science and Process
-Systems Engineering Lab, Imperial College London) supported and funded its
-development.
+jaxgsa is designed, written and maintained by Daniele Pessina, as part of his
+work in the [Papathanasiou Lab](https://www.papathanlab.com/) (Life Science
+and Process Systems Engineering Lab, Imperial College London). The lab
+supported and funded its development.
 
 <a href="https://www.papathanlab.com/"><img src="https://danielepessina.github.io/jaxgsa/logos/papathanlab.svg" alt="Life Science and Process Systems Engineering Lab" height="48"></a>
 
