@@ -58,8 +58,8 @@ jaxgsa.borgonovo.analyze
     1. x2  delta=0.3516
     2. x1  delta=0.2106
     3. x3  delta=0.1567
-delta: [0.21057463 0.3515927  0.15670761]
-S1:    [0.30810872 0.43677974 0.00358097]
+delta: [0.21057461 0.35159272 0.15670761]
+S1:    [0.30810875 0.4367798  0.00358097]
 delta_conf: None
 ```
 
@@ -106,7 +106,7 @@ jaxgsa.borgonovo.analyze(PROBLEM, X, Y_disc)
 ```
 
 ```
-ValueError: jaxgsa.borgonovo.analyze supports a continuous output
+ValueError: jaxgsa.borgonovo: analyze supports a continuous output
 distribution only, but the output takes only 2 distinct values in 5000
 samples. The delta estimator compares Gaussian kernel density estimates on a
 shared output grid; an atomic density is a spike that no grid resolves, so
@@ -166,15 +166,15 @@ jaxgsa.borgonovo.analyze
     grid_size: 100
     bandwidth: silverman
   results: top 3 of 3 parameters by delta
-    1. x2  delta=0.3516  [0.3449, 0.3629]
-    2. x1  delta=0.2106  [0.2079, 0.226]
-    3. x3  delta=0.1567  [0.1529, 0.1703]
-delta (plug-in): [0.21057463 0.3515927  0.15670761]
-95% CI lower: [0.20792328 0.3449311  0.15285581]
-95% CI upper: [0.22595103 0.3628546  0.17025897]
-S1: [0.3081087  0.43677974 0.00358097]
-S1 CI: [[0.29423395 0.41606882 0.00295663]
- [0.32919294 0.45707515 0.01367938]]
+    1. x2  delta=0.3516  [0.3456, 0.3642]
+    2. x1  delta=0.2106  [0.2074, 0.2258]
+    3. x3  delta=0.1567  [0.1536, 0.1708]
+delta (plug-in): [0.21057461 0.35159272 0.15670761]
+95% CI lower: [0.20736326 0.34564054 0.15357788]
+95% CI upper: [0.2257518  0.36422628 0.1707566 ]
+S1: [0.30810875 0.4367798  0.00358097]
+S1 CI: [[0.2910717  0.41973472 0.00255205]
+ [0.32826477 0.45890796 0.01396101]]
 ```
 
 `delta` matches the first run exactly: 0.2106 for x1. The estimator is
@@ -191,11 +191,11 @@ print("shift:", r_corr.delta - result.delta)
 ```
 
 ```
-delta (bias_correct=True): [0.20413923 0.3486844  0.15101331]
-shift: [-0.00643539 -0.00290829 -0.0056943 ]
+delta (bias_correct=True): [0.20434044 0.34828836 0.15136331]
+shift: [-0.00623417 -0.00330436 -0.0053443 ]
 ```
 
-The correction moved every index down, by 0.0064, 0.0029 and 0.0057.
+The correction moved every index down, by 0.0062, 0.0033 and 0.0053.
 Downward on every input, as the upward-bias argument predicts.
 
 Use `bias_correct=True` when the value matters and not only the ranking.
@@ -235,15 +235,15 @@ for n in (500, 2000, 8000, 32000):
 
 ```
 analytical: [0.08900277 0.20156255 0.38735419]
-N=   500: delta=[0.1031889  0.17368464 0.3440713 ]  max abs error=0.0433
-N=  2000: delta=[0.10180537 0.19444586 0.35278648]  max abs error=0.0346
-N=  8000: delta=[0.09093203 0.18996786 0.36351147]  max abs error=0.0238
-N= 32000: delta=[0.08855142 0.19409662 0.37382233]  max abs error=0.0135
+N=   500: delta=[0.10337346 0.1770844  0.34982482]  max abs error=0.0375
+N=  2000: delta=[0.10246327 0.19656333 0.35251492]  max abs error=0.0348
+N=  8000: delta=[0.08962443 0.18989319 0.3639156 ]  max abs error=0.0234
+N= 32000: delta=[0.08823926 0.19354965 0.3738053 ]  max abs error=0.0135
 ```
 
 The ranking is correct at N = 500 already. The *values* take much longer:
-error falls from 0.043 to 0.014 over a 64x increase in N, roughly as
-`N**-0.28`, which is slower than the `N**-0.5` you may expect. The
+error falls from 0.038 to 0.014 over a 64x increase in N, roughly as
+`N**-0.25`, which is slower than the `N**-0.5` you may expect. The
 conditioning-class count grows with N under the Plischke heuristic, so
 samples per class grow more slowly than N, and the KDE bias shrinks slowly
 with it.
@@ -285,8 +285,8 @@ print(result.to_dataset())
 
 ```
 delta shape: (2, 3)
-[[0.21183114 0.345705   0.14884597]
- [0.21189035 0.19872913 0.19872493]]
+[[0.21283005 0.34599    0.14779533]
+ [0.21246988 0.19944172 0.19948266]]
 
 <xarray.Dataset> Size: 184B
 Dimensions:      (output: 2, param: 3)
@@ -294,12 +294,12 @@ Coordinates:
   * output       (output) <U2 16B 'y0' 'y1'
   * param        (param) <U2 24B 'x1' 'x2' 'x3'
 Data variables:
-    delta        (output, param) float32 24B 0.2118 0.3457 ... 0.1987 0.1987
+    delta        (output, param) float32 24B 0.2128 0.346 ... 0.1994 0.1995
     S1           (output, param) float32 24B 0.3189 0.4414 ... 0.322 0.3448
-    delta_lower  (output, param) float32 24B 0.1981 0.3316 ... 0.1834 0.1876
-    delta_upper  (output, param) float32 24B 0.2238 0.3592 ... 0.2154 0.2114
-    S1_lower     (output, param) float32 24B 0.3003 0.4214 ... 0.2986 0.3241
-    S1_upper     (output, param) float32 24B 0.3438 0.4751 ... 0.3559 0.3733
+    delta_lower  (output, param) float32 24B 0.203 0.3336 ... 0.187 0.1871
+    delta_upper  (output, param) float32 24B 0.2248 0.3599 ... 0.2103 0.2117
+    S1_lower     (output, param) float32 24B 0.2979 0.413 ... 0.2981 0.3213
+    S1_upper     (output, param) float32 24B 0.3373 0.4708 ... 0.3543 0.3749
 ```
 
 Row 0 is the Ishigami output, row 1 the sum of squares. Row 1 is flat at 0.20

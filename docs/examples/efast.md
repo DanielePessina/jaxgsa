@@ -95,8 +95,8 @@ jaxgsa.efast.analyze
     1. x1  ST=0.5507
     2. x2  ST=0.463
     3. x3  ST=0.2393
-S1: [3.0759001e-01 4.4247049e-01 3.4844247e-10]
-ST: [0.550743   0.46297276 0.23925918]
+S1: [3.0759001e-01 4.4247046e-01 3.4816333e-10]
+ST: [0.550743   0.46297276 0.23925912]
 exact S1: [0.31390519 0.44241114 0.        ]
 exact ST: [0.55758886 0.44241114 0.24368366]
 ```
@@ -138,6 +138,7 @@ n_per_curve=  257 runs=   771 omega_0=  32 ST=[0.5388 0.4864 0.2356]
 n_per_curve=  513 runs=  1539 omega_0=  64 ST=[0.539  0.4863 0.2358]
 n_per_curve= 1025 runs=  3075 omega_0= 128 ST=[0.5389 0.4862 0.2357]
 n_per_curve= 4096 runs= 12288 omega_0= 511 ST=[0.5507 0.463  0.2393]
+exact ST                                     [0.5576 0.4424 0.2437]
 ```
 
 This is the trap, and it is worth staring at. From 257 to 1025 the indices are
@@ -195,7 +196,7 @@ print("exact       S1=", np.round(ANALYTICAL_S1, 4), "ST=", np.round(ANALYTICAL_
 ```
 
 ```
-M=1  omega_0=2048  S1=[0.3175 0.0854 0.    ]  ST=[0.3758 0.1849 0.    ]
+M=1  omega_0=2048  S1=[0.3175 0.0854 0.    ]  ST=[ 0.3758  0.1849 -0.    ]
 M=2  omega_0=1024  S1=[0.2592 0.0034 0.5562]  ST=[0.4489 0.3828 0.6541]
 M=4  omega_0= 512  S1=[0.3122 0.4408 0.0289]  ST=[0.5389 0.4862 0.2357]
 M=8  omega_0= 256  S1=[0.3134 0.4424 0.0025]  ST=[0.5561 0.4483 0.2444]
@@ -283,6 +284,8 @@ What you can do is draw several designs with different random phase shifts and
 compare.
 
 ```python
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
+
 STs = []
 for seed in range(8):
     s = efast.sample(PROBLEM, n_per_curve=1025, seed=seed, verbose=False)
@@ -357,11 +360,11 @@ jaxgsa.efast.analyze
     2. amplitude  ST=0.1488
     3. damping    ST=0.03014
 S1:
- [[9.0630504e-04 8.7189776e-01 1.2745459e-04]
- [9.2660636e-02 7.7746618e-01 1.5859913e-02]]
+ [[9.0630463e-04 8.7189758e-01 1.2745458e-04]
+ [9.2660636e-02 7.7746612e-01 1.5859911e-02]]
 ST:
- [[0.10700202 0.9990047  0.01994336]
- [0.19054425 0.8807914  0.04033279]]
+ [[0.10700202 0.9990047  0.01994342]
+ [0.1905443  0.8807914  0.04033273]]
 ```
 
 Row 0 is `displacement` and row 1 is `velocity`, in `output_names` order. Read
@@ -560,7 +563,7 @@ print(reloaded.n_per_curve, reloaded.M, reloaded.samples.shape)
 ```
 
 ```
-1025 4 (3075, 3)
+4096 4 (12288, 3)
 ```
 
 The row order is the contract. Curve `i` is rows

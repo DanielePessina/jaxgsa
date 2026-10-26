@@ -40,13 +40,13 @@ jaxgsa.sobol.analyze
   timing:
     estimators (includes compile on the first call): 1.395 s
     slice_chunk_size: 40 (resolved from the memory budget)
-    bootstrap slice_chunk_size: 40 (resolved from the memory budget)
+    bootstrap resamples per call: 200 (resolved from the memory budget)
     estimator: saltelli-jansen
   results: top 3 of 3 parameters by ST, mean over 40 output slices
-    1. Ca0            ST=0.6291  [0.564, 0.7124]
-    2. pH             ST=0.2279  [0.206, 0.2583]
-    3. temperature_C  ST=0.156  [0.1354, 0.1796]
-SobolResult(S1=(40, 1, 3), S1_conf=(2, 40, 1, 3), ST=(40, 1, 3), ST_conf=(2, 40, 1, 3), S2=(40, 1, 3, 3), S2_conf=(2, 40, 1, 3, 3), estimator='saltelli-jansen', ci=CIInfo(level=0.95, method='quantile', n_bootstrap=200, replicates=None))
+    1. Ca0            ST=0.6291  [0.5601, 0.7075]
+    2. pH             ST=0.2279  [0.1992, 0.2568]
+    3. temperature_C  ST=0.156  [0.1367, 0.1733]
+SobolResult(S1=(40, 1, 3), S1_conf=(2, 40, 1, 3), ST=(40, 1, 3), ST_conf=(2, 40, 1, 3), S2=(40, 1, 3, 3), S2_conf=(2, 40, 1, 3, 3), variance=(40, 1), estimator='saltelli-jansen', ci=CIInfo(level=0.95, method='quantile', n_bootstrap=200, replicates=None))
 ```
 
 Read that ranking with care. The line says **mean over 40 output slices**,
@@ -125,9 +125,9 @@ t = 6.0 (steady state)
   pH             S1=0.2952  ST=0.3083
 
 pairwise S2 at t = 6.0
-  Ca0/temperature_C: 0.0081
-  Ca0/pH: 0.0125
-  temperature_C/pH: 0.0000
+  Ca0/temperature_C: 0.0079
+  Ca0/pH: 0.0127
+  temperature_C/pH: 0.0021
 ```
 
 ![Batch-reactor outlet concentration trajectories from 24 Saltelli samples, filling toward steady state](./figures/batch_reactor_gsa_batch-reactor-concentration-trajectories-24-samp.png)
@@ -147,8 +147,8 @@ the 20 K temperature range moves the Arrhenius factor by about a factor of two.
 Ranges drive rankings. Widen the temperature box and the ordering flips.
 
 The interactions are all small. At steady state $S_T$ exceeds $S_1$ by 0.008
-for $T$, 0.013 for $\mathrm{pH}$ and 0.017 for $C_{A,0}$, and the largest pairwise index is 0.0125 for $C_{A,0}$ with
-$\mathrm{pH}$. Temperature and pH register 0.0000 together at steady state,
+for $T$, 0.013 for $\mathrm{pH}$ and 0.017 for $C_{A,0}$, and the largest pairwise index is 0.0127 for $C_{A,0}$ with
+$\mathrm{pH}$. Temperature and pH register only 0.0021 together at steady state,
 despite entering the model only through the product $k(T, \mathrm{pH})$, which
 is a good reminder that "these two appear in the same term" is not the same
 claim as "these two interact in the variance sense". The response is close to

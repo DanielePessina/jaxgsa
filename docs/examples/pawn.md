@@ -60,7 +60,7 @@ jaxgsa.pawn.analyze
     1. x2  PAWN=0.4066
     2. x1  PAWN=0.2419
     3. x3  PAWN=0.08334
-pawn:         [0.2419315  0.40658885 0.08334284]
+pawn:         [0.24193151 0.40658885 0.08334285]
 n_valid_classes: [10 10 10]
 ```
 
@@ -110,10 +110,10 @@ for nb in (5, 10, 20, 50):
 ```
 
 ```
-n_classes=  5: pawn=[0.18761349 0.28084224 0.08781385]  n_valid_classes=[5 5 5]
-n_classes= 10: pawn=[0.2419315  0.40658885 0.08334284]  n_valid_classes=[10 10 10]
-n_classes= 20: pawn=[0.2354129  0.40557504 0.09115449]  n_valid_classes=[20 20 20]
-n_classes= 50: pawn=[0.24619085 0.43429956 0.10700866]  n_valid_classes=[50 50 50]
+n_classes=  5: pawn=[0.18761343 0.2808423  0.08781381]  n_valid_classes=[5 5 5]
+n_classes= 10: pawn=[0.24193151 0.40658885 0.08334285]  n_valid_classes=[10 10 10]
+n_classes= 20: pawn=[0.2354129  0.405575   0.09115449]  n_valid_classes=[20 20 20]
+n_classes= 50: pawn=[0.24619086 0.4342996  0.10700864]  n_valid_classes=[50 50 50]
 ```
 
 Five bins is too few. Each bin covers a fifth of x2's range, x2 is far from
@@ -144,9 +144,9 @@ for s in ("median", "max", "mean"):
 ```
 
 ```
-median : [0.2419315  0.40658885 0.08334284]
-max    : [0.2966746  0.49668312 0.20064142]
-mean   : [0.22638342 0.350946   0.09694888]
+median : [0.24193151 0.40658885 0.08334285]
+max    : [0.2966747  0.49668318 0.20064144]
+mean   : [0.22638342 0.350946   0.09694886]
 ```
 
 `max` is at least as large as the other two for every input, by definition.
@@ -178,9 +178,9 @@ print("upper:", result.pawn_conf[1])
 ```
 
 ```
-pawn:  [0.2419315  0.40658885 0.08334284]
-lower: [0.22795124 0.3840406  0.08216228]
-upper: [0.2634125  0.42300665 0.09661566]
+pawn:  [0.24193151 0.40658885 0.08334285]
+lower: [0.22585914 0.3858754  0.07573734]
+upper: [0.26132038 0.42484146 0.09019075]
 ```
 
 `pawn_conf` is shaped `(2, D)`: row 0 lower, row 1 upper. It is `None` when
@@ -188,7 +188,7 @@ upper: [0.2634125  0.42300665 0.09661566]
 
 Read these as separation tests. The three intervals here do not overlap, so
 the ranking x2 > x1 > x3 is supported by the data, not an artifact of which
-5000 rows you happened to draw. x3's interval is [0.082, 0.097], which is the
+5000 rows you happened to draw. x3's interval is [0.076, 0.090], which is the
 number that makes the claim above precise: PAWN finds a real effect for the
 input whose first-order Sobol index is exactly zero.
 
@@ -237,7 +237,7 @@ jaxgsa.pawn.analyze
     1. x2  PAWN=0.3367
     2. x1  PAWN=0.3177
     3. x3  PAWN=0.07878
-pawn:         [0.31772962 0.33670652 0.07877553]
+pawn:         [0.3177296  0.33670652 0.07877553]
 n_valid_classes: [10 10  3]
 ```
 
@@ -257,7 +257,7 @@ print("n_classes=3 pawn:", r.pawn, " n_valid_classes:", r.n_valid_classes)
 ```
 
 ```
-n_classes=3 pawn: [0.2720249  0.1078375  0.07877553]  n_valid_classes: [3 3 3]
+n_classes=3 pawn: [0.2720249  0.10783754 0.07877553]  n_valid_classes: [3 3 3]
 ```
 
 The warning is gone, and x3's index is unchanged at 0.0788, because three
@@ -292,16 +292,16 @@ print(result.to_dataset())
 
 ```
 pawn shape: (2, 3)
-[[0.25033993 0.4081337  0.08886259]
- [0.20379516 0.2067296  0.21694896]]
+[[0.2503399  0.4081337  0.08886259]
+ [0.20379516 0.20672959 0.21694899]]
 
 <xarray.Dataset> Size: 88B
-Dimensions:       (output: 2, param: 3)
+Dimensions:          (output: 2, param: 3)
 Coordinates:
-  * output        (output) <U2 16B 'y0' 'y1'
-  * param         (param) <U2 24B 'x1' 'x2' 'x3'
+  * output           (output) <U2 16B 'y0' 'y1'
+  * param            (param) <U2 24B 'x1' 'x2' 'x3'
 Data variables:
-    pawn          (output, param) float32 24B 0.2503 0.4081 ... 0.2067 0.2169
+    pawn             (output, param) float32 24B 0.2503 0.4081 ... 0.2067 0.2169
     n_valid_classes  (output, param) int32 24B 10 10 10 10 10 10
 ```
 

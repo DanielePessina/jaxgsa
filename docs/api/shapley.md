@@ -35,7 +35,7 @@ print("ST ", np.asarray(res.ST).round(4))
 ```
 
 ```
-Sh  [0.4361 0.4424 0.1215] sum 1.0000000000000007
+Sh  [0.4361 0.4424 0.1215] sum 0.9999998211860657
 S1  [0.3146 0.4424 0.    ]
 ST  [0.5576 0.4425 0.243 ]
 ```
@@ -90,7 +90,7 @@ jaxgsa.shapley.analyze
     backend fit + Shapley (includes compile on the first call): 0.03328 s
     backend: pce
     order: 8
-    batch_size: auto (resolved from the memory budget)
+    batch_size: 2000 (resolved from the memory budget)
   results: top 3 of 3 parameters by Sh
     1. x2  Sh=0.4424
     2. x1  Sh=0.4361

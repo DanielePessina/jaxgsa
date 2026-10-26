@@ -101,7 +101,7 @@ print(np.asarray(r.delta).round(4))
 
 ```
 [0.2149 0.3387 0.1606]
-[0.2106 0.3347 0.1562]
+[0.2116 0.3344 0.1551]
 ```
 
 The correction is small here, about 0.004 on each parameter, and it moves in the

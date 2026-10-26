@@ -104,24 +104,23 @@ jaxgsa.vkoga.analyze
     output: N=512 runs, T=1 x K=1 output slice
     invalid: none found in 512 rows (policy 'raise')
   timing:
-    fit + compute: 5.86 s
+    fit + compute: 4.135 s
     n_centers: 120
-    gamma: 7.533
-    ridge: 0.01
-    batch_size: auto (resolved from the memory budget)
+    gamma: 1.135
+    ridge: 4.642e-08
+    batch_size: 5592405 (resolved from the memory budget)
   results: top 3 of 3 parameters by S_TC
-    1. x2  S_TC=0.4913
-    2. x1  S_TC=0.3447
-    3. x3  S_TC=0.0009869
-
-S_TC [0.3447 0.4913 0.001 ]
-S_TU [0.4323 0.4185 0.247 ]
-S_U [0.2535 0.401  0.0009]
-S_C [0.0912 0.0903 0.    ]
-S_IU [0.1788 0.0175 0.2461]
+    1. x2  S_TC=0.515
+    2. x1  S_TC=0.3298
+    3. x3  S_TC=3.409e-05
+S_TC [0.3298 0.515  0.    ]
+S_TU [0.4269 0.4306 0.2452]
+S_U [0.2389 0.4232 0.    ]
+S_C [ 0.0909  0.0918 -0.    ]
+S_IU [0.188  0.0074 0.2452]
 ```
 
-`x3` has `S_TC = 0.001` and `S_TU = 0.247`. It has essentially no first-order
+`x3` has `S_TC` below 0.0001 and `S_TU = 0.245`. It has essentially no first-order
 effect and a large interaction effect, so it is the case where prioritisation
 and fixing disagree completely. `x1` and `x2` each pick up about 0.09 of
 `S_C`, the share that arrives through their 0.7 correlation with each other.
@@ -129,8 +128,8 @@ and fixing disagree completely. `x1` and `x2` each pick up about 0.09 of
 
 The same problem run through
 [`jaxgsa.kucherenko`](/api/kucherenko) on the real model gives
-`S1 = [0.325, 0.525, -0.001]` against `S_TC = [0.345, 0.491, 0.001]`, and
-`ST = [0.412, 0.425, 0.243]` against `S_TU = [0.432, 0.419, 0.247]`. The two
+`S1 = [0.325, 0.525, -0.001]` against `S_TC = [0.330, 0.515, 0.000]`, and
+`ST = [0.412, 0.425, 0.243]` against `S_TU = [0.427, 0.431, 0.245]`. The two
 methods are estimating the same two quantities, one through a surrogate and one
 through 28672 model runs.
 

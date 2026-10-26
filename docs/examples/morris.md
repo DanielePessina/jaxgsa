@@ -69,6 +69,7 @@ jaxgsa.morris.analyze
     invalid: none found in 50 trajectories (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.1226 s
+    slice_chunk_size: 1 (resolved from the memory budget)
   results: top 3 of 3 parameters by mu_star
     1. x1  mu_star=8.454
     2. x2  mu_star=7.875
@@ -203,8 +204,8 @@ print("mu_star_conf:", res.mu_star_conf)
 
 ```
 mu_star     : [8.453911 7.875    7.498556]
-mu_star_conf: [[ 6.7042475  7.875      5.748894 ]
- [10.203573   7.8750005  9.24822  ]]
+mu_star_conf: [[6.573024  7.875     5.7488937]
+ [9.953622  7.8750005 9.248219 ]]
 ```
 
 Row 0 is the lower bound of each `mu_star` and row 1 the upper. All three
@@ -334,6 +335,7 @@ jaxgsa.morris.analyze
     invalid: none found in 512 trajectories (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.2207 s
+    slice_chunk_size: 1 (resolved from the memory budget)
   results: top 3 of 3 parameters by mu_star
     1. x2  mu_star=14.94
     2. x1  mu_star=8.611
@@ -420,6 +422,7 @@ jaxgsa.morris.analyze
     invalid: none found in 50 trajectories (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.2276 s
+    slice_chunk_size: 2 (resolved from the memory budget)
   results: top 3 of 3 parameters by mu_star, mean over 2 output slices
     1. frequency  mu_star=1.904
     2. amplitude  mu_star=0.7952
@@ -504,6 +507,7 @@ jaxgsa.morris.analyze
     invalid: none found in 50 trajectories (policy 'raise')
   timing:
     estimator (includes compile on the first call): 0.1468 s
+    slice_chunk_size: 1 (resolved from the memory budget)
   results: top 2 of 2 parameters by mu_star
     1. x2  mu_star=20.47
     2. x1  mu_star=2

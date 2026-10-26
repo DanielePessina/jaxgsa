@@ -42,11 +42,11 @@ print("file size (bytes):", Path("runs/ishigami.npz").stat().st_size)
 ```
 jaxgsa.sobol.sample: D=3, mode=second-order, base_n=512, requested_runs>=4096, n_runs=4096, n_expanded=4096, duplicates_removed=0 (0.0%), scramble=True
 rows to evaluate: 4096
-file size (bytes): 68501
+file size (bytes): 62144
 ```
 
 The first line is the sampler's verbose summary, printed by default. Read
-`n_runs=4096` as the number of times your model has to run. 67 KB buys you the
+`n_runs=4096` as the number of times your model has to run. 61 KB buys you the
 right to lose the process.
 
 The `.npz` suffix is added when you leave it off, so `"runs/ishigami"` and
@@ -88,7 +88,7 @@ jaxgsa.sobol.analyze
     2. x2  ST=0.44
     3. x3  ST=0.2423
 problem came back from the file: ('x1', 'x2', 'x3')
-S1: [0.3387249  0.4420562  0.01550918]
+S1: [0.33872482 0.4420563  0.01550917]
 ```
 
 Nothing in that script mentions `PROBLEM`, the seed, or `calc_second_order`.
@@ -128,8 +128,8 @@ print("bitwise identical S1/ST/S2:",
 same rows:       True
 same expansion:  True
 same problem:    True
-S1 before: [0.3387249  0.4420562  0.01550918]
-S1 after:  [0.3387249  0.4420562  0.01550918]
+S1 before: [0.33872482 0.4420563  0.01550917]
+S1 after:  [0.33872482 0.4420563  0.01550917]
 bitwise identical S1/ST/S2: True True True
 ```
 
@@ -155,15 +155,15 @@ print("spec[0]: ", meta["problem"]["input_specs"][0])
 
 ```
 arrays:   ['samples', 'unit', 'expanded_to_unit', 'metadata']
-metadata: ['base_n', 'calc_second_order', 'identity_mapping', 'jaxgsa_version', 'n_expanded', 'problem']
+metadata: ['base_n', 'calc_second_order', 'identity_mapping', 'jaxgsa_version', 'n_expanded', 'problem', 'samples_class', 'samples_class_path']
 design:   {'base_n': 512, 'calc_second_order': True, 'n_expanded': 4096}
 names:    ['x1', 'x2', 'x3']
 spec[0]:  {'dist': 'uniform', 'low': -3.141592653589793, 'high': 3.141592653589793}
 ```
 
 The arrays are the design. The `metadata` entry is a JSON string holding the
-problem definition, the design settings, and the jaxgsa version that wrote the
-file. `allow_pickle=False` on both the write and the read side, so the file
+problem definition, the design settings, the design class, and the jaxgsa
+version that wrote the file. `allow_pickle=False` on both the write and the read side, so the file
 holds arrays and text and cannot execute anything when you open it.
 
 `identity_mapping` is a size optimization. When the design has no duplicate
@@ -242,7 +242,7 @@ jaxgsa.efast.analyze
     2. x2  ST=0.4876
     3. x3  ST=0.2446
 n_per_curve: 257  M: 4
-S1: [0.31269768 0.44250646 0.02491138]
+S1: [0.31269765 0.44250643 0.02491137]
 ```
 
 `M=4` is not a free choice on reload. The analysis credits `M` harmonics of

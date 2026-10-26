@@ -67,7 +67,7 @@ jaxgsa.hsic.analyze
 
 [0.135  0.0097 0.0252]
 [0.7996 0.0712 0.1873]
-[0.005  0.005  0.005 ]
+[0.005 0.005 0.005]
 ```
 
 That is the Ishigami function. `x3` enters it only through the `x3^4 * sin(x1)`
@@ -79,12 +79,14 @@ significant and none of them is more significant than the others.
 `verbose=True` is the default and produced the block above. Pass
 `verbose=False` for a silent run.
 
-## Memory is quadratic in N, and nothing bounds it
+## Memory is quadratic in N, and the budget bounds it
 
-The estimator holds the `D` input kernels, the `D` augmented complement
-products, the full augmented product and one output kernel at the same time.
-Peak memory is about `(2D + 1) * N^2` floats. At `D = 10` and `N = 20000` in
-float64 that is 67 GB.
+The estimator works on dense `N x N` kernels. It holds only as many input
+kernels at once as `jaxgsa.config.set_memory_budget` allows, and builds the
+rest again when it needs them. A smaller budget costs time, not accuracy. The
+estimator always needs about six `N x N` matrices, so at a large `N` a small
+budget is exceeded by that floor. At `N = 20000` in float64 one such matrix
+is 3.2 GB.
 
 **`analyze` takes no `batch_size`, on purpose.** A row-blocked kernel build was
 tried and removed: it bounded a transient of the build while the resident

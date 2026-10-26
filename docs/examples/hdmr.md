@@ -79,16 +79,16 @@ jaxgsa.hdmr.analyze
     slice_chunk_size: 1 (resolved from the memory budget)
     batch_size: 2000 (resolved from the memory budget)
   results: top 3 of 3 parameters by ST
-    1. x1  ST=0.5838
-    2. x2  ST=0.4847
-    3. x3  ST=0.2881
+    1. x1  ST=0.5543
+    2. x2  ST=0.4441
+    3. x3  ST=0.2375
 terms: ('x1', 'x2', 'x3', 'x1/x2', 'x1/x3', 'x2/x3')
-S1: [0.32048908 0.447263   0.00075373]
-ST: [0.5838239  0.48470613 0.28812745]
-Sa: [0.32048908 0.447263   0.00075373 0.00254857 0.23652619 0.01298651]
-Sb: [8.8099984e-04 1.7114248e-03 8.0213504e-05 2.8977406e-03 2.0481585e-02
- 1.7299222e-02]
-rmse: 0.49878594
+S1: [0.32048696 0.4472546  0.00075338]
+ST: [0.5543085  0.44405735 0.23746695]
+Sa: [3.2048696e-01 4.4725460e-01 7.5337599e-04 2.2831899e-05 2.3683792e-01
+ 1.6588895e-04]
+Sb: [-0.00298596 -0.00319192  0.00017364  0.00010799 -0.00016176 -0.00030231]
+rmse: 0.048114467
 std(Y): 3.7769964
 ```
 
@@ -97,17 +97,17 @@ The summary block above `terms:` prints by default. Pass
 catches a wrong `bounds` array or a misread output shape before you read an
 index.
 
-Read `rmse` first. It is 0.4988 against a `std(Y)` of 3.777, so the surrogate
-misses by 13% of the output spread. The indices describe the surrogate, not
+Read `rmse` first. It is 0.0481 against a `std(Y)` of 3.777, so the surrogate
+misses by 1.3% of the output spread. The indices describe the surrogate, not
 the model, so a bad `rmse` makes every other field on the result a
 description of the wrong function.
 
 Then the per-term arrays. `Sa` and `Sb` have one entry per term and `terms`
-names them in order. `Sa[4] = 0.2365` is the x1/x3 pair, and it dwarfs the
-other two pairs at 0.0025 and 0.0130. That matches Ishigami, whose only real
+names them in order. `Sa[4] = 0.2368` is the x1/x3 pair, and it dwarfs the
+other two pairs at 0.00002 and 0.0002. That matches Ishigami, whose only real
 interaction is x1 with x3. `S1` and `ST` collapse this to one number per
 input. `S1` is the input's own term, and `ST` sums every term the input
-appears in. Where `ST` runs far above `S1`, as x3's 0.288 does over its 0.0008, the
+appears in. Where `ST` runs far above `S1`, as x3's 0.237 does over its 0.0008, the
 input matters only through a partner, and the term-level `Sa` says which one.
 
 `Sb` is the correlative share. It is near zero here because the inputs are
@@ -131,10 +131,10 @@ for m in (2, 4, 6, 8):
 ```
 
 ```text
-n_intervals=2  rmse=1.2082  rmse/std= 32.0%  S1=[0.30699998 0.3538     0.0006    ]
-n_intervals=4  rmse=0.4988  rmse/std= 13.2%  S1=[0.3205 0.4473 0.0008]
-n_intervals=6  rmse=0.6051  rmse/std= 16.0%  S1=[0.3199 0.4461 0.0009]
-n_intervals=8  rmse=0.7306  rmse/std= 19.3%  S1=[0.3209     0.44739997 0.0012]
+n_intervals=2  rmse=1.1900  rmse/std= 31.5%  S1=[0.30699998 0.35369998 0.0006    ]
+n_intervals=4  rmse=0.0481  rmse/std=  1.3%  S1=[0.3205 0.4473 0.0008]
+n_intervals=6  rmse=0.1132  rmse/std=  3.0%  S1=[0.3199 0.4461 0.0009]
+n_intervals=8  rmse=0.0264  rmse/std=  0.7%  S1=[0.3209     0.44739997 0.0012    ]
 ```
 
 Ishigami's analytical `S1` is `[0.3139, 0.4424, 0]`. At the default `n_intervals=2` the
@@ -142,10 +142,10 @@ fit reports x2's first-order index as 0.354, low by 20%, and `rmse` sits at a
 third of the output spread. Nothing errors. Nothing warns. You get a plausible
 table with x2 understated, and the only clue is `rmse`.
 
-At `n_intervals=4` the error drops to 13% and x2 lands at 0.447. Past that the error
-climbs again, because more intervals means fewer samples per interval and the
-splines start chasing noise. So `n_intervals` is not "higher is better". Sweep it, watch
-`rmse`, and take the minimum. On this problem that is `n_intervals=4`.
+At `n_intervals=4` the error drops to 1.3% and x2 lands at 0.447. Past that the
+error does not fall steadily: it rises to 3.0% at 6 and falls to 0.7% at 8, while
+`S1` barely moves. So `n_intervals` is not "higher is better". Sweep it, watch
+`rmse`, and stop when the indices settle. On this problem `n_intervals=4` is enough.
 
 My rule for `rmse / std(Y)`: under 10% the indices are reportable, 10% to 25%
 treat the ranking as provisional, above 25% the numbers describe a surrogate
@@ -158,14 +158,13 @@ does on smooth models, which is the honest cost of a local basis.
 `Y` there is one slice, so it reads as a flag:
 
 ```text
-select   (term) float32 24B 1.0 1.0 0.0 0.0 1.0 1.0
+select   (term) float32 24B 1.0 1.0 0.0 0.0 1.0 0.0
 ```
 
 Reading it against `terms = ('x1', 'x2', 'x3', 'x1/x2', 'x1/x3', 'x2/x3')`:
-the fit dropped the x3 solo term and the x1/x2 pair, both of which are truly
-absent from Ishigami. It kept x2/x3, which is not. Its `S` share is 0.0169, small
-enough to ignore, but the F-test is a threshold and it does let noise through
-near zero. Do not treat a selected term with a tiny share as evidence of an
+the fit dropped the x3 solo term and the x1/x2 and x2/x3 pairs, all of which
+are truly absent from Ishigami. The F-test is a threshold, though, and it can
+let noise through near zero. Do not treat a selected term with a tiny share as evidence of an
 interaction.
 
 ## Use the emulator
@@ -181,11 +180,11 @@ print("Absolute residuals:", jnp.abs(Y[:5] - Y_pred))
 
 ```text
 Prediction shape: (5,)
-Absolute residuals: [0.26264906 0.08427393 0.26891232 0.27363586 0.25042963]
+Absolute residuals: [0.03567696 0.01585853 0.03184509 0.00614166 0.01206064]
 ```
 
-Those residuals run around 0.25 against a `std(Y)` of 3.777, consistent with
-the fitted `rmse` of 0.499. The emulator is on the same scale as the `Y` you
+Those residuals run from 0.006 to 0.036 against a `std(Y)` of 3.777, consistent
+with the fitted `rmse` of 0.048. The emulator is on the same scale as the `Y` you
 supplied, so a residual you can read against the output range is the whole
 check. A gap that stays stubborn as you raise `n_intervals` is a structural miss instead,
 and the fix is a different model or more rows. Order 3 is not available.
@@ -206,9 +205,10 @@ deliverable, when the emulator matters as much as the indices.
 
 Against [PCE](/examples/pce), the other given-data surrogate, the trade is
 local versus global. B-splines follow kinks and plateaus that a global
-polynomial smooths over. On a smooth response PCE usually reaches a lower
-error with fewer terms, and on Ishigami it does: `cv_rmse = 0.074` at
-`order=8` against RS-HDMR's best `rmse = 0.499`. Fit both when you can. They
+polynomial smooths over. On a smooth response PCE often reaches a low error
+with fewer terms. On Ishigami the two are close: PCE gives `cv_rmse = 0.074` at
+`order=8`, and RS-HDMR gives an in-sample `rmse = 0.048` at `n_intervals=4`.
+Fit both when you can. They
 are cheap and they disagree informatively.
 
 ## Field reference
@@ -216,7 +216,7 @@ are cheap and they disagree informatively.
 `result.S1` is the first-order share, the solo term's contribution. `result.ST`
 sums every term containing the parameter. `result.Sa` is the structural
 variance share per term and `result.Sb` the correlative one. `result.S` is
-their sum, and `result.S.sum()` is 1.064 here, close to 1 as the theory
+their sum, and `result.S.sum()` is 0.999 here, close to 1 as the theory
 requires. `result.terms` labels the columns of all three. `result.select` is
 the F-test flag per term. `result.rmse` is the fit error you check first.
 
@@ -229,7 +229,7 @@ they apply. See [xarray Labeled Output](/examples/xarray).
 `hdmr.analyze()` accepts `(N,)`, `(N, K)` and `(N, T, K)` outputs under the
 shape rules in [Multi-Output & Time-Series](/examples/multi-output).
 
-`order` must be 1, 2 or 3, and it is clamped with a warning when
+`order` must be 1 or 2 (`order=3` raises), and it is clamped with a warning when
 `D < order`. Fewer than 300 rows gives a warning, because the
 backfitting solve degenerates quietly below that. The call raises
 `ValueError` only below `(n_intervals + 3) ** min(order, D) + 1` rows, the

@@ -88,7 +88,7 @@ print("ST:", np.round(result.ST, 3))
 ```
 
 ```
-jaxgsa.kucherenko.sample: D=2, base_n=8192, n_blocks=5, n_runs=40960, dependence=copula-conditional, scramble=True
+jaxgsa.kucherenko.sample: D=2, base_n=8192, n_blocks=5, n_runs=40960, dependence=gaussian, scramble=True
 jaxgsa.kucherenko.analyze
   problem: D=2 (x1, x2)
     marginals: gaussian=2
@@ -97,9 +97,10 @@ jaxgsa.kucherenko.analyze
     invalid: none found in 8192 base points (policy 'raise')
   timing:
     compute: 0.01894 s
-    design: copula-conditional (2D+1 = 5 blocks of 8192 base points)
+    slice_chunk_size: 1 (resolved from the memory budget)
+    design: gaussian (2D+1 = 5 blocks of 8192 base points)
   results: top 2 of 2 parameters by ST
-    1. x1  ST=0.36
+    1. x1  ST=0.3601
     2. x2  ST=0
 S1: [1.   0.64]
 ST: [0.36 0.  ]
@@ -457,8 +458,8 @@ surrogate), jaxgsa.kucherenko (variance-based indices from its own
 conditional-copula design), jaxgsa.optimal_transport, jaxgsa.borgonovo,
 jaxgsa.hdmr (whose ANCOVA Sb term quantifies the correlation-induced
 contribution, and whose result supports shapley(include_correlative=True)),
-jaxgsa.hsic, jaxgsa.pawn, or jaxgsa.shapley with backend="hdmr". To analyze the
-independent problem instead, drop the dependence with problem.with_correlation(None).
+jaxgsa.hsic, jaxgsa.pawn, jaxgsa.rank, or jaxgsa.shapley with backend="hdmr". To
+analyze the independent problem instead, drop the dependence with problem.with_correlation(None).
 ```
 
 To run one of these on the independent version of the problem, drop the

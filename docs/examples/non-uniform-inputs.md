@@ -231,9 +231,9 @@ hdmr_result = jaxgsa.hdmr.analyze(problem, X_hd, Y_hd, order=2, n_intervals=2)
 print(hdmr_result)
 ```
 
-The script warns that the fitted terms overlap (`S.sum() = 1.74`), so the
-HDMR values run above the analytical ones (x14: 0.2466 vs 0.1413). Read them
-as a ranking, which is all the comparison below uses.
+The fitted terms sum to `S.sum() = 0.99`, and the HDMR values sit close to
+the analytical ones (x14: 0.1409 vs 0.1413). The comparison below uses only
+the ranking.
 
 **DGSM: one autodiff sweep.** DGSM needs the unbatched wrapper, defined at
 its single use site. The script checks it on a zero row first:
@@ -264,21 +264,19 @@ total-order inputs and counts how many match the analytical top five:
 | --- | --- | ---: |
 | Analytical | x11, x12, x13, x14, x15 | -- |
 | eFAST ($S_T$) | x11, x12, x13, x14, x15 | 5/5 |
-| RS-HDMR ($S_T$) | x8, x11, x12, x14, x15 | 4/5 |
+| RS-HDMR ($S_T$) | x11, x12, x13, x14, x15 | 5/5 |
 | DGSM (upper bound) | x11, x12, x13, x14, x15 | 5/5 |
 
-All three methods land the x11-x15 block. HDMR misses one slot: x13 drops
-out and x8 (analytical $S_T$ 0.0822) takes its place, consistent with the
-overlap warning above.
+All three methods land the x11-x15 block.
 
 ![Bar chart comparing first-order Sobol indices from the analytical formula, eFAST and RS-HDMR across the 15 Oakley & O'Hagan inputs](./figures/oakley_ohagan_15d_method-comparison-first-order-indices.png)
 
 The method to pick depends on what you can still choose. Pick eFAST when you
 can choose a structured sampling budget: 61440 runs buy the full
 decomposition at 15 dimensions. Pick RS-HDMR when the dataset already
-exists as plain samples: 3000 draws found the block, with one ranking
-error. Pick DGSM when the model is differentiable: 10000 Monte Carlo rows
-and one autodiff sweep recover the exact top five.
+exists as plain samples: 3000 draws found the block. Pick DGSM when the model
+is differentiable: 10000 Monte Carlo rows and one autodiff sweep recover the
+exact top five.
 
 ## Lognormal, Weibull, triangular and beta inputs
 

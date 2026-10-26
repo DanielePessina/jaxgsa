@@ -130,11 +130,11 @@ jaxgsa.sampling.monte_carlo(p, 5, seed=0)
 ```
 
 ```
-array([[0.5500, 0.5102],
-       [0.7391, 0.7197],
-       [0.2961, 0.4108],
+array([[0.5500, 0.5085],
+       [0.7391, 0.7174],
+       [0.2961, 0.4162],
        [0.9039, 0.9465],
-       [0.2408, 0.0954]])
+       [0.2408, 0.0930]])
 ```
 
 `correlate` goes the other way. It takes a sample you already have and

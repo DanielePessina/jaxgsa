@@ -135,37 +135,37 @@ jaxgsa.vkoga.analyze
     output: N=2048 runs, T=1 x K=1 output slice
     invalid: none found in 2048 rows (policy 'raise')
   timing:
-    fit + compute: 14.7 s
+    fit + compute: 4.57 s
     n_centers: 300
-    gamma: 7.533
-    ridge: 5.995e-05
+    gamma: 1.135
+    ridge: 1.668e-08
     batch_size: 5592405 (resolved from the memory budget)
   results: top 3 of 3 parameters by S_TC
-    1. x1  S_TC=0.8827
-    2. x2  S_TC=0.6311
-    3. x3  S_TC=0.03245
-S_TC: [0.883 0.631 0.032]
-S_TU: [0.34  0.085 0.034]
-S_U:  [0.337 0.083 0.033]
-S_C:  [ 0.546  0.548 -0.   ]
-S_IU: [0.003 0.002 0.001]
+    1. x1  S_TC=0.883
+    2. x2  S_TC=0.6317
+    3. x3  S_TC=0.03261
+S_TC: [0.883 0.632 0.033]
+S_TU: [0.339 0.084 0.034]
+S_U:  [0.336 0.083 0.033]
+S_C:  [ 0.547  0.549 -0.   ]
+S_IU: [0.003 0.001 0.001]
 ```
 
 Almost all of that time is the hyperparameter search. The default run
 cross-validates `gamma` and `ridge` over a 10x14 grid, refitting each point
 `n_folds` times. Cross-validation means the fit is scored on points it was not
 trained on. Both chosen values are reported in the summary block, so a first
-exploratory run tells you what to pin: pass `gamma=7.533, ridge=5.995e-05` on
+exploratory run tells you what to pin: pass `gamma=1.135, ridge=1.668e-08` on
 the next call and the search disappears.
 
 ## Reading the five indices
 
 - `x1` and `x2` both look important (`S_TC` 0.88 and 0.63), but neither is
-  individually necessary (`S_TU` 0.34 and 0.09). They share correlated
+  individually necessary (`S_TU` 0.34 and 0.08). They share correlated
   variance. Each explains a large slice of the output, but most of that slice
   is also reachable through the other. So measuring either one more accurately
   pays off, while fixing either one and leaving the other free does not.
-- `S_C` is 0.546 for `x1` and 0.548 for `x2`, and 0.000 for `x3`. That is the
+- `S_C` is 0.547 for `x1` and 0.549 for `x2`, and 0.000 for `x3`. That is the
   correlation-borne part. It is symmetric here because the correlation is what
   carries it. `x3` is uncorrelated, so it has none. A negative `S_C` is a valid
   reading, not a bug: it is a correlation working against a direct effect.
@@ -260,7 +260,7 @@ responses, which a greedy Gaussian kernel cannot resolve. Add training points, o
 use a method that does not need a surrogate (jaxgsa.kucherenko on a conditional
 design).
 
-S_TC: [0.189 0.712 0.037]
+S_TC: [0.203 0.699 0.036]
 cv_rmse: 0.703  std(Y): 0.725
 ```
 
@@ -294,7 +294,7 @@ a negative `S_C` is a real reading, not an artefact.
 The surrogate works in CDF space, where the tails of a Gaussian marginal are
 compressed into a small part of the unit cube. The kernel under-resolves them,
 so `result.variance` is biased low. In the scalar example above it reports
-7.462 against the closed-form 7.65, about -2.5%. The bias grows with heavier
+7.584 against the closed-form 7.65, about -0.9%. The bias grows with heavier
 tails. It affects the variance figure, not the index ratios, because every
 index is divided by the same number.
 
@@ -324,8 +324,8 @@ print("S_TU:", np.round(emp.S_TU, 3))
 [[1.    0.609 0.041]
  [0.609 1.    0.003]
  [0.041 0.003 1.   ]]
-S_TC: [0.889 0.633 0.044]
-S_TU: [0.328 0.082 0.032]
+S_TC: [0.889 0.635 0.043]
+S_TU: [0.326 0.083 0.032]
 ```
 
 The fit recovers `rho_12 = 0.6` as 0.609, and the two entries that should be
@@ -354,15 +354,15 @@ print("dependence:", indep.dependence)
 ```
 
 ```
-S_TC: [0.762 0.189 0.047]
-S_TU: [0.77  0.192 0.049]
-S_C:  [0.0008 0.0003 0.    ]
+S_TC: [0.763 0.189 0.047]
+S_TU: [0.77  0.191 0.048]
+S_C:  [0. 0. 0.]
 analytical S1 = ST: [0.762 0.19  0.048]
 dependence: independent
 ```
 
 `S_TC` and `S_TU` now agree with each other and with the analytic answer to
-about 0.008, and `S_C` sits within 0.0008 of zero. The gap between the
+about 0.008, and `S_C` is zero to four decimals. The gap between the
 prioritisation and fixing measures has closed, because the correlation that
 opened it is gone.
 
@@ -389,17 +389,17 @@ print("Var(Y) under the copula:", float(result.variance))
 ```
 prediction shape: (1000,)
 n_centers: 300
-gamma: 7.533
-ridge: 5.994842503189409e-05
-training rmse: 0.15957695444377903
-cv rmse: 0.2133223694760349
-Var(Y) under the copula: 7.461814001203544
+gamma: 1.135
+ridge: 1.6681005372000592e-08
+training rmse: 0.13975826721900922
+cv rmse: 0.17967304789770502
+Var(Y) under the copula: 7.584400738783058
 ```
 
 `n_centers` is the greedy's stopping point, capped by `max_centers`, which
 defaults to 300. Reaching exactly 300 means the cap bound the fit rather than
 the error criterion, so raising `max_centers` may still help here. `rmse`
-(0.160) is the fit on its own training rows and `cv_rmse` (0.213) is the
+(0.140) is the fit on its own training rows and `cv_rmse` (0.180) is the
 held-out error. Both are small against `std(Y) = 2.297`, which is why the
 indices above are trustworthy. `variance` is the output variance under the
 correlated input measure, and it differs from `Y.var()` on an independent
@@ -419,19 +419,19 @@ Dimensions:             (param: 3)
 Coordinates:
   * param               (param) <U2 24B 'x1' 'x2' 'x3'
 Data variables:
-    S_TC                (param) float64 24B 0.8827 0.6311 0.03245
-    S_TU                (param) float64 24B 0.3401 0.0846 0.03391
-    S_U                 (param) float64 24B 0.3366 0.08286 0.03268
-    S_C                 (param) float64 24B 0.5462 0.5482 -0.0002369
-    S_IU                (param) float64 24B 0.003461 0.001739 0.001227
-    variance            float64 8B 7.462
-    rmse                float64 8B 0.1596
-    cv_rmse             float64 8B 0.2133
-    explained_variance  float64 8B 0.9952
+    S_TC                (param) float64 24B 0.883 0.6317 0.03261
+    S_TU                (param) float64 24B 0.3389 0.08426 0.03363
+    S_U                 (param) float64 24B 0.3358 0.08311 0.03284
+    S_C                 (param) float64 24B 0.5472 0.5486 -0.0002233
+    S_IU                (param) float64 24B 0.00309 0.001152 0.0007968
+    variance            float64 8B 7.584
+    rmse                float64 8B 0.1398
+    cv_rmse             float64 8B 0.1797
+    explained_variance  float64 8B 0.9963
 Attributes:
     n_centers:   300
-    gamma:       7.533150951473334
-    ridge:       5.994842503189409e-05
+    gamma:       1.134967265153673
+    ridge:       1.6681005372000592e-08
     dependence:  gaussian
 ```
 
@@ -470,21 +470,23 @@ jaxgsa.vkoga.analyze
     output: N=2048 runs, T=1 x K=2 output slices
     invalid: none found in 2048 rows (policy 'raise')
   timing:
-    fit + compute: 12.32 s
+    fit + compute: 3.405 s
     n_centers: 300
-    gamma: 7.533
-    ridge: 0.001292
+    gamma: 2.924
+    ridge: 1e-06
     batch_size: 4473924 (resolved from the memory budget)
   results: top 3 of 3 parameters by S_TC, mean over 2 output slices
-    1. x1  S_TC=0.6773
-    2. x2  S_TC=0.5457
-    3. x3  S_TC=0.157
-S_TC: [[0.883 0.631 0.032]
- [0.472 0.46  0.282]]
+    1. x1  S_TC=0.6805
+    2. x2  S_TC=0.5497
+    3. x3  S_TC=0.154
+S_TC: [[0.883 0.633 0.032]
+ [0.478 0.467 0.276]]
 ```
 
 Two outputs give a `(2, 3)` index array: one row of three parameter indices per
-output. Row one is the linear output and reproduces the scalar run exactly. Row
+output. Row one is the linear output and agrees with the scalar run to about
+0.001. It is not identical, because the shared fit picks one `gamma` and
+`ridge` for both outputs. Row
 two is the sum of squares, where the ranking is much flatter, since `x3`
 contributes to the sum of squares on equal terms with the others. The summary
 block ranks by the mean over output slices, which is a convenience, not an

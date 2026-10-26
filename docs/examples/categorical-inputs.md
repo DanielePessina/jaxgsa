@@ -133,7 +133,7 @@ advective : [0.372 0.11 ]
 delta     : [0.511 0.217]
 delta's S1: [0.743 0.22 ]
 pawn      : [0.478 0.313]
-valid bins: [10 3]
+valid bins: [10  3]
 ```
 
 All three indices lie in `[0, 1]` and rank `catalyst` on the same scale as
@@ -172,7 +172,7 @@ jaxgsa.borgonovo.analyze(problem, X, Y_discrete)
 ```
 
 ```
-ValueError: jaxgsa.borgonovo.analyze supports a continuous output distribution
+ValueError: jaxgsa.borgonovo: analyze supports a continuous output distribution
 only, but the output takes only 3 distinct values in 8192 samples. The delta
 estimator compares Gaussian kernel density estimates on a shared output grid; an
 atomic density is a spike that no grid resolves, so the index would report the
@@ -263,7 +263,7 @@ jaxgsa.sobol.analyze
   problem: D=2 (temperature, catalyst)
     marginals: uniform=1, categorical=1
     dependence: independent
-    output: N=24576 runs, T=1 x K=1 output slice
+    output: N=13266 runs, T=1 x K=1 output slice
     invalid: none found in 4096 Saltelli groups (policy 'raise')
   timing:
     estimators (includes compile on the first call): 0.4138 s
@@ -303,6 +303,7 @@ jaxgsa.sobol.sample(p_flags, 4096, seed=0)
 ```
 
 ```
+jaxgsa.sobol.sample: D=2, mode=second-order, base_n=1024, requested_runs>=4096, n_runs=4, n_expanded=6144, duplicates_removed=6140 (99.9%), scramble=True
 JaxgsaWarning: jaxgsa.sobol.sample: the requested n_samples=4096 unique rows
 cannot be reached because the problem has only 4 possible distinct rows. The
 design is returned with 4 unique rows and keeps its duplicate rows. Duplicates

@@ -114,6 +114,7 @@ jaxgsa.kucherenko.analyze
     invalid: none found in 4096 base points (policy 'raise')
   timing:
     compute: 0.03114 s
+    slice_chunk_size: 1 (resolved from the memory budget)
     design: gaussian (2D+1 = 7 blocks of 4096 base points)
   results: top 3 of 3 parameters by ST
     1. x1  ST=0.335

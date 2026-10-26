@@ -65,7 +65,7 @@ jaxgsa.optimal_transport.analyze
     estimator (includes compile on the first call): 0.9642 s
     mode: univariate
     epsilon: 0.03
-    slice_chunk_size: auto (resolved from the memory budget)
+    slice_chunk_size: 1 (resolved from the memory budget)
   results: top 3 of 3 parameters by ot
     1. x2  ot=0.2775
     2. x1  ot=0.2013

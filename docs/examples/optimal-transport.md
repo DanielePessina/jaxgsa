@@ -71,10 +71,10 @@ jaxgsa.optimal_transport.analyze
     1. x2  ot=0.2764
     2. x1  ot=0.2013
     3. x3  ot=0.0955
-ot:        [0.20126827 0.27642566 0.09550273]
-advective: [0.15660933 0.22097293 0.00218868]
-diffusive: [0.04465894 0.05545274 0.09331405]
-S1:        [0.3132569  0.4419998  0.0043779 ]
+ot:        [0.20126827 0.27642566 0.09550274]
+advective: [0.15660931 0.22097294 0.00218868]
+diffusive: [0.04465896 0.05545273 0.09331406]
+S1:        [0.31325686 0.44199982 0.0043779 ]
 above_dummy: None
 ```
 
@@ -118,9 +118,9 @@ print("borgonovo S1:           ", b.S1)
 ```
 
 ```
-2 * advective * N/(N-1): [0.3132569 0.4419998 0.0043779]
-result.S1:               [0.3132569 0.4419998 0.0043779]
-borgonovo S1:            [0.3125267  0.43882057 0.00308205]
+2 * advective * N/(N-1): [0.31325686 0.44199982 0.0043779 ]
+result.S1:               [0.31325686 0.44199982 0.0043779 ]
+borgonovo S1:            [0.3125267  0.43882072 0.00308204]
 ```
 
 The first two lines agree bit for bit, because the second is computed from
@@ -196,8 +196,8 @@ jaxgsa.optimal_transport.analyze
     1. k_elim  ot=0.4213
     2. dose    ot=0.3977
     3. k_abs   ot=0.06826
-[[0.20636825 0.09548865 0.6179264 ]
- [0.5889322  0.04103512 0.22462082]]
+[[0.2063683  0.09548865 0.6179266 ]
+ [0.58893216 0.04103511 0.22462079]]
 ```
 
 Row 0 is plasma, row 1 tissue, in the `output_names` order. Elimination rate
@@ -215,8 +215,8 @@ print("plasma, per-time ot for k_abs:", r_uni.ot[:, 0, 1])
 
 ```
 univariate ot shape: (12, 2, 3)
-plasma, per-time ot for k_abs: [0.33156434 0.10242031 0.02204348 0.01721405 0.02212418 0.02514748
- 0.02643897 0.02720752 0.02776908 0.02825276 0.0287764  0.02952859]
+plasma, per-time ot for k_abs: [0.33156428 0.10242031 0.02204348 0.01721405 0.02212419 0.02514748
+ 0.02643897 0.02720752 0.02776908 0.02825276 0.02877639 0.0295286 ]
 ```
 
 `k_abs` scores 0.332 at the first timepoint, 0.102 at the second, and then
@@ -282,9 +282,9 @@ jaxgsa.optimal_transport.analyze
     2. k_elim  ot=0.479
     3. inert   ot=0.05479
     4. k_abs   ot=0.05432
-ot:          [0.51277184 0.05431536 0.4790215  0.05478629]
+ot:          [0.51277184 0.05431535 0.47902146 0.0547863 ]
 ot_dummy:    [0.05469289 0.05469289 0.05469289 0.05469289]
-above_dummy: [4.5807895e-01 0.0000000e+00 4.2432860e-01 9.3400478e-05]
+above_dummy: [4.5807895e-01 0.0000000e+00 4.2432857e-01 9.3404204e-05]
 ```
 
 This is the whole argument for the dummy in one printout. `k_abs` scores
@@ -341,8 +341,8 @@ for flag in (True, False):
 ```
 
 ```
-standardize_outputs=True: ot=[0.2525107  0.27313423 0.18136299]
-standardize_outputs=False: ot=[0.20489204 0.20539744 0.19824935]
+standardize_outputs=True: ot=[0.25251073 0.2731342  0.18136299]
+standardize_outputs=False: ot=[0.20489208 0.20539747 0.1982494 ]
 ```
 
 The second output here is a thousand times larger than the first, as it would
@@ -359,7 +359,7 @@ print("the large output alone:", r_big.ot)
 ```
 
 ```
-the large output alone: [0.20489164 0.20539705 0.198249  ]
+the large output alone: [0.20489162 0.20539707 0.19824898]
 ```
 
 Agreement to six digits with the unstandardized joint run. The first output
@@ -386,19 +386,19 @@ print("S1_conf:", result.S1_conf)
 ```
 
 ```
-ot:      [0.20126826 0.27642566 0.09550272]
-ot_conf: [[0.19533463 0.2703142  0.09075195]
- [0.21177857 0.29103354 0.10534613]]
-S1:      [0.3132569  0.44199982 0.0043779 ]
-S1_conf: [[0.30253425 0.4288566  0.00327331]
- [0.32742247 0.46053672 0.01214939]]
+ot:      [0.20126827 0.27642566 0.09550273]
+ot_conf: [[0.19629346 0.26946765 0.0918577 ]
+ [0.21386443 0.29306957 0.10598918]]
+S1:      [0.31325686 0.44199982 0.0043779 ]
+S1_conf: [[0.3014149  0.4267521  0.00383463]
+ [0.33134738 0.46290246 0.01351939]]
 ```
 
 Every `*_conf` is shaped `(2, ...)`: row 0 lower, row 1 upper. They are
 `None` when `n_bootstrap` is 0, which is the default. The three `ot`
 intervals here do not overlap, so the ranking is supported by the data. x3's
-`S1_conf` is [0.0033, 0.0121], which brackets a first-order index whose true
-value is 0, while its `ot_conf` of [0.091, 0.105] is nowhere near zero. Same
+`S1_conf` is [0.0038, 0.0135], which brackets a first-order index whose true
+value is 0, while its `ot_conf` of [0.092, 0.106] is nowhere near zero. Same
 input, same rows, and the two intervals disagree because they are measuring
 different things.
 

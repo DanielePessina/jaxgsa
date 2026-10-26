@@ -109,7 +109,7 @@ jaxgsa.Problem(names=("a", "a"), bounds=((0.0, 1.0), (0.0, 1.0)))
 
 ```
 ValueError: parameter names must be unique, but ['a'] appear more than once.
-Rename the duplicated parameters so every name is distinct.
+Rename the duplicated entries so every name is distinct.
 ```
 
 ```python
@@ -117,7 +117,7 @@ jaxgsa.Problem(names=("a", 2), bounds=((0.0, 1.0), (0.0, 1.0)))
 ```
 
 ```
-ValueError: parameter names must be strings, got [2]. Convert each name with
+ValueError: parameter names must be strings, got [2]. Convert each entry with
 str(...) when declaring the problem.
 ```
 

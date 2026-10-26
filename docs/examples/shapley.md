@@ -95,15 +95,16 @@ jaxgsa.shapley.analyze
     backend fit + Shapley (includes compile on the first call): 2.112 s
     backend: pce
     order: 8
+    batch_size: 2000 (resolved from the memory budget)
   results: top 3 of 3 parameters by Sh
     1. x2  Sh=0.4418
     2. x1  Sh=0.4362
     3. x3  Sh=0.122
-Sh: [0.43615592 0.44182348 0.12202042]
-sum: 0.9999998
-S1: [3.1413424e-01 4.4180435e-01 9.9179010e-07]
-ST: [0.55818665 0.4418516  0.24404898]
-explained_variance: 1.0339365
+Sh: [0.43615595 0.44182357 0.12202043]
+sum: 0.99999994
+S1: [3.1413427e-01 4.4180450e-01 9.9165698e-07]
+ST: [0.55818665 0.4418517  0.24404901]
+explained_variance: 0.99969065
 ```
 
 The summary block prints by default. `verbose=False` silences it. The
@@ -125,7 +126,7 @@ x2 is the purely additive input on Ishigami — it enters only through
 `Sh = 0.4418` and `ST = 0.4419` here, against an exact 0.4424. Where the three
 indices agree, the input acts alone and any one of them is the whole story.
 
-The sum prints 0.9999998 rather than 1. That is float32 rounding over a
+The sum prints 0.99999994 rather than 1. That is float32 rounding over a
 165-term expansion, not a modelling gap. Do not chase it.
 
 ![Shapley effects on Ishigami bracketed between S1 and ST for every input, from the PCE backend](./figures/shapley_gsa_ishigami-s-1-leq-mathrm-sh-leq-s-t-pce-backend-o.png)
